@@ -269,7 +269,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         return {}
 
 
-        raise serializers.ValidationError("Value must be valid JSON or empty.")
+
 
     def validate(self, attrs):
         """
