@@ -244,6 +244,25 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
         return instance
 
+    def validate_custom_properties(self, value):
+        """
+        Allow empty string or null for custom_properties by normalizing to {}.
+        Also accept JSON strings and parse them.
+        This prevents "Value must be valid JSON." errors when the field is left blank.
+        """
+        if value in ("", None):
+            return {}
+        # If the frontend sends a JSON string, try to parse it
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                raise serializers.ValidationError("Value must be valid JSON or empty.")
+        # Otherwise assume DRF already gave us a proper python object (dict / list / etc.)
+        return value
+
+
+
     def create(self, validated_data):
         # Handle enable_vod preference and auto_enable_new_groups settings during creation
         enable_vod = validated_data.pop("enable_vod", False)
