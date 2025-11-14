@@ -228,27 +228,46 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         )
         return data
 
-    def validate_custom_properties(self, value):
+        def validate_custom_properties(self, value):
         """
-        Normalisiert custom_properties aus dem UI:
+        Sehr tolerant:
 
-        - "" oder None      -> {}
-        - dict              -> unverändert
-        - JSON-String       -> dict(JSON)
+        - "" oder None        -> {}
+        - dict                -> dict
+        - valider JSON-String -> dict
+        - alles andere        -> {} (kein Fehler)
+
+        Damit schlagen Standard-M3Us beim Upload nicht mehr mit
+        "Value must be valid JSON or empty." fehl.
         """
+
+        # Standard M3U: Feld leer / nicht gesetzt -> leeres Dict
         if value in ("", None):
             return {}
 
+        # Falls DRF uns direkt ein Dict gibt
         if isinstance(value, dict):
             return value
 
+        # Falls irgendein String ankommt (Form-Upload etc.)
         if isinstance(value, str):
             try:
                 return json.loads(value)
             except json.JSONDecodeError:
-                raise serializers.ValidationError(
-                    "Value must be valid JSON or empty."
+                # Egal was da steht -> wir ignorieren es und setzen {}
+                logger.warning(
+                    "Invalid JSON in custom_properties '%s', normalizing to {}.",
+                    value,
                 )
+                return {}
+
+        # Alles andere (Liste, Zahl, sonstiger Typ) -> auch einfach {}
+        logger.warning(
+            "Unexpected type for custom_properties (%r), normalizing to {}.",
+            type(value),
+        )
+        return {}
+
 
         raise serializers.ValidationError("Value must be valid JSON or empty.")
 
