@@ -17,14 +17,17 @@ class RelaxedJSONField(serializers.JSONField):
     """
     JSONField, das auch "", null und JSON-Strings akzeptiert.
 
-    - "" oder null  -> {}
-    - dict / list   -> wird direkt übernommen
-    - JSON-String   -> wird mit json.loads() geparst
+    Speziell für custom_properties:
+
+    - "" oder null      -> {}
+    - dict / list       -> wird direkt übernommen
+    - JSON-String       -> dict(JSON)
+    - sonstiger String  -> WARNING loggen, {} zurückgeben (keinen Fehler werfen!)
     """
 
     def to_internal_value(self, data):
         # komplett leer -> leeres dict
-        if data in ("", None):
+        if data in ("", None, {}):
             return {}
 
         # Falls Frontend schon ein dict/list schickt
@@ -36,10 +39,19 @@ class RelaxedJSONField(serializers.JSONField):
             try:
                 return json.loads(data)
             except ValueError:
-                raise serializers.ValidationError("Value must be valid JSON or empty.")
+                # Hier NICHT mehr abbrechen, sondern einfach {} verwenden
+                logger.warning(
+                    "RelaxedJSONField: could not parse custom_properties '%s', using {} instead",
+                    data,
+                )
+                return {}
 
-        # Alles andere an den Standard-JSONField geben (der dann ggf. Fehler wirft)
-        return super().to_internal_value(data)
+        # Fallback: alles andere einfach {} (maximal tolerant)
+        logger.warning(
+            "RelaxedJSONField: unexpected type %s for custom_properties, using {} instead",
+            type(data),
+        )
+        return {}
 
 
 class M3UFilterSerializer(serializers.ModelSerializer):
@@ -162,7 +174,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         validators=[validate_flexible_url],
     )
 
-    # Hier kommt unser toleranter JSON-Field zum Einsatz
+    # Unser maximal toleranter JSON-Field
     custom_properties = RelaxedJSONField(required=False, allow_null=True)
 
     enable_vod = serializers.BooleanField(required=False, write_only=True)
@@ -248,8 +260,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             custom_props = validated_data.get("custom_properties") or {}
 
         if not isinstance(custom_props, dict):
-            # falls z.B. ein String kam, hat RelaxedJSONField schon konvertiert
-            # oder wir erzwingen hier ein dict
+            # falls z.B. ein String kam, unseren RelaxedJSONField-Fallback respektieren
             custom_props = {}
 
         # Flags in custom_properties schreiben
