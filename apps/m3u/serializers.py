@@ -1,14 +1,14 @@
-import json
-import logging
-
 from core.utils import validate_flexible_url
 from rest_framework import serializers, status
 from rest_framework.response import Response
-
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
-from apps.channels.serializers import ChannelGroupM3UAccountSerializer
+from apps.channels.serializers import (
+    ChannelGroupM3UAccountSerializer,
+)
+import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
     filters = serializers.SerializerMethodField()
 
-    # Include user_agent as a field using its primary key.
+    # Include user_agent as a mandatory field using its primary key.
     user_agent = serializers.PrimaryKeyRelatedField(
         queryset=UserAgent.objects.all(),
         required=False,
@@ -135,11 +135,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
     profiles = M3UAccountProfileSerializer(many=True, read_only=True)
 
-    # Channel groups
+    # (Hinweis: DRF nutzt read_only_fields normalerweise aus Meta,
+    # aber wir lassen das hier wie im Original.)
+    read_only_fields = ["locked", "created_at", "updated_at"]
+
+    # channel_groups = serializers.SerializerMethodField()
     channel_groups = ChannelGroupM3UAccountSerializer(
-        source="channel_group",
-        many=True,
-        required=False,
+        source="channel_group", many=True, required=False
     )
 
     server_url = serializers.CharField(
@@ -147,6 +149,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         allow_blank=True,
         allow_null=True,
         validators=[validate_flexible_url],
+    )
+
+    # Wichtig: custom_properties super tolerant machen
+    custom_properties = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
     )
 
     enable_vod = serializers.BooleanField(required=False, write_only=True)
@@ -158,16 +167,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     )
     auto_enable_new_groups_series = serializers.BooleanField(
         required=False, write_only=True
-    )
-
-    # WICHTIG:
-    # Wir überschreiben das JSONField aus dem Model hier als CharField,
-    # damit leere Strings / null vom Frontend nicht zu
-    # "Value must be valid JSON." führen.
-    custom_properties = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        allow_null=True,
     )
 
     class Meta:
@@ -192,7 +191,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "account_type",
             "username",
             "password",
-            "mac_address",
+            "mac_address",  # MAC Feld aus dem Modell
             "stale_stream_days",
             "priority",
             "status",
@@ -202,7 +201,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "auto_enable_new_groups_vod",
             "auto_enable_new_groups_series",
         ]
-        read_only_fields = ["locked", "created_at", "updated_at"]
         extra_kwargs = {
             "password": {
                 "required": False,
@@ -228,67 +226,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         )
         return data
 
-        def validate_custom_properties(self, value):
-        """
-        Sehr tolerant:
-
-        - "" oder None        -> {}
-        - dict                -> dict
-        - valider JSON-String -> dict
-        - alles andere        -> {} (kein Fehler)
-
-        Damit schlagen Standard-M3Us beim Upload nicht mehr mit
-        "Value must be valid JSON or empty." fehl.
-        """
-
-        # Standard M3U: Feld leer / nicht gesetzt -> leeres Dict
-        if value in ("", None):
-            return {}
-
-        # Falls DRF uns direkt ein Dict gibt
-        if isinstance(value, dict):
-            return value
-
-        # Falls irgendein String ankommt (Form-Upload etc.)
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                # Egal was da steht -> wir ignorieren es und setzen {}
-                logger.warning(
-                    "Invalid JSON in custom_properties '%s', normalizing to {}.",
-                    value,
-                )
-                return {}
-
-        # Alles andere (Liste, Zahl, sonstiger Typ) -> auch einfach {}
-        logger.warning(
-            "Unexpected type for custom_properties (%r), normalizing to {}.",
-            type(value),
-        )
-        return {}
-
-
-
-
-    def validate(self, attrs):
-        """
-        Für STANDARD M3U Accounts (Typ STD) erzwingen wir immer ein leeres dict,
-        da diese keine Proxy / MAC / Extra-Daten haben.
-        """
-        account_type = attrs.get(
-            "account_type",
-            getattr(self.instance, "account_type", None),
-        )
-
-        if account_type in (
-            getattr(M3UAccount.Types, "STADNARD", None),  # ja, im Model ist es so geschrieben
-            "STD",
-        ):
-            attrs["custom_properties"] = {}
-
-        return super().validate(attrs)
-
     def update(self, instance, validated_data):
         # Handle enable_vod preference and auto_enable_new_groups settings
         enable_vod = validated_data.pop("enable_vod", None)
@@ -302,20 +239,20 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "auto_enable_new_groups_series", None
         )
 
-        # Get existing custom_properties
-        custom_props = instance.custom_properties or {}
+        # Basis für custom_properties:
+        # - Wenn etwas mitgeschickt wurde -> das nehmen
+        # - Sonst aktuelle instance.custom_properties oder {}
+        custom_props = validated_data.get(
+            "custom_properties", instance.custom_properties or {}
+        )
 
         # Update preferences
         if enable_vod is not None:
             custom_props["enable_vod"] = enable_vod
         if auto_enable_new_groups_live is not None:
-            custom_props["auto_enable_new_groups_live"] = (
-                auto_enable_new_groups_live
-            )
+            custom_props["auto_enable_new_groups_live"] = auto_enable_new_groups_live
         if auto_enable_new_groups_vod is not None:
-            custom_props["auto_enable_new_groups_vod"] = (
-                auto_enable_new_groups_vod
-            )
+            custom_props["auto_enable_new_groups_vod"] = auto_enable_new_groups_vod
         if auto_enable_new_groups_series is not None:
             custom_props["auto_enable_new_groups_series"] = (
                 auto_enable_new_groups_series
@@ -354,6 +291,60 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
         return instance
 
+    def validate_custom_properties(self, value):
+        """
+        Sehr tolerante Validierung:
+        - "" oder None => {}
+        - dict => dict
+        - JSON-String => json.loads(...)
+        - alles andere oder kaputtes JSON => {} (kein Fehler!)
+        """
+
+        if value in ("", None, {}, []):
+            return {}
+
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "custom_properties JSON konnte nicht geparst werden, setze auf {}: %r",
+                    value,
+                )
+                return {}
+
+        # Irgendein anderer Typ (z.B. Liste) -> einfach {} und kein Fehler
+        logger.warning(
+            "Unerwarteter Typ für custom_properties (%s), setze auf {}",
+            type(value),
+        )
+        return {}
+
+    def validate(self, attrs):
+        """
+        Erzwinge für STANDARD (STD) M3U Accounts immer ein leeres dict,
+        weil diese keinen Proxy / MAC / Extra-Daten haben.
+        """
+
+        account_type = attrs.get("account_type")
+        if account_type is None and self.instance is not None:
+            account_type = self.instance.account_type
+
+        # Versuche, den Enum-Wert zu lesen, fallback ist der String "STD"
+        try:
+            standard_value = M3UAccount.Types.STADNARD
+        except AttributeError:
+            standard_value = "STD"
+
+        if account_type == standard_value:
+            # Für Standard-Accounts brauchen wir nie custom_properties
+            attrs["custom_properties"] = {}
+
+        return super().validate(attrs)
+
     def create(self, validated_data):
         # Handle enable_vod preference and auto_enable_new_groups settings during creation
         enable_vod = validated_data.pop("enable_vod", False)
@@ -367,16 +358,14 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "auto_enable_new_groups_series", True
         )
 
-        # Parse existing custom_properties (already normalised by validate_custom_properties)
+        # Parse existing custom_properties or create new
         custom_props = validated_data.get("custom_properties", {}) or {}
 
         # Set preferences (default to True for auto_enable_new_groups)
         custom_props["enable_vod"] = enable_vod
         custom_props["auto_enable_new_groups_live"] = auto_enable_new_groups_live
         custom_props["auto_enable_new_groups_vod"] = auto_enable_new_groups_vod
-        custom_props["auto_enable_new_groups_series"] = (
-            auto_enable_new_groups_series
-        )
+        custom_props["auto_enable_new_groups_series"] = auto_enable_new_groups_series
         validated_data["custom_properties"] = custom_props
 
         return super().create(validated_data)
