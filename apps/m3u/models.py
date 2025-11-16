@@ -6,10 +6,35 @@ from django.dispatch import receiver
 from apps.channels.models import StreamProfile
 from django_celery_beat.models import PeriodicTask
 from core.models import CoreSettings, UserAgent
+from django.utils import timezone   # <--- NEU
+
 
 CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
-
+def parse_mac_list(text):
+    """
+    Akzeptiert:
+      - "MAC1, MAC2"
+      - "MAC1; MAC2"
+      - "MAC1\\nMAC2"
+    Entfernt Doppelte und Leerwerte, Reihenfolge bleibt erhalten.
+    """
+    if not text:
+        return []
+    # Vereinheitliche Trenner
+    for sep in [";", "\n", "\r"]:
+        text = text.replace(sep, ",")
+    parts = [p.strip() for p in text.split(",")]
+    seen = set()
+    result = []
+    for p in parts:
+        if not p:
+            continue
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+    
 class M3UAccount(models.Model):
     class Types(models.TextChoices):
         STADNARD = "STD", "Standard"
@@ -102,6 +127,57 @@ class M3UAccount(models.Model):
         help_text="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content.",
     )
 
+     # --------- MAC Helper / Multi-MAC ---------
+
+    def _ensure_macs_from_mac_address(self):
+        """
+        Einmalige Migration/Hilfe: wenn noch keine M3UAccountMacs existieren,
+        aber das alte Feld mac_address gesetzt ist, daraus MAC-Einträge machen.
+        Unterstützt:
+        - einzelne MAC
+        - mehrere MACs via Komma / Semikolon / Zeilenumbrüche
+        """
+        # wenn schon MAC-Objekte existieren → nichts tun
+        if hasattr(self, "macs") and self.macs.exists():
+            return
+
+        if not self.mac_address:
+            return
+
+        mac_addresses = parse_mac_list(self.mac_address)
+        from .models import M3UAccountMac  # wird erst zur Laufzeit aufgelöst
+
+        for idx, addr in enumerate(mac_addresses):
+            M3UAccountMac.objects.get_or_create(
+                account=self,
+                address=addr,
+                defaults={"priority": idx},
+            )
+
+    def get_ordered_macs(self):
+        """
+        Alle MACs dieses Accounts in Prioritäts-Reihenfolge.
+        """
+        self._ensure_macs_from_mac_address()
+        return self.macs.all().order_by("priority", "id")
+
+    def get_first_valid_mac(self):
+        """
+        Für M3U/Channel-Build & Default-Streaming:
+        nimmt die erste MAC, die für Streaming gültig ist.
+        """
+        for mac in self.get_ordered_macs():
+            if mac.is_valid_for_streaming:
+                return mac
+        return None
+
+    def get_candidate_macs_for_streaming(self):
+        """
+        Liefert alle MACs, die beim Streaming probiert werden sollen.
+        EXPIRED + ERROR werden hier bereits rausgefiltert.
+        """
+        return [m for m in self.get_ordered_macs() if m.is_valid_for_streaming]
+        
     def __str__(self):
         return self.name
 
@@ -157,6 +233,57 @@ class M3UAccount(models.Model):
     #     """Return all streams linked to this account with enabled ChannelGroups."""
     #     return self.streams.filter(channel_group__in=ChannelGroup.objects.filter(m3u_account__enabled=True))
 
+class M3UAccountMac(models.Model):
+    class Status(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"
+        VALID = "valid", "Valid"
+        EXPIRED = "expired", "Expired"
+        ERROR = "error", "Error"
+
+    account = models.ForeignKey(
+        "M3UAccount",
+        related_name="macs",
+        on_delete=models.CASCADE,
+    )
+    address = models.CharField(
+        max_length=32,
+        help_text="MAC address (or STB-Portal identifier)",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.UNKNOWN,
+    )
+    # Text aus dem Portal (z.B. „Valid until 2025-01-01“)
+    expires_text = models.CharField(max_length=255, null=True, blank=True)
+    # optionales echtes Datum (kannst du später noch parsen)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    # Reihenfolge / Priorität: 0 = höchste Prio
+    priority = models.PositiveIntegerField(default=0)
+
+    # letzter Fehler (z.B. "Max connections reached")
+    last_error = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        ordering = ["priority", "id"]
+
+    def __str__(self):
+        return f"{self.address} ({self.status})"
+
+    @property
+    def is_valid_for_streaming(self):
+        """
+        Für Streaming:
+        - EXPIRED + ERROR → niemals probieren
+        - VALID + UNKNOWN → dürfen probiert werden
+        - bei VALID + expires_at in der Vergangenheit → nicht probieren
+        """
+        if self.status in (self.Status.EXPIRED, self.Status.ERROR):
+            return False
+        if self.status == self.Status.VALID and self.expires_at:
+            return self.expires_at > timezone.now()
+        return True
 
 class M3UFilter(models.Model):
     """Defines filters for M3U accounts based on stream name or group title."""
