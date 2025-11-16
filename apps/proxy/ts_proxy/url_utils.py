@@ -4,7 +4,7 @@ Utilities for handling stream URLs and transformations.
 
 import logging
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 from django.shortcuts import get_object_or_404
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile, M3UAccountMac
@@ -16,92 +16,115 @@ import requests
 
 logger = get_logger()
 
-def resolve_mac_stream_with_failover(m3u_account, stream, input_url: str) -> Optional[str]:
-    """
-    Versucht für einen MAC-Account mehrere MACs nacheinander:
-    - nutzt account.get_candidate_macs_for_streaming()
-    - bei Fehlern (expired, max connections, etc.) → nächste MAC
-    - wenn keine MAC funktioniert → None (damit oberes Failover Backup-Streams nutzt)
-    """
-    # Kandidaten holen (EXPIRED/ERROR sind schon gefiltert)
-    try:
-        candidate_macs = m3u_account.get_candidate_macs_for_streaming()
-    except AttributeError:
-        # Falls altes Modell ohne Helper → fallback auf mac_address
-        candidate_macs = []
-        if getattr(m3u_account, "mac_address", None):
-            dummy = type("Dummy", (), {})()
-            dummy.address = m3u_account.mac_address
-            candidate_macs = [dummy]
-
-    if not candidate_macs:
-        logger.warning(f"No valid MAC candidates for account {m3u_account.id}")
-        return None
-
-    stream_props = stream.custom_properties or {}
-    cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or ""
-    if not cmd:
-        cmd = input_url
-
-    last_error = None
-
-    for mac_entry in candidate_macs:
-        mac_address = getattr(mac_entry, "address", None)
-        try:
-            props = m3u_account.custom_properties or {}
-            proxy = props.get("proxy")
-            timezone = props.get("timezone", "Europe/Berlin")
-
-            client = MacPortalClient(
-                base_url=m3u_account.server_url,
-                mac=mac_address,
-                proxy=proxy,
-                timezone=timezone,
-            )
-
-            resolved_url = client.create_link(cmd)
-
-            # Wenn wir hier sind, hat die MAC funktioniert
-            if isinstance(mac_entry, M3UAccountMac):
-                if mac_entry.status != M3UAccountMac.Status.EXPIRED:
-                    mac_entry.status = M3UAccountMac.Status.VALID
-                mac_entry.last_error = ""
-                mac_entry.save(update_fields=["status", "last_error"])
-
-            return resolved_url
-
-        except (MacPortalError, Exception) as e:
-            msg = str(e).lower()
-            last_error = str(e)
-
-            if isinstance(mac_entry, M3UAccountMac):
-                mac_entry.last_error = last_error
-                if "expir" in msg or "no active" in msg or "expired" in msg:
-                    mac_entry.status = M3UAccountMac.Status.EXPIRED
-                else:
-                    mac_entry.status = M3UAccountMac.Status.ERROR
-                mac_entry.save(update_fields=["status", "last_error"])
-
-            logger.warning(
-                f"MAC {mac_address} failed for stream {stream.id} (account {m3u_account.id}): {e}"
-            )
-            # nächste MAC probieren
-
-    logger.error(
-        f"All MACs failed for account {m3u_account.id}, stream {stream.id}. Last error: {last_error}"
-    )
-    return None
 
 def get_stream_object(id: str):
     try:
         logger.info(f"Fetching channel ID {id}")
         return get_object_or_404(Channel, uuid=id)
-    except:
+    except Exception:
         # UUID check failed, assume stream hash
         logger.info(f"Fetching stream hash {id}")
         return get_object_or_404(Stream, stream_hash=id)
 
-def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]:
+
+def _resolve_mac_stream_with_failover(m3u_account: M3UAccount, stream: Stream) -> Tuple[Optional[str], Optional[M3UAccountMac], Optional[str]]:
+    """Resolve a MAC/STB-Portal stream URL using the first valid MAC.
+
+    Tries MACs in priority order. Skips those marked EXPIRED/ERROR or with past expires_at.
+    On errors during playback (expired, max connections, generic error) we mark status on the
+    corresponding M3UAccountMac so it won't be retried until next refresh.
+    """
+    if m3u_account.account_type != M3UAccount.Types.MAC:
+        return stream.url, None, None
+
+    props = m3u_account.custom_properties or {}
+    proxy = props.get("proxy")
+    timezone = props.get("timezone", "Europe/Berlin")
+
+    # determine command for the portal
+    stream_props = stream.custom_properties or {}
+    cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
+
+    error_messages = []
+
+    # get candidate MACs in priority order
+    try:
+        candidates = m3u_account.get_candidate_macs_for_streaming()
+    except Exception as e:
+        logger.error(f"Error getting candidate MACs for account {m3u_account.id}: {e}")
+        candidates = []
+
+    # If we have no explicit MAC records yet, fall back to legacy single MAC behaviour
+    if not candidates and m3u_account.mac_address:
+        logger.debug(f"No candidate M3UAccountMac rows for account {m3u_account.id}, using legacy mac_address")
+        mac_value = m3u_account.mac_address
+        try:
+            client = MacPortalClient(
+                base_url=m3u_account.server_url,
+                mac=mac_value,
+                proxy=proxy,
+                timezone=timezone,
+            )
+            url = client.create_link(cmd)
+            return url, None, None
+        except Exception as e:
+            logger.error(f"Legacy MAC stream resolution failed for account {m3u_account.id}: {e}")
+            return None, None, str(e)
+
+    for mac_entry in candidates:
+        mac_value = mac_entry.address
+        try:
+            client = MacPortalClient(
+                base_url=m3u_account.server_url,
+                mac=mac_value,
+                proxy=proxy,
+                timezone=timezone,
+            )
+            url = client.create_link(cmd)
+            # Successfully built link → mark valid and return
+            try:
+                mac_entry.status = M3UAccountMac.Status.VALID
+                mac_entry.last_checked = timezone.now()
+                mac_entry.last_error = None
+                mac_entry.save(update_fields=["status", "last_checked", "last_error"])
+            except Exception:
+                pass
+            return url, mac_entry, None
+        except MacPortalError as e:
+            msg = str(e)
+            error_messages.append(f"{mac_value}: {msg}")
+            # Heuristik: expired / keine aktive Subscription → EXPIRED, sonst ERROR
+            status = M3UAccountMac.Status.ERROR
+            lowered = msg.lower()
+            if "expir" in lowered or "no active" in lowered or "trial ended" in lowered:
+                status = M3UAccountMac.Status.EXPIRED
+            try:
+                mac_entry.status = status
+                mac_entry.last_error = msg
+                mac_entry.last_checked = timezone.now()
+                mac_entry.save(update_fields=["status", "last_error", "last_checked"])
+            except Exception:
+                pass
+            continue
+        except Exception as e:
+            msg = str(e)
+            error_messages.append(f"{mac_value}: {msg}")
+            try:
+                mac_entry.status = M3UAccountMac.Status.ERROR
+                mac_entry.last_error = msg
+                mac_entry.last_checked = timezone.now()
+                mac_entry.save(update_fields=["status", "last_error", "last_checked"])
+            except Exception:
+                pass
+            continue
+
+    if error_messages:
+        return None, None, "; ".join(error_messages)
+
+    return None, None, "No usable MAC found"
+
+
+def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], bool, Optional[int]]:
     """
     Generate the appropriate stream URL for a channel or stream based on its profile settings.
 
@@ -140,17 +163,13 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
             # Resolve MAC / STB-Portal command into a real URL if needed
-           # Resolve MAC / STB-Portal command into a real URL if needed
             input_url = stream.url
             if m3u_account.account_type == M3UAccount.Types.MAC:
-                resolved = resolve_mac_stream_with_failover(m3u_account, stream, input_url)
-                if not resolved:
-                    logger.error(
-                        f"Failed to resolve MAC stream for direct preview (stream ID {stream.id}) – no working MAC"
-                    )
+                input_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
+                if not input_url:
+                    logger.error(f"Failed to resolve MAC stream for direct preview (stream ID {stream.id}): {error}")
                     return None, None, False, None
-                input_url = resolved
-                
+
             stream_url = input_url
 
             # Check if the stream has its own stream_profile set, otherwise use default
@@ -204,8 +223,15 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
             logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
         # Generate stream URL based on the selected profile
-        input_url = stream.url
-        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+        if m3u_account.account_type == M3UAccount.Types.MAC:
+            # For MAC accounts, resolve via portal + multi-MAC failover, no regex transform
+            stream_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
+            if not stream_url:
+                logger.error(f"Failed to resolve MAC stream for channel {channel_id}: {error}")
+                return None, None, False, None
+        else:
+            input_url = stream.url
+            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
 
         # Check if transcoding is needed
         stream_profile = channel.get_stream_profile()
@@ -220,6 +246,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")
         return None, None, False, None
+
 
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
     """
@@ -251,6 +278,7 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
     except Exception as e:
         logger.error(f"Error transforming URL: {e}")
         return input_url  # Return original URL on error
+
 
 def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] = None) -> dict:
     """
@@ -339,28 +367,17 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
 
         # Check connections left
         m3u_account = M3UAccount.objects.get(id=profile.m3u_account.id)
-        #connections_left = get_connections_left(m3u_profile_id)
-
-        #if connections_left <= 0:
-            #logger.warning(f"No connections left for M3U account {m3u_account.id}")
-            #return {'error': 'No connections left'}
 
         # Get the user agent from the M3U account
         user_agent = m3u_account.get_user_agent().user_agent
 
-        # Basis-URL ist zunächst die gespeicherte URL
-        input_url = stream.url
-
-        # Wenn es ein MAC-Account ist → MAC-Failover + create_link nutzen
+        # Generate URL using the transform function directly (or portal for MAC)
         if m3u_account.account_type == M3UAccount.Types.MAC:
-            resolved = resolve_mac_stream_with_failover(m3u_account, stream, input_url)
-            if not resolved:
-                return {'error': 'No working MAC for this account'}
-            input_url = resolved
-
-        # Danach wie gewohnt transformieren
-        stream_url = transform_url(input_url, profile.search_pattern, profile.replace_pattern)
-
+            stream_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
+            if not stream_url:
+                return {'error': error or 'Failed to resolve MAC stream'}
+        else:
+            stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern)
 
         # Get transcode info from the channel's stream profile
         stream_profile = channel.get_stream_profile()
@@ -378,6 +395,7 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
     except Exception as e:
         logger.error(f"Error getting stream info for switch: {e}", exc_info=True)
         return {'error': f'Error: {str(e)}'}
+
 
 def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None) -> List[dict]:
     """
@@ -497,6 +515,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
         return []
 
+
 def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
     """
     Validate if a stream URL is accessible without downloading the full content.
@@ -609,6 +628,7 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
         if 'session' in locals():
             session.close()
 
+
 def get_connections_left(m3u_profile_id: int) -> int:
     """
     Get the number of available connections left for an M3U profile.
@@ -655,9 +675,10 @@ def get_connections_left(m3u_profile_id: int) -> int:
 
 
 # === BEGIN: profile-first failover helpers ===
-from typing import Optional, List
+from typing import Optional, List as _List  # rename to avoid confusion
 
-def get_next_profiles_for_stream(channel_id: str, stream_id: int, exclude_profile_id: Optional[int] = None) -> List[dict]:
+
+def get_next_profiles_for_stream(channel_id: str, stream_id: int, exclude_profile_id: Optional[int] = None) -> _List[dict]:
     """
     Return available M3U profiles for THIS stream in order (default first),
     respecting max_streams and current usage. Optionally exclude the current profile.
@@ -724,20 +745,16 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
         stream = get_object_or_404(Stream, pk=stream_id)
         m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
 
-                # Basis-URL
-        input_url = stream.url
-
-        # MAC-Accounts: dynamische URL per create_link + Multi-MAC-Failover
         m3u_account = m3u_profile.m3u_account
+
         if m3u_account.account_type == M3UAccount.Types.MAC:
-            resolved = resolve_mac_stream_with_failover(m3u_account, stream, input_url)
-            if not resolved:
-                return {"error": "No working MAC for this account"}
-            input_url = resolved
-
-        # URL-Pattern anwenden
-        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
-
+            input_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
+            if not input_url:
+                return {"error": error or "Failed to resolve MAC stream"}
+            stream_url = input_url
+        else:
+            input_url = stream.url
+            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
 
         stream_profile = channel.get_stream_profile()
         transcode = False if (stream_profile is None or stream_profile.is_proxy()) else True
@@ -757,6 +774,6 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
             "m3u_profile_id": m3u_profile.id,
         }
     except Exception as e:
-        logger.error(f"Error in get_stream_info_for_profile: {e}", exc_info=True)
+        logger.error(f"Error in get_stream_info_for_profile: {e}")
         return {"error": str(e)}
 # === END: profile-first failover helpers ===
