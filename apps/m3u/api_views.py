@@ -17,7 +17,7 @@ from django.conf import settings
 from .tasks import refresh_m3u_groups
 import json
 
-from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
+from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
@@ -263,6 +263,35 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to update group settings: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+            
+    @action(detail=True, methods=["post"], url_path="delete-expired-macs")
+    def delete_expired_macs(self, request, pk=None):
+        """
+        Löscht alle EXPIRED-MAC-Einträge für diesen Account.
+        Wird vom Button im M3U-Manager verwendet.
+        """
+        account = self.get_object()
+
+        # Nur MAC-Accounts behandeln (vorsichtshalber)
+        if account.account_type != M3UAccount.Types.MAC:
+            return Response(
+                {"error": "This action is only valid for MAC accounts."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # EXPIRED-MACs löschen
+        deleted_count, _ = account.macs.filter(
+            status=M3UAccountMac.Status.EXPIRED
+        ).delete()
+
+        # Aktualisierte Account-Daten zurückgeben (inkl. frischer MAC-Liste)
+        serializer = self.get_serializer(account)
+        return Response(
+            {
+                "deleted": deleted_count,
+                "account": serializer.data,
+            }
+        )
 
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
