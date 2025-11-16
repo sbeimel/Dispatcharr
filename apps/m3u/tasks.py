@@ -1347,12 +1347,16 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             release_task_lock("refresh_m3u_account_groups", account_id)
             return error_msg, None
 
-        # sicherstellen, dass aus mac_address ggf. MAC-Objekte entstanden sind
-        account._ensure_macs_from_mac_address()
+        # Sync DB MAC entries from raw mac_address field (order = priority)
+        try:
+            account._ensure_macs_from_mac_address()
+        except Exception as e:
+            logger.warning(f"Failed to sync MAC list for account {account_id}: {e}")
+
         mac_entries = list(account.macs.all().order_by("priority", "id"))
 
         if not mac_entries:
-            error_msg = "Missing MAC address for MAC account"
+            error_msg = "No MAC address configured for MAC account"
             logger.error(error_msg)
             account.status = M3UAccount.Status.ERROR
             account.last_message = error_msg
@@ -1363,67 +1367,106 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             release_task_lock("refresh_m3u_account_groups", account_id)
             return error_msg, None
 
-        primary_channels = None
+        props = account.custom_properties or {}
+        proxy = props.get("proxy")
+        timezone_str = props.get("timezone", "Europe/Berlin")  # portal timezone string
 
-        for mac_entry in mac_entries:
+        primary_channels = None  # channels used to actually build groups/streams
+
+        from .models import M3UAccount, M3UAccountMacMac  # local import to avoid circular
+
+        for idx, mac_entry in enumerate(mac_entries):
+            mac_value = mac_entry.address
+            logger.info("MAC account %s: checking MAC %s (priority %s)", account_id, mac_value, mac_entry.priority)
+
+            client = MacPortalClient(
+                base_url=account.server_url,
+                mac=mac_value,
+                proxy=proxy,
+                timezone=timezone_str,
+            )
+
             try:
-                props = account.custom_properties or {}
-                proxy = props.get("proxy")
-                timezone = props.get("timezone", "Europe/Berlin")
-
-                client = MacPortalClient(
-                    base_url=account.server_url,
-                    mac=mac_entry.address,
-                    proxy=proxy,
-                    timezone=timezone,
-                )
-
-                # Ablaufinfo (fürs UI)
+                # Fetch expiry info for this MAC
                 try:
                     expiry_info = client.get_expires()
-                    mac_entry.expires_text = expiry_info
-                    logger.info(
-                        f"MAC account {account_id} ({mac_entry.address}) expiry info: {expiry_info}"
-                    )
+                    logger.info(f"MAC %s expiry info: %s", mac_value, expiry_info)
                 except MacPortalError as exp_err:
-                    logger.warning(
-                        f"Could not fetch MAC expiry info for {mac_entry.address}: {exp_err}"
-                    )
-                    mac_entry.last_error = str(exp_err)
+                    expiry_info = None
+                    logger.warning(f"Could not fetch MAC expiry info for {mac_value}: {exp_err}")
 
-                # Nur solange noch kein primary gewählt ist, Channels laden
-                if primary_channels is None:
-                    channels = client.get_channels()
-                    logger.info(
-                        "MAC account %s (MAC %s): received %s channels from portal",
-                        account_id,
-                        mac_entry.address,
-                        len(channels),
-                    )
+                # Update MAC entry with expiry info
+                try:
+                    from datetime import datetime
+                    mac_entry.last_checked = timezone.now()
+                    mac_entry.last_error = None
+
+                    if isinstance(expiry_info, dict):
+                        # Try common field names
+                        expires_text = expiry_info.get("expires") or expiry_info.get("expiry") or expiry_info.get("exp_date") or str(expiry_info)
+                    else:
+                        expires_text = str(expiry_info) if expiry_info else None
+
+                    mac_entry.expires_text = expires_text
+
+                    # Try to parse a timestamp if present
+                    mac_entry.expires_at = None
+                    if isinstance(expiry_info, dict):
+                        ts = expiry_info.get("exp_timestamp") or expiry_info.get("exp_date") or None
+                        if ts:
+                            try:
+                                if isinstance(ts, (int, float)):
+                                    mac_entry.expires_at = datetime.fromtimestamp(ts, tz=timezone.utc)
+                                elif isinstance(ts, str) and ts.isdigit():
+                                    mac_entry.expires_at = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                            except Exception:
+                                pass
+
+                    # Mark status from expiry text if we can guess
+                    status = M3UAccountMac.Status.UNKNOWN
+                    if mac_entry.expires_at and mac_entry.expires_at <= timezone.now():
+                        status = M3UAccountMac.Status.EXPIRED
+                    elif expires_text:
+                        low = expires_text.lower()
+                        if "expir" in low or "no active" in low or "ended" in low:
+                            status = M3UAccountMac.Status.EXPIRED
+                        else:
+                            status = M3UAccountMac.Status.VALID
+
+                    mac_entry.status = status
+                    mac_entry.save(update_fields=["expires_text", "expires_at", "status", "last_checked", "last_error"])
+                except Exception as e:
+                    logger.warning(f"Could not update MAC entry {mac_value} with expiry info: {e}")
+
+                # Fetch channels for this MAC
+                channels = client.get_channels()
+                logger.info(
+                    "MAC account %s: received %s channels from portal for MAC %s",
+                    account_id,
+                    len(channels),
+                    mac_value,
+                )
+
+                # Only the first MAC that returns channels is used to actually build groups/streams
+                if primary_channels is None and channels:
                     primary_channels = channels
+                    logger.info(f"Using MAC {mac_value} as primary for building groups/streams")
 
-                # Wenn wir hier sind, hat die MAC funktioniert → VALID
-                mac_entry.status = M3UAccountMac.Status.VALID
-                mac_entry.save()
 
             except (MacPortalError, requests.RequestException) as e:
-                msg = str(e).lower()
-                mac_entry.last_error = str(e)
-
-                # einfache Heuristik fürs EXPIRED-Markieren
-                if "expir" in msg or "no active" in msg or "expired" in msg:
-                    mac_entry.status = M3UAccountMac.Status.EXPIRED
-                else:
+                error_msg = f"Error fetching MAC portal data for {mac_value}: {e}"
+                logger.error(error_msg)
+                try:
                     mac_entry.status = M3UAccountMac.Status.ERROR
-
-                mac_entry.save()
-                logger.warning(
-                    f"MAC {mac_entry.address} failed during refresh for account {account_id}: {e}"
-                )
-                # nächste MAC probieren
+                    mac_entry.last_error = str(e)
+                    mac_entry.last_checked = timezone.now()
+                    mac_entry.save(update_fields=["status", "last_error", "last_checked"])
+                except Exception:
+                    pass
+                continue
 
         if primary_channels is None:
-            error_msg = "Error fetching MAC portal data: no working MAC found"
+            error_msg = "No MAC provided valid channel list"
             logger.error(error_msg)
             account.status = M3UAccount.Status.ERROR
             account.last_message = error_msg
@@ -1434,10 +1477,8 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             release_task_lock("refresh_m3u_account_groups", account_id)
             return error_msg, None
 
-        # ab hier: wie bisher – nur dass wir primary_channels verwenden
-        channels = primary_channels
-
-        for ch in channels:
+        # Normalize channels from the primary MAC into extinf_data & groups like STD accounts
+        for ch in primary_channels:
             group_title = ch.get("group") or "MAC"
             if group_title not in groups:
                 groups[group_title] = {}
@@ -1470,20 +1511,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     "attributes": attributes,
                 }
             )
-
-
-        except (MacPortalError, requests.RequestException) as e:
-            error_msg = f"Error fetching MAC portal data: {e}"
-            logger.error(error_msg)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = error_msg
-            account.save(update_fields=["status", "last_message"])
-            send_m3u_update(
-                account_id, "processing_groups", 100, status="error", error=error_msg
-            )
-            release_task_lock("refresh_m3u_account_groups", account_id)
-            return error_msg, None
-        
     else:
 
         # Here's the key change - use the success flag from fetch_m3u_lines

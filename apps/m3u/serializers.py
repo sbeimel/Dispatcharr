@@ -80,19 +80,7 @@ class M3UAccountProfileSerializer(serializers.ModelSerializer):
             "account_type": obj.m3u_account.account_type,
             "is_xtream_codes": obj.m3u_account.account_type == "XC",
         }
-class M3UAccountMacSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = M3UAccountMac
-        fields = [
-            "id",
-            "address",
-            "status",
-            "expires_text",
-            "expires_at",
-            "priority",
-            "last_error",
-        ]
-        
+
     class Meta:
         model = M3UAccountProfile
         fields = [
@@ -161,6 +149,22 @@ class M3UAccountMacSerializer(serializers.ModelSerializer):
         return super().destroy(request, *args, **kwargs)
 
 
+class M3UAccountMacSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = M3UAccountMac
+        fields = [
+            "id",
+            "address",
+            "priority",
+            "status",
+            "expires_at",
+            "expires_text",
+            "last_checked",
+            "last_error",
+        ]
+        read_only_fields = ["id", "status", "expires_at", "expires_text", "last_checked", "last_error"]
+
+
 class M3UAccountSerializer(serializers.ModelSerializer):
     """Serializer for M3U Account"""
 
@@ -173,9 +177,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     )
 
     profiles = M3UAccountProfileSerializer(many=True, read_only=True)
-
-        macs = M3UAccountMacSerializer(many=True, read_only=True)  # <--- NEU
-
 
     # channel_groups werden über Join-Tabelle abgebildet
     channel_groups = ChannelGroupM3UAccountSerializer(
@@ -196,6 +197,9 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     auto_enable_new_groups_live = serializers.BooleanField(required=False, write_only=True)
     auto_enable_new_groups_vod = serializers.BooleanField(required=False, write_only=True)
     auto_enable_new_groups_series = serializers.BooleanField(required=False, write_only=True)
+
+    # Exponieren der einzelnen MAC-Einträge (für Status/Expiry im UI)
+    macs = M3UAccountMacSerializer(many=True, read_only=True)
 
     class Meta:
         model = M3UAccount
@@ -220,7 +224,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "username",
             "password",
             "mac_address",
-            "macs",              # <--- NEU
+            "macs",
             "stale_stream_days",
             "priority",
             "status",
@@ -240,35 +244,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
     # ----------- Output (GET) -----------
 
-    # ----------- MAC Sync Helper -----------
-
-    def _sync_macs_from_mac_address(self, account, macs_text):
-        """
-        Nimmt den String aus mac_address (Komma / ; / Zeilen) und
-        synchronisiert die M3UAccountMac-Objekte:
-        - Reihenfolge → priority
-        - Nicht mehr vorhandene MACs → löschen
-        """
-        if macs_text is None:
-            return
-
-        mac_addresses = parse_mac_list(macs_text)
-        existing = {m.address: m for m in account.macs.all()}
-
-        kept = set()
-        for idx, addr in enumerate(mac_addresses):
-            kept.add(addr)
-            mac = existing.get(addr)
-            if mac is None:
-                mac = M3UAccountMac(account=account, address=addr)
-            mac.priority = idx
-            mac.save()
-
-        # alles, was nicht mehr in der Liste ist, löschen
-        for addr, mac in existing.items():
-            if addr not in kept:
-                mac.delete()
-                
     def to_representation(self, instance):
         data = super().to_representation(instance)
 
@@ -280,6 +255,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         data["auto_enable_new_groups_live"] = custom_props.get("auto_enable_new_groups_live", True)
         data["auto_enable_new_groups_vod"] = custom_props.get("auto_enable_new_groups_vod", True)
         data["auto_enable_new_groups_series"] = custom_props.get("auto_enable_new_groups_series", True)
+
+        # Für MAC-Accounts zusätzlich die normalisierte Liste zurückgeben (hilft beim Frontend-Editing)
+        if instance.account_type == M3UAccount.Types.MAC:
+            try:
+                data["mac_list"] = instance.get_mac_list()
+            except Exception:
+                data["mac_list"] = []
 
         return data
 
@@ -316,6 +298,15 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
         validated_data["custom_properties"] = custom_props
 
+    def _sync_macs_from_mac_address(self, account: M3UAccount):
+        """Helper to sync M3UAccountMac rows from account.mac_address after save."""
+        try:
+            if account.account_type != M3UAccount.Types.MAC:
+                return
+            account._ensure_macs_from_mac_address()
+        except Exception as e:
+            logger.warning("Failed to sync MAC list for account %s: %s", account.id, e)
+
     def create(self, validated_data):
         # Flags holen
         flags = self._extract_feature_flags(validated_data)
@@ -323,17 +314,14 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         # custom_properties korrekt aufbauen
         self._merge_custom_properties(instance=None, validated_data=validated_data, flags=flags)
 
-        # MACs-Text vor create sichern
-        macs_text = validated_data.get("mac_address", "") or ""
-
         account = super().create(validated_data)
 
-        # Multi-MACs anlegen / synchronisieren
-        self._sync_macs_from_mac_address(account, macs_text)
+        # Nach dem Anlegen MAC-List in separate Tabelle syncen (falls MAC-Account)
+        self._sync_macs_from_mac_address(account)
 
         return account
-        
-   def update(self, instance, validated_data):
+
+    def update(self, instance, validated_data):
         # Flags holen
         flags = self._extract_feature_flags(validated_data)
 
@@ -343,19 +331,15 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         # channel_group-Daten getrennt verarbeiten
         channel_group_data = validated_data.pop("channel_group", [])
 
-        # MACs-Text aus validated_data holen (kann None sein, wenn Feld nicht geschickt wurde)
-        macs_text = validated_data.get("mac_address", None)
-
         # Erst das M3UAccount-Objekt selbst updaten
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
 
-        # MACs nur synchronisieren, wenn das Feld im Request überhaupt vorhanden war
-        if "mac_address" in getattr(self, "initial_data", {}):
-            self._sync_macs_from_mac_address(instance, macs_text or "")
+        # MAC-List syncen (wenn sich mac_address geändert hat oder Account MAC-Typ ist)
+        self._sync_macs_from_mac_address(instance)
 
-        # ChannelGroupM3UAccount-Relationen aktualisieren (bestehende Logik)
+        # ChannelGroupM3UAccount-Relationen aktualisieren
         memberships_to_update = []
         for group_data in channel_group_data:
             group = group_data.get("channel_group")
@@ -363,16 +347,17 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
             try:
                 membership = ChannelGroupM3UAccount.objects.get(
-                    channel_group=group, m3u_account=instance
+                    m3u_account=instance, channel_group=group
                 )
                 membership.enabled = enabled
                 memberships_to_update.append(membership)
             except ChannelGroupM3UAccount.DoesNotExist:
                 continue
 
-        ChannelGroupM3UAccount.objects.bulk_update(
-            memberships_to_update, ["enabled"]
-        )
+        if memberships_to_update:
+            ChannelGroupM3UAccount.objects.bulk_update(
+                memberships_to_update, ["enabled"]
+            )
 
         return instance
 
