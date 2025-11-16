@@ -20,6 +20,8 @@ import {
   Switch,
   Box,
   PasswordInput,
+  Table,
+  Badge,
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -79,9 +81,16 @@ const M3U = ({
   });
 
   useEffect(() => {
-    console.log(m3uAccount);
     if (m3uAccount) {
       setPlaylist(m3uAccount);
+
+      const proxy =
+        m3uAccount.custom_properties &&
+        typeof m3uAccount.custom_properties === 'object' &&
+        m3uAccount.custom_properties.proxy
+          ? m3uAccount.custom_properties.proxy
+          : '';
+
       form.setValues({
         name: m3uAccount.name,
         server_url: m3uAccount.server_url,
@@ -103,9 +112,10 @@ const M3U = ({
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
         mac_address: m3uAccount.mac_address ?? '',
+        proxy,
       });
 
-      if (m3uAccount.account_type == 'XC') {
+      if (m3uAccount.account_type === 'XC') {
         setShowCredentialFields(true);
       } else {
         setShowCredentialFields(false);
@@ -117,7 +127,7 @@ const M3U = ({
   }, [m3uAccount]);
 
   useEffect(() => {
-    if (form.values.account_type == 'XC') {
+    if (form.values.account_type === 'XC') {
       setShowCredentialFields(true);
     }
   }, [form.values.account_type]);
@@ -140,14 +150,13 @@ const M3U = ({
 
     values.custom_properties = custom_properties;
 
-
-    if (values.account_type == 'XC' && values.password == '') {
+    if (values.account_type === 'XC' && values.password === '') {
       // If account XC and no password input, assuming no password change
       // from previously stored value.
       delete values.password;
     }
 
-    if (values.user_agent == '0') {
+    if (values.user_agent === '0') {
       values.user_agent = null;
     }
 
@@ -175,17 +184,17 @@ const M3U = ({
         });
       }
 
-     if (values.account_type !== 'XC' && values.account_type !== 'MAC') {
-     notifications.show({
-    title: 'Fetching M3U Groups',
-    message:
-      'Configure group filters and auto sync settings once complete.',
-    });
+      if (values.account_type !== 'XC' && values.account_type !== 'MAC') {
+        notifications.show({
+          title: 'Fetching M3U Groups',
+          message:
+            'Configure group filters and auto sync settings once complete.',
+        });
 
-     newPlaylist = null;
-     close();
-     return;
-    }
+        newPlaylist = null;
+        close();
+        return;
+      }
 
       // Fetch the updated playlist details (this also updates the store via API)
       const updatedPlaylist = await API.getPlaylist(newPlaylist.id);
@@ -201,7 +210,6 @@ const M3U = ({
         fetchCategories();
       }
 
-      console.log('opening group options');
       setPlaylist(updatedPlaylist);
       setGroupFilterModalOpen(true);
       return;
@@ -237,6 +245,35 @@ const M3U = ({
       setGroupFilterModalOpen(true);
     }
   }, [playlist, playlistCreated]);
+
+  const handleDeleteExpiredMacs = async () => {
+    if (!playlist?.id) {
+      return;
+    }
+    try {
+      // Du brauchst im API-Client eine Methode API.deleteExpiredMacs (siehe Kommentar unten)
+      const res = await API.deleteExpiredMacs(playlist.id);
+      const account = res.account || res; // falls du direkt account zurückgibst
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+
+      const deleted = res.deleted ?? 0;
+      notifications.show({
+        title: 'MACs aktualisiert',
+        message: `${deleted} abgelaufene MAC(s) gelöscht.`,
+      });
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Fehler',
+        message: 'Abgelaufene MACs konnten nicht gelöscht werden.',
+      });
+    }
+  };
+
+  const macs = playlist?.macs || [];
 
   if (!isOpen) {
     return <></>;
@@ -281,7 +318,7 @@ const M3U = ({
                   <>
                     Standard for direct M3U URLs, <br />
                     Xtream Codes for panel-based services, <br />
-		    MAC / STB-Portal for MAC-based STB portals
+                    MAC / STB-Portal for MAC-based STB portals
                   </>
                 }
                 data={[
@@ -293,8 +330,8 @@ const M3U = ({
                     value: 'XC',
                     label: 'Xtream Codes',
                   },
-	          {
-      		    value: 'MAC',
+                  {
+                    value: 'MAC',
                     label: 'MAC / STB-Portal',
                   },
                 ]}
@@ -302,31 +339,31 @@ const M3U = ({
                 {...form.getInputProps('account_type')}
               />
 
-		{form.getValues().account_type === 'MAC' && (
-  		<>
-  		<TextInput
-  		  style={{ width: '100%' }}
-   		 id="mac_address"
-   		 name="mac_address"
-    		label="MAC Address"
-    		description="MAC address for STB-Portal accounts, e.g. 00:1A:79:12:34:56"
-   		 {...form.getInputProps('mac_address')}
-   		 key={form.key('mac_address')}
-		  />
-      <TextInput
-        style={{ width: '100%' }}
-        id="proxy"
-        name="proxy"
-        label="HTTP Proxy"
-        description="Optional HTTP proxy for MAC account requests, e.g. http://user:pass@host:port"
-        placeholder="http://host:port"
-        {...form.getInputProps('proxy')}
-        key={form.key('proxy')}
-      />
-      </>
-		)}
+              {form.getValues().account_type === 'MAC' && (
+                <>
+                  <TextInput
+                    style={{ width: '100%' }}
+                    id="mac_address"
+                    name="mac_address"
+                    label="MAC Address(es)"
+                    description="Eine oder mehrere MACs (z.B. AA:BB:CC:DD:EE:FF, 11:22:33:44:55:66 oder jede MAC in neuer Zeile)"
+                    {...form.getInputProps('mac_address')}
+                    key={form.key('mac_address')}
+                  />
+                  <TextInput
+                    style={{ width: '100%' }}
+                    id="proxy"
+                    name="proxy"
+                    label="HTTP Proxy"
+                    description="Optional HTTP proxy for MAC account requests, e.g. http://user:pass@host:port"
+                    placeholder="http://host:port"
+                    {...form.getInputProps('proxy')}
+                    key={form.key('proxy')}
+                  />
+                </>
+              )}
 
-              {form.getValues().account_type == 'XC' && (
+              {form.getValues().account_type === 'XC' && (
                 <Box>
                   {!m3uAccount && (
                     <Group justify="space-between">
@@ -374,14 +411,74 @@ const M3U = ({
                 </Box>
               )}
 
-              {form.getValues().account_type != 'XC' && (
-                <FileInput
-                  id="file"
-                  label="Upload files"
-                  placeholder="Upload files"
-                  description="Upload a local M3U file instead of using URL"
-                  onChange={setFile}
-                />
+              {form.getValues().account_type !== 'XC' && (
+                <>
+                  <FileInput
+                    id="file"
+                    label="Upload files"
+                    placeholder="Upload files"
+                    description="Upload a local M3U file instead of using URL"
+                    onChange={setFile}
+                  />
+
+                  {form.getValues().account_type === 'MAC' && macs.length > 0 && (
+                    <Box mt="sm">
+                      <Group justify="space-between" align="center" mb={4}>
+                        <Box fw={500}>MAC-Status</Box>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          color="red"
+                          onClick={handleDeleteExpiredMacs}
+                        >
+                          Abgelaufene MACs löschen
+                        </Button>
+                      </Group>
+                      <Table striped highlightOnHover withTableBorder withColumnBorders>
+                        <Table.Thead>
+                          <Table.Tr>
+                            <Table.Th>#</Table.Th>
+                            <Table.Th>MAC</Table.Th>
+                            <Table.Th>Status</Table.Th>
+                            <Table.Th>Gültig bis</Table.Th>
+                          </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                          {macs.map((mac, idx) => {
+                            let color = 'gray';
+                            if (mac.status === 'valid') color = 'green';
+                            if (mac.status === 'expired') color = 'red';
+                            if (mac.status === 'error') color = 'orange';
+
+                            return (
+                              <Table.Tr
+                                key={mac.id || idx}
+                                style={
+                                  mac.status === 'expired'
+                                    ? { color: theme.colors.red[6] }
+                                    : undefined
+                                }
+                              >
+                                <Table.Td>{mac.priority + 1}</Table.Td>
+                                <Table.Td>{mac.address}</Table.Td>
+                                <Table.Td>
+                                  <Badge color={color} size="sm">
+                                    {mac.status}
+                                  </Badge>
+                                </Table.Td>
+                                <Table.Td>
+                                  {mac.expires_text ||
+                                    mac.expires_at ||
+                                    'unbekannt'}
+                                </Table.Td>
+                              </Table.Tr>
+                            );
+                          })}
+                        </Table.Tbody>
+                      </Table>
+                    </Box>
+                  )}
+                </>
               )}
             </Stack>
 
@@ -465,7 +562,6 @@ const M3U = ({
                 </Button>
                 <Button
                   variant="filled"
-                  // color={theme.custom.colors.buttonPrimary}
                   size="sm"
                   onClick={() => {
                     // If this is an XC account with VOD enabled, fetch VOD categories
@@ -482,7 +578,6 @@ const M3U = ({
                 </Button>
                 <Button
                   variant="filled"
-                  // color={theme.custom.colors.buttonPrimary}
                   size="sm"
                   onClick={() => setProfileModalOpen(true)}
                 >
