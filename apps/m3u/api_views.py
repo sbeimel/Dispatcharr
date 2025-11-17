@@ -263,8 +263,6 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to update group settings: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-            
-    @action(detail=True, methods=["post"], url_path="delete-expired-macs")
     def _delete_expired_macs_impl(self, account):
         """
         Interne Logik zum Löschen abgelaufener/unklarer MACs.
