@@ -115,9 +115,12 @@ class M3UAccount(models.Model):
     account_type = models.CharField(choices=Types.choices, default=Types.STADNARD)
     username = models.CharField(max_length=255, null=True, blank=True)
     password = models.CharField(max_length=255, null=True, blank=True)
-    # NOTE: kept for backwards compatibility and as raw input field.
-    # Actual MACs are stored in M3UAccountMac and synced from this value.
-    mac_address = models.CharField(max_length=255, null=True, blank=True, help_text="One or more MAC addresses (comma/semicolon/newline separated)")
+    mac_address = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="One or more MAC addresses (comma/semicolon/whitespace separated) for MAC/STB accounts",
+    )
     custom_properties = models.JSONField(default=dict, blank=True, null=True)
     refresh_interval = models.IntegerField(default=0)
     refresh_task = models.ForeignKey(
