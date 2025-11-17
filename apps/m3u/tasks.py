@@ -17,6 +17,70 @@ from apps.channels.models import Stream, ChannelGroup, ChannelGroupM3UAccount
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.utils import timezone
+
+from datetime import datetime
+
+def _parse_mac_portal_expiry(expiry_info):
+    """
+    Versucht, eine vom Portal gelieferte Ablaufinfo (z.B. "February 28, 2026, 1:13 pm")
+    in ein (expires_at, expires_text)-Tuple zu übersetzen.
+    expires_at ist, falls ermittelbar, ein timezone-aware datetime, ansonsten None.
+    expires_text ist immer ein String (zur Anzeige im UI).
+    """
+    from django.utils import timezone as dj_timezone
+
+    if expiry_info is None:
+        return None, None
+
+    if isinstance(expiry_info, datetime):
+        # Bereits ein Datum
+        dt = expiry_info
+        if dj_timezone.is_naive(dt):
+            dt = dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
+        return dt, dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    expires_text = str(expiry_info).strip()
+    if not expires_text:
+        return None, None
+
+    # Typische Portal-Formate (eng. Monatsnamen)
+    formats = [
+        "%B %d, %Y, %I:%M %p",  # February 28, 2026, 1:13 pm
+        "%B %d, %Y %I:%M %p",
+        "%B %d, %Y",            # February 28, 2026
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(expires_text, fmt)
+            if dj_timezone.is_naive(dt):
+                dt = dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
+            return dt, expires_text
+        except Exception:
+            continue
+
+    # Unix-Timestamp (10-stelliger Sekundenwert) versuchen
+    import re as _re
+    m = _re.search(r"\b(1\d{9})\b", expires_text)
+    if m:
+        try:
+            ts = int(m.group(1))
+            dt = datetime.fromtimestamp(ts, tz=dj_timezone.utc)
+            return dt, expires_text
+        except Exception:
+            pass
+
+    # Nichts erkannt → nur Text zurückgeben
+    return None, expires_text
+
+
+
 import time
 import json
 from core.utils import (
@@ -1366,32 +1430,115 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
         primary_channels = None
 
         for mac_entry in mac_entries:
+            mac_value = mac_entry.address
+            logger.info(
+                "MAC account %s: checking MAC %s (priority %s)",
+                account_id,
+                mac_value,
+                mac_entry.priority,
+            )
+
+            props = account.custom_properties or {}
+            proxy = props.get("proxy")
+            tz_name = props.get("timezone", "Europe/Berlin")
+
+            client = MacPortalClient(
+                base_url=account.server_url,
+                mac=mac_value,
+                proxy=proxy,
+                timezone=tz_name,
+            )
+
             try:
-                props = account.custom_properties or {}
-                proxy = props.get("proxy")
-                timezone = props.get("timezone", "Europe/Berlin")
-
-                client = MacPortalClient(
-                    base_url=account.server_url,
-                    mac=mac_entry.address,
-                    proxy=proxy,
-                    timezone=timezone,
-                )
-
-                # Ablaufinfo (fürs UI)
+                # Ablaufinfo (fürs UI + Status)
+                expires_at = None
+                expires_text = None
                 try:
                     expiry_info = client.get_expires()
-                    mac_entry.expires_text = expiry_info
                     logger.info(
-                        f"MAC account {account_id} ({mac_entry.address}) expiry info: {expiry_info}"
+                        "MAC account %s (%s) expiry info: %s",
+                        account_id,
+                        mac_value,
+                        expiry_info,
                     )
+                    expires_at, expires_text = _parse_mac_portal_expiry(expiry_info)
                 except MacPortalError as exp_err:
                     logger.warning(
-                        f"Could not fetch MAC expiry info for {mac_entry.address}: {exp_err}"
+                        "Could not fetch MAC expiry info for %s: %s",
+                        mac_value,
+                        exp_err,
                     )
                     mac_entry.last_error = str(exp_err)
 
-                # Nur solange noch kein primary gewählt ist, Channels laden
+                # Channels nur laden, wenn noch keine Primary gewählt
+                channels = None
+                if primary_channels is None:
+                    channels = client.get_channels()
+                    logger.info(
+                        "MAC account %s (MAC %s): received %s channels from portal",
+                        account_id,
+                        mac_value,
+                        len(channels),
+                    )
+                    primary_channels = channels
+                else:
+                    channels = primary_channels
+
+                # MAC-Status anhand Ablaufdatum/-text bestimmen
+                mac_entry.last_checked = timezone.now()
+                mac_entry.expires_at = expires_at
+                mac_entry.expires_text = expires_text
+
+                status = M3UAccountMac.Status.UNKNOWN
+                now_ts = timezone.now()
+                if expires_at is not None:
+                    if expires_at <= now_ts:
+                        status = M3UAccountMac.Status.EXPIRED
+                    else:
+                        status = M3UAccountMac.Status.VALID
+                elif expires_text:
+                    low = expires_text.lower()
+                    if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
+                        status = M3UAccountMac.Status.EXPIRED
+                    else:
+                        status = M3UAccountMac.Status.VALID
+                else:
+                    status = M3UAccountMac.Status.UNKNOWN
+
+                mac_entry.status = status
+                mac_entry.last_error = None
+                mac_entry.save(
+                    update_fields=[
+                        "expires_at",
+                        "expires_text",
+                        "status",
+                        "last_checked",
+                        "last_error",
+                    ]
+                )
+
+            except (MacPortalError, requests.RequestException) as e:
+                msg = str(e).lower()
+                mac_entry.last_error = str(e)
+                mac_entry.last_checked = timezone.now()
+
+                # einfache Heuristik fürs EXPIRED-Markieren bei Fehlern
+                if "expir" in msg or "no active" in msg or "expired" in msg:
+                    mac_entry.status = M3UAccountMac.Status.EXPIRED
+                else:
+                    mac_entry.status = M3UAccountMac.Status.ERROR
+
+                mac_entry.save(
+                    update_fields=["status", "last_error", "last_checked"]
+                )
+                logger.warning(
+                    "MAC %s failed during refresh for account %s: %s",
+                    mac_value,
+                    account_id,
+                    e,
+                )
+                # nächste MAC probieren
+                continue
                 if primary_channels is None:
                     channels = client.get_channels()
                     logger.info(
