@@ -1373,7 +1373,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
 
         primary_channels = None  # channels used to actually build groups/streams
 
-        from .models import M3UAccount, M3UAccountMacMac  # local import to avoid circular
 
         for idx, mac_entry in enumerate(mac_entries):
             mac_value = mac_entry.address
