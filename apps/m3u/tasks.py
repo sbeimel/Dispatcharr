@@ -17,6 +17,7 @@ from apps.channels.models import Stream, ChannelGroup, ChannelGroupM3UAccount
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.utils import timezone
+
 from datetime import datetime
 
 def _parse_portal_expiry(expiry_info):
@@ -72,6 +73,7 @@ def _parse_portal_expiry(expiry_info):
 
     # Nichts erkannt → nur Text
     return None, expires_text
+
 
 
 import time
@@ -1422,7 +1424,10 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
 
         primary_channels = None
 
-        
+        props = account.custom_properties or {}
+        proxy = props.get("proxy")
+        tz_name = props.get("timezone", "Europe/Berlin")
+
         for mac_entry in mac_entries:
             mac_value = mac_entry.address
             logger.info(
@@ -1436,7 +1441,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                 base_url=account.server_url,
                 mac=mac_value,
                 proxy=proxy,
-                timezone=timezone_str,
+                timezone=tz_name,
             )
 
             try:
@@ -1461,7 +1466,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     mac_entry.last_error = str(exp_err)
 
                 # Channels für diese MAC holen (nur solange noch kein primary gewählt ist)
-                channels = None
                 if primary_channels is None:
                     channels = client.get_channels()
                     logger.info(
@@ -1471,17 +1475,12 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                         len(channels),
                     )
                     primary_channels = channels
-                else:
-                    # Wir brauchen nur die Gültigkeitsprüfung, nicht nochmal alle Channels
-                    channels = primary_channels
 
                 # MAC-Status + Ablaufdaten updaten
                 mac_entry.last_checked = timezone.now()
-                mac_entry.last_error = None
                 mac_entry.expires_at = expires_at
                 mac_entry.expires_text = expires_text
 
-                # Status bestimmen
                 status = M3UAccountMac.Status.UNKNOWN
                 now_ts = timezone.now()
                 if expires_at is not None:
@@ -1499,6 +1498,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     status = M3UAccountMac.Status.UNKNOWN
 
                 mac_entry.status = status
+                mac_entry.last_error = None
                 mac_entry.save(
                     update_fields=[
                         "expires_at",
@@ -1530,7 +1530,9 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     e,
                 )
                 # nächste MAC probieren
-if primary_channels is None:
+                continue
+
+                if primary_channels is None:
                     channels = client.get_channels()
                     logger.info(
                         "MAC account %s (MAC %s): received %s channels from portal",
@@ -1822,6 +1824,7 @@ def sync_auto_channels(account_id, scan_start_time=None):
     )
     from apps.epg.models import EPGData
     from django.utils import timezone
+
 from datetime import datetime
 
 def _parse_portal_expiry(expiry_info):
@@ -1877,6 +1880,7 @@ def _parse_portal_expiry(expiry_info):
 
     # Nichts erkannt → nur Text
     return None, expires_text
+
 
 
 
