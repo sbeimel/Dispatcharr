@@ -2395,4 +2395,47 @@ export default class API {
       errorNotification('Failed to update playback position', e);
     }
   }
+  static async deleteExpiredMacs(accountId) {
+    try {
+      return await request(
+        `${host}/api/m3u/accounts/${accountId}/delete-expired-macs/`,
+        {
+          method: 'POST',
+        }
+      );
+    } catch (e) {
+      errorNotification('Failed to delete expired MACs', e);
+      throw e;
+    }
+  }
+
+  static async deleteAccountMac(accountId, macId) {
+    try {
+      return await request(
+        `${host}/api/m3u/accounts/${accountId}/macs/${macId}/`,
+        {
+          method: 'DELETE',
+        }
+      );
+    } catch (e) {
+      errorNotification('Failed to delete MAC', e);
+      throw e;
+    }
+  }
+
+  static async reorderAccountMacs(accountId, order) {
+    try {
+      return await request(
+        `${host}/api/m3u/accounts/${accountId}/reorder-macs/`,
+        {
+          method: 'POST',
+          body: { order },
+        }
+      );
+    } catch (e) {
+      errorNotification('Failed to reorder MACs', e);
+      throw e;
+    }
+  }
+
 }
