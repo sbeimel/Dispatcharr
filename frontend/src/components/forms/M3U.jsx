@@ -22,6 +22,7 @@ import {
   PasswordInput,
   Table,
   Badge,
+  ActionIcon,
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -273,6 +274,58 @@ const M3U = ({
     }
   };
 
+
+  const handleDeleteMac = async (macId) => {
+    if (!playlist?.id) return;
+
+    try {
+      const res = await API.deleteAccountMac(playlist.id, macId);
+      const account = res.account || res;
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Fehler',
+        message: 'MAC konnte nicht gelöscht werden.',
+      });
+    }
+  };
+
+  const handleMoveMac = async (macId, direction) => {
+    if (!playlist?.id) return;
+
+    const macs = playlist?.macs || [];
+    const ids = macs.map((m) => m.id);
+    const index = ids.indexOf(macId);
+    if (index === -1) return;
+
+    if (direction === 'up' && index > 0) {
+      [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+    } else if (direction === 'down' && index < ids.length - 1) {
+      [ids[index + 1], ids[index]] = [ids[index], ids[index + 1]];
+    } else {
+      return;
+    }
+
+    try {
+      const res = await API.reorderAccountMacs(playlist.id, ids);
+      const account = res.account || res;
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Fehler',
+        message: 'Reihenfolge konnte nicht aktualisiert werden.',
+      });
+    }
+  };
+
   const macs = playlist?.macs || [];
 
   if (!isOpen) {
@@ -441,6 +494,7 @@ const M3U = ({
                             <Table.Th>MAC</Table.Th>
                             <Table.Th>Status</Table.Th>
                             <Table.Th>Gültig bis</Table.Th>
+                            <Table.Th>Aktionen</Table.Th>
                           </Table.Tr>
                         </Table.Thead>
                         <Table.Tbody>
@@ -470,6 +524,34 @@ const M3U = ({
                                   {mac.expires_text ||
                                     mac.expires_at ||
                                     'unbekannt'}
+                                </Table.Td>
+                                <Table.Td>
+                                  <Group gap="xs" justify="flex-end">
+                                    <ActionIcon
+                                      color="red"
+                                      variant="subtle"
+                                      onClick={() => handleDeleteMac(mac.id)}
+                                      title="MAC löschen"
+                                    >
+                                      ❌
+                                    </ActionIcon>
+                                    <ActionIcon
+                                      variant="subtle"
+                                      onClick={() => handleMoveMac(mac.id, 'up')}
+                                      disabled={idx === 0}
+                                      title="Nach oben"
+                                    >
+                                      ↑
+                                    </ActionIcon>
+                                    <ActionIcon
+                                      variant="subtle"
+                                      onClick={() => handleMoveMac(mac.id, 'down')}
+                                      disabled={idx === macs.length - 1}
+                                      title="Nach unten"
+                                    >
+                                      ↓
+                                    </ActionIcon>
+                                  </Group>
                                 </Table.Td>
                               </Table.Tr>
                             );
