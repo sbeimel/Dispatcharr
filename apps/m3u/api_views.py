@@ -264,34 +264,61 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
             
-    @action(detail=True, methods=["post"], url_path="delete-expired-macs")
-    def delete_expired_macs(self, request, pk=None):
-        """
-        Löscht alle EXPIRED-MAC-Einträge für diesen Account.
-        Wird vom Button im M3U-Manager verwendet.
-        """
+   @action(detail=True, methods=["post"])
+def delete_expired_macs(self, request, pk=None):
+    """
+    Löscht EXPIRED und UNKNOWN MACs. Bricht niemals mit 500 ab.
+    """
+    from .models import M3UAccountMac
+
+    try:
         account = self.get_object()
+    except Exception as e:
+        return Response({"error": f"Account not found: {e}"}, status=400)
 
-        # Nur MAC-Accounts behandeln (vorsichtshalber)
-        if account.account_type != M3UAccount.Types.MAC:
-            return Response(
-                {"error": "This action is only valid for MAC accounts."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    if account.account_type != account.Types.MAC:
+        return Response({"error": "Not a MAC account"}, status=400)
 
-        # EXPIRED- und UNKNOWN-MACs löschen
-        deleted_count, _ = account.macs.filter(
-            status__in=[M3UAccountMac.Status.EXPIRED, M3UAccountMac.Status.UNKNOWN]
-        ).delete()
+    try:
+        # 1. Delete EXPIRED + UNKNOWN
+        qs = account.macs.filter(
+            status__in=[
+                M3UAccountMac.Status.EXPIRED,
+                M3UAccountMac.Status.UNKNOWN,
+            ]
+        )
 
-        # Aktualisierte Account-Daten zurückgeben (inkl. frischer MAC-Liste)
-        serializer = self.get_serializer(account)
+        deleted_count = qs.count()
+        qs.delete()
+
+        # 2. Neu sortieren (Prio 0..n)
+        remaining = account.macs.order_by("priority", "id")
+        for idx, m in enumerate(remaining):
+            if m.priority != idx:
+                m.priority = idx
+                m.save(update_fields=["priority"])
+
+        # 3. mac_address neu aufbauen
+        mac_list = [m.address for m in remaining]
+        account.mac_address = " ".join(mac_list)
+        account.save(update_fields=["mac_address"])
+
+        # 4. Response
         return Response(
             {
                 "deleted": deleted_count,
-                "account": serializer.data,
-            }
+                "remaining": mac_list,
+            },
+            status=200,
         )
+
+    except Exception as e:
+        # Niemals 500 – wir geben Fehler an UI zurück
+        return Response(
+            {"error": f"Failed to delete MACs: {str(e)}"},
+            status=400,
+        )
+
 
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
