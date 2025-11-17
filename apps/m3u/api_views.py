@@ -279,9 +279,9 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # EXPIRED-MACs löschen
+        # EXPIRED- und UNKNOWN-MACs löschen
         deleted_count, _ = account.macs.filter(
-            status=M3UAccountMac.Status.EXPIRED
+            status__in=[M3UAccountMac.Status.EXPIRED, M3UAccountMac.Status.UNKNOWN]
         ).delete()
 
         # Aktualisierte Account-Daten zurückgeben (inkl. frischer MAC-Liste)
