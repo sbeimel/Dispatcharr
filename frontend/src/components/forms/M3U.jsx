@@ -487,7 +487,9 @@ const M3U = ({
                           Abgelaufene MACs löschen
                         </Button>
                       </Group>
-                      <Table striped highlightOnHover withTableBorder withColumnBorders>
+                      <Table
+                        <Box style={{ maxHeight: 360, overflowY: 'auto' }}>
+                        <Tabled highlightOnHover withTableBorder withColumnBorders>
                         <Table.Thead>
                           <Table.Tr>
                             <Table.Th>#</Table.Th>
