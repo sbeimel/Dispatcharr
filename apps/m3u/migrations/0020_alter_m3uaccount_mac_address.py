@@ -1,4 +1,4 @@
-from django.db import migrations, models
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
@@ -8,17 +8,14 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AlterField(
-            model_name="m3uaccount",
-            name="mac_address",
-            field=models.CharField(
-                max_length=255,
-                null=True,
-                blank=True,
-                help_text=(
-                    "One or more MAC addresses (comma/semicolon/whitespace separated) "
-                    "for MAC/STB accounts"
-                ),
+        migrations.RunSQL(
+            sql=(
+                "ALTER TABLE m3u_m3uaccount "
+                "ALTER COLUMN mac_address TYPE varchar(255);"
+            ),
+            reverse_sql=(
+                "ALTER TABLE m3u_m3uaccount "
+                "ALTER COLUMN mac_address TYPE varchar(17);"
             ),
         ),
     ]
