@@ -334,7 +334,7 @@ const M3U = ({
 
   return (
     <>
-      <Modal size={700} opened={isOpen} onClose={close} title="M3U Account">
+      <Modal size="70%" opened={isOpen} onClose={close} title="M3U Account">
         <LoadingOverlay
           visible={form.submitting}
           overlayBlur={2}
