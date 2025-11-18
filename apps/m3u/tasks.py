@@ -1429,7 +1429,37 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
 
         primary_channels = None
 
-        for mac_entry in mac_entries:
+        # Prepare HTTP proxy rotation for MAC checks (per account, reused across MACs)
+        props = account.custom_properties or {}
+        proxy_value = props.get("proxy")
+        tz_name_default = props.get("timezone", "Europe/Berlin")
+
+        # Parse proxy list: support comma, whitespace or newline separated values
+        proxy_list = []
+        if isinstance(proxy_value, str):
+            raw = proxy_value.replace("\r", "\n")
+            raw = raw.replace(",", "\n")
+            parts = [p.strip() for p in raw.split() if p.strip()]
+            seen = set()
+            for p in parts:
+                if p not in seen:
+                    seen.add(p)
+                    proxy_list.append(p)
+        elif isinstance(proxy_value, (list, tuple)):
+            seen = set()
+            for p in proxy_value:
+                s = str(p).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    proxy_list.append(s)
+
+        # If no proxies are configured, use direct connection (None)
+        if not proxy_list:
+            proxy_list = [None]
+
+        dead_proxies = set()
+
+        for mac_index, mac_entry in enumerate(mac_entries):
             mac_value = mac_entry.address
             logger.info(
                 "MAC account %s: checking MAC %s (priority %s)",
@@ -1438,136 +1468,161 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                 mac_entry.priority,
             )
 
-            props = account.custom_properties or {}
-            proxy = props.get("proxy")
-            tz_name = props.get("timezone", "Europe/Berlin")
+            tz_name = tz_name_default
 
-            client = MacPortalClient(
-                base_url=account.server_url,
-                mac=mac_value,
-                proxy=proxy,
-                timezone=tz_name,
-            )
+            # Build working proxy set for this run (skip proxies that already failed hard)
+            working_proxies = [p for p in proxy_list if p not in dead_proxies]
+            if not working_proxies:
+                # All proxies considered dead, fall back to direct connection once
+                working_proxies = [None]
 
-            try:
-                # Ablaufinfo (fürs UI + Status)
+            # Rotate proxies per MAC: MAC1->proxy1, MAC2->proxy2, ..., with dead proxies skipped
+            start_index = mac_index % len(working_proxies)
+            ordered_proxies = working_proxies[start_index:] + working_proxies[:start_index]
+
+            final_status = None
+            final_expires_at = None
+            final_expires_text = None
+            last_error = None
+
+            for proxy in ordered_proxies:
+                logger.info(
+                    "MAC account %s: trying MAC %s with proxy %s",
+                    account_id,
+                    mac_value,
+                    proxy,
+                )
                 expires_at = None
                 expires_text = None
+                attempt_status = None
+
                 try:
-                    expiry_info = client.get_expires()
-                    logger.info(
-                        "MAC account %s (%s) expiry info: %s",
-                        account_id,
-                        mac_value,
-                        expiry_info,
+                    client = MacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_value,
+                        proxy=proxy,
+                        timezone=tz_name,
                     )
-                    expires_at, expires_text = _parse_mac_portal_expiry(expiry_info)
-                except MacPortalError as exp_err:
+
+                    # Ablaufinfo (fürs UI + Status)
+                    expiry_info = None
+                    try:
+                        expiry_info = client.get_expires()
+                        logger.info(
+                            "MAC account %s (%s) expiry info: %s",
+                            account_id,
+                            mac_value,
+                            expiry_info,
+                        )
+                    except MacPortalError as exp_err:
+                        # Treat explicit portal errors as potential expiry info
+                        logger.warning(
+                            "Could not fetch MAC expiry info for %s: %s",
+                            mac_value,
+                            exp_err,
+                        )
+                        mac_entry.last_error = str(exp_err)
+                        low = str(exp_err).lower()
+                        if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
+                            attempt_status = M3UAccountMac.Status.EXPIRED
+                        else:
+                            attempt_status = M3UAccountMac.Status.ERROR
+
+                    if expiry_info is not None:
+                        expires_at, expires_text = _parse_mac_portal_expiry(expiry_info)
+
+                    # Channels nur laden, wenn noch keine Primary gewählt
+                    channels = None
+                    if primary_channels is None:
+                        channels = client.get_channels()
+                        logger.info(
+                            "MAC account %s (MAC %s): received %s channels from portal",
+                            account_id,
+                            mac_value,
+                            len(channels),
+                        )
+                        primary_channels = channels
+                    else:
+                        channels = primary_channels
+
+                    # Wenn wir noch keinen Status aus dem Expiry-Block haben, aus expires_at/text bestimmen
+                    if attempt_status is None:
+                        now_ts = timezone.now()
+                        if expires_at is not None:
+                            if expires_at <= now_ts:
+                                attempt_status = M3UAccountMac.Status.EXPIRED
+                            else:
+                                attempt_status = M3UAccountMac.Status.VALID
+                        elif expires_text:
+                            low = (expires_text or "").lower()
+                            if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
+                                attempt_status = M3UAccountMac.Status.EXPIRED
+                            else:
+                                attempt_status = M3UAccountMac.Status.VALID
+                        else:
+                            attempt_status = M3UAccountMac.Status.UNKNOWN
+
+                    # Valid/Expired -> fertig mit dieser MAC, keinen weiteren Proxy testen
+                    if attempt_status in (
+                        M3UAccountMac.Status.VALID,
+                        M3UAccountMac.Status.EXPIRED,
+                    ):
+                        final_status = attempt_status
+                        final_expires_at = expires_at
+                        final_expires_text = expires_text
+                        break
+
+                    # ERROR/UNKNOWN mit funktionierendem Proxy -> nächsten Proxy probieren
+                    last_error = MacPortalError(
+                        f"MAC {mac_value} returned status {attempt_status} with proxy {proxy}"
+                    )
+                    continue
+
+                except (MacPortalError, requests.RequestException) as e:
+                    # Technischer Fehler oder Handshake-Problem -> Proxy als tot markieren (für alle MACs)
+                    last_error = e
+                    mac_entry.last_error = str(e)
+                    msg = str(e).lower()
+                    if proxy is not None:
+                        dead_proxies.add(proxy)
                     logger.warning(
-                        "Could not fetch MAC expiry info for %s: %s",
+                        "MAC %s failed during refresh for account %s with proxy %s: %s",
                         mac_value,
-                        exp_err,
-                    )
-                    mac_entry.last_error = str(exp_err)
-
-                # Channels nur laden, wenn noch keine Primary gewählt
-                channels = None
-                if primary_channels is None:
-                    channels = client.get_channels()
-                    logger.info(
-                        "MAC account %s (MAC %s): received %s channels from portal",
                         account_id,
-                        mac_value,
-                        len(channels),
+                        proxy,
+                        e,
                     )
-                    primary_channels = channels
-                else:
-                    channels = primary_channels
+                    # Fehler: nächsten Proxy für diese MAC probieren
+                    continue
 
-                # MAC-Status anhand Ablaufdatum/-text bestimmen
-                mac_entry.last_checked = timezone.now()
-                mac_entry.expires_at = expires_at
-                mac_entry.expires_text = expires_text
+            # Proxy-Schleife fertig -> finalen Status für diese MAC bestimmen
+            mac_entry.last_checked = timezone.now()
+            mac_entry.expires_at = final_expires_at
+            mac_entry.expires_text = final_expires_text
 
-                status = M3UAccountMac.Status.UNKNOWN
-                now_ts = timezone.now()
-                if expires_at is not None:
-                    if expires_at <= now_ts:
-                        status = M3UAccountMac.Status.EXPIRED
-                    else:
-                        status = M3UAccountMac.Status.VALID
-                elif expires_text:
-                    low = expires_text.lower()
-                    if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
-                        status = M3UAccountMac.Status.EXPIRED
-                    else:
-                        status = M3UAccountMac.Status.VALID
-                else:
-                    status = M3UAccountMac.Status.UNKNOWN
-
-                mac_entry.status = status
+            if final_status is not None:
+                mac_entry.status = final_status
                 mac_entry.last_error = None
-                mac_entry.save(
-                    update_fields=[
-                        "expires_at",
-                        "expires_text",
-                        "status",
-                        "last_checked",
-                        "last_error",
-                    ]
-                )
-
-            except (MacPortalError, requests.RequestException) as e:
-                msg = str(e).lower()
-                mac_entry.last_error = str(e)
-                mac_entry.last_checked = timezone.now()
-
-                # einfache Heuristik fürs EXPIRED-Markieren bei Fehlern
-                if "expir" in msg or "no active" in msg or "expired" in msg:
-                    mac_entry.status = M3UAccountMac.Status.EXPIRED
+            else:
+                # Kein erfolgreicher Proxy -> Status aus letztem Fehler ableiten
+                if last_error is not None:
+                    msg = str(last_error).lower()
+                    if "expir" in msg or "no active" in msg or "ended" in msg or "expired" in msg:
+                        mac_entry.status = M3UAccountMac.Status.EXPIRED
+                    else:
+                        mac_entry.status = M3UAccountMac.Status.ERROR
                 else:
-                    mac_entry.status = M3UAccountMac.Status.ERROR
+                    mac_entry.status = M3UAccountMac.Status.UNKNOWN
 
-                mac_entry.save(
-                    update_fields=["status", "last_error", "last_checked"]
-                )
-                logger.warning(
-                    "MAC %s failed during refresh for account %s: %s",
-                    mac_value,
-                    account_id,
-                    e,
-                )
-                # nächste MAC probieren
-                continue
-                if primary_channels is None:
-                    channels = client.get_channels()
-                    logger.info(
-                        "MAC account %s (MAC %s): received %s channels from portal",
-                        account_id,
-                        mac_entry.address,
-                        len(channels),
-                    )
-                    primary_channels = channels
-
-                # Wenn wir hier sind, hat die MAC funktioniert → VALID
-                mac_entry.status = M3UAccountMac.Status.VALID
-                mac_entry.save()
-
-            except (MacPortalError, requests.RequestException) as e:
-                msg = str(e).lower()
-                mac_entry.last_error = str(e)
-
-                # einfache Heuristik fürs EXPIRED-Markieren
-                if "expir" in msg or "no active" in msg or "expired" in msg:
-                    mac_entry.status = M3UAccountMac.Status.EXPIRED
-                else:
-                    mac_entry.status = M3UAccountMac.Status.ERROR
-
-                mac_entry.save()
-                logger.warning(
-                    f"MAC {mac_entry.address} failed during refresh for account {account_id}: {e}"
-                )
-                # nächste MAC probieren
+            mac_entry.save(
+                update_fields=[
+                    "expires_at",
+                    "expires_text",
+                    "status",
+                    "last_checked",
+                    "last_error",
+                ]
+            )
 
         if primary_channels is None:
             error_msg = "Error fetching MAC portal data: no working MAC found"
