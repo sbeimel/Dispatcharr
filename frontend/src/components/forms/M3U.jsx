@@ -6,6 +6,7 @@ import M3UProfiles from './M3UProfiles';
 import {
   LoadingOverlay,
   TextInput,
+  Textarea,
   Button,
   Checkbox,
   Modal,
@@ -403,13 +404,15 @@ const M3U = ({
                     {...form.getInputProps('mac_address')}
                     key={form.key('mac_address')}
                   />
-                  <TextInput
+                  <Textarea
+                    autosize
+                    minRows={2}
                     style={{ width: '100%' }}
                     id="proxy"
                     name="proxy"
                     label="HTTP Proxy"
-                    description="Optional HTTP proxy for MAC account requests, e.g. http://user:pass@host:port"
-                    placeholder="http://host:port"
+                    description="Optional HTTP proxies for MAC account requests. Mehrere Proxies mit Leerzeichen, Komma oder Zeilenumbruch trennen."
+                    placeholder="http://proxy1:port1, http://proxy2:port2"
                     {...form.getInputProps('proxy')}
                     key={form.key('proxy')}
                   />
