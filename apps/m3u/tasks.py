@@ -1434,6 +1434,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
         proxy_value = props.get("proxy")
         tz_name_default = props.get("timezone", "Europe/Berlin")
 
+
         # Parse proxy list: support comma, whitespace or newline separated values
         proxy_list = []
         if isinstance(proxy_value, str):
@@ -1453,11 +1454,17 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     seen.add(s)
                     proxy_list.append(s)
 
+        # Remember whether the user explicitly configured at least one proxy.
+        # This is important because if a proxy is configured we should *not*
+        # silently fall back to a direct connection when all proxies fail.
+        had_explicit_proxies = bool(proxy_list)
+
         # If no proxies are configured, use direct connection (None)
         if not proxy_list:
             proxy_list = [None]
 
         dead_proxies = set()
+
 
         for mac_index, mac_entry in enumerate(mac_entries):
             mac_value = mac_entry.address
@@ -1470,12 +1477,13 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
 
             tz_name = tz_name_default
 
+
             # Build working proxy set for this run (skip proxies that already failed hard)
             working_proxies = [p for p in proxy_list if p not in dead_proxies]
-            if not working_proxies:
-                # All proxies considered dead, fall back to direct connection once
-                working_proxies = [None]
 
+            if not working_proxies:
+                # All proxies considered dead -> fall back once to direct connection (proxy=None)
+                working_proxies = [None]
             # Rotate proxies per MAC: MAC1->proxy1, MAC2->proxy2, ..., with dead proxies skipped
             start_index = mac_index % len(working_proxies)
             ordered_proxies = working_proxies[start_index:] + working_proxies[:start_index]
@@ -1579,22 +1587,53 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     continue
 
                 except (MacPortalError, requests.RequestException) as e:
-                    # Technischer Fehler oder Handshake-Problem -> Proxy als tot markieren (für alle MACs)
+                    # Classify error as proxy-level or MAC-level.
+                    # - MAC-level (e.g. invalid handshake, 401/403/404) -> keep proxy, try next proxy / MAC.
+                    # - Proxy/network-level (timeouts, connection errors, DNS, 5xx, etc.) -> mark proxy as dead.
                     last_error = e
                     mac_entry.last_error = str(e)
-                    msg = str(e).lower()
-                    if proxy is not None:
+
+                    proxy_is_dead = False
+
+                    # MacPortalError is considered a MAC-level problem (invalid handshake, bad JSON, etc.)
+                    if isinstance(e, MacPortalError):
+                        proxy_is_dead = False
+                    elif isinstance(e, requests.HTTPError):
+                        status_code = None
+                        try:
+                            if e.response is not None:
+                                status_code = e.response.status_code
+                        except Exception:
+                            status_code = None
+                        # 401/403/404 -> MAC ungültig, Proxy bleibt leben
+                        if status_code in (401, 403, 404):
+                            proxy_is_dead = False
+                        else:
+                            proxy_is_dead = True
+                    else:
+                        # Sonstige RequestException: Timeout, ConnectionError, DNS etc. -> Proxy als tot markieren
+                        proxy_is_dead = True
+
+                    if proxy_is_dead and proxy is not None:
                         dead_proxies.add(proxy)
-                    logger.warning(
-                        "MAC %s failed during refresh for account %s with proxy %s: %s",
-                        mac_value,
-                        account_id,
-                        proxy,
-                        e,
-                    )
+                        logger.warning(
+                            "MAC %s failed during refresh for account %s with proxy %s (proxy marked dead): %s",
+                            mac_value,
+                            account_id,
+                            proxy,
+                            e,
+                        )
+                    else:
+                        logger.warning(
+                            "MAC %s failed during refresh for account %s with proxy %s (proxy kept, MAC-level error): %s",
+                            mac_value,
+                            account_id,
+                            proxy,
+                            e,
+                        )
+
                     # Fehler: nächsten Proxy für diese MAC probieren
                     continue
-
             # Proxy-Schleife fertig -> finalen Status für diese MAC bestimmen
             mac_entry.last_checked = timezone.now()
             mac_entry.expires_at = final_expires_at
