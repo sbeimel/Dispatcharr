@@ -21,7 +21,7 @@ class ChannelService:
     """Service class for channel operations"""
 
     @staticmethod
-    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None, mac_id=None):
+    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
         """
         Initialize a channel with the given parameters.
 
@@ -42,22 +42,18 @@ class ChannelService:
         # This ensures the stream ID is available when the StreamManager looks it up
         if stream_id and proxy_server.redis_client:
             metadata_key = RedisKeys.channel_metadata(channel_id)
-            # Prepare base metadata
-            base_metadata = {
-                ChannelMetadataField.STREAM_ID: str(stream_id),
-            }
-            if mac_id is not None:
-                base_metadata[ChannelMetadataField.M3U_MAC_ID] = str(mac_id)
-
             # Check if metadata already exists
             if proxy_server.redis_client.exists(metadata_key):
-                # Update existing metadata with stream_id (and mac_id if present)
-                proxy_server.redis_client.hset(metadata_key, mapping=base_metadata)
+                # Just update the existing metadata with stream_id
+                proxy_server.redis_client.hset(metadata_key, ChannelMetadataField.STREAM_ID, str(stream_id))
                 logger.info(f"Pre-set stream ID {stream_id} in Redis for channel {channel_id}")
             else:
                 # Create initial metadata with essential values
-                base_metadata["temp_init"] = str(time.time())
-                proxy_server.redis_client.hset(metadata_key, mapping=base_metadata)
+                initial_metadata = {
+                    ChannelMetadataField.STREAM_ID: str(stream_id),
+                    "temp_init": str(time.time())
+                }
+                proxy_server.redis_client.hset(metadata_key, mapping=initial_metadata)
                 logger.info(f"Created initial metadata with stream_id {stream_id} for channel {channel_id}")
 
             # Verify the stream_id was set
@@ -80,8 +76,6 @@ class ChannelService:
                 update_data[ChannelMetadataField.STREAM_ID] = str(stream_id)
             if m3u_profile_id:
                 update_data[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
-            if mac_id is not None:
-                update_data[ChannelMetadataField.M3U_MAC_ID] = str(mac_id)
 
             if update_data:
                 proxy_server.redis_client.hset(metadata_key, mapping=update_data)
