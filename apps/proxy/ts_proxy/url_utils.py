@@ -711,39 +711,82 @@ def get_next_profiles_for_stream(channel_id: str, stream_id: int, exclude_profil
     """
     Return available M3U profiles for THIS stream in order (default first),
     respecting max_streams and current usage. Optionally exclude the current profile.
+
+    Important:
+    - For "real" channels (Channel.uuid), we also inspect Redis usage counters per profile.
+    - For preview/custom streams (where channel_id is not a UUID/Channel), we gracefully
+      skip Channel lookups and only respect per-profile max_streams based on global counters.
     """
+    from core.utils import RedisClient
+    from django.core.exceptions import ValidationError
+    import uuid
+
+    # Try to resolve the underlying stream (must exist)
     try:
-        from core.utils import RedisClient
-        channel = get_object_or_404(Channel, uuid=channel_id)
         stream = get_object_or_404(Stream, pk=stream_id)
-        m3u_account = stream.m3u_account
-        if not m3u_account:
-            return []
+    except Exception as e:
+        logger.error(f"Error in get_next_profiles_for_stream: could not load stream {stream_id}: {e}", exc_info=True)
+        return []
 
-        profiles_qs = m3u_account.profiles.filter(is_active=True)
-        default_profile = next((p for p in profiles_qs if getattr(p, "is_default", False)), None)
-        other_profiles = [p for p in profiles_qs if not getattr(p, "is_default", False)]
-        ordered = ([default_profile] if default_profile else []) + other_profiles
+    m3u_account = stream.m3u_account
+    if not m3u_account:
+        return []
 
-        # Redis for connection counters
+    # Try to resolve Channel if channel_id looks like a UUID and exists.
+    # For preview/custom streams the ID is usually a hash and not a Channel.uuid -> channel stays None.
+    channel = None
+    try:
         try:
-            redis_client = RedisClient.get_client()
-        except Exception:
-            redis_client = None
+            channel_uuid = uuid.UUID(str(channel_id))
+        except (ValueError, TypeError):
+            channel_uuid = None
 
-        result = []
-        for p in ordered:
-            if not p:
-                continue
-            if exclude_profile_id and int(p.id) == int(exclude_profile_id):
-                continue
-            allowed = True
-            if redis_client:
-                try:
-                    current = int(redis_client.get(f"profile_connections:{p.id}") or 0)
-                except Exception:
-                    current = 0
-                channel_using_profile = False
+        if channel_uuid is not None:
+            try:
+                channel = Channel.objects.filter(uuid=channel_uuid).first()
+            except ValidationError:
+                channel = None
+    except Exception:
+        # Any errors here should not break failover logic, we just ignore the channel.
+        channel = None
+
+    # Build ordered profile list (default profile first)
+    try:
+        profiles_qs = m3u_account.profiles.filter(is_active=True)
+    except Exception as e:
+        logger.error(f"Error in get_next_profiles_for_stream: could not load profiles for account {m3u_account.id}: {e}", exc_info=True)
+        return []
+
+    default_profile = next((p for p in profiles_qs if getattr(p, "is_default", False)), None)
+    other_profiles = [p for p in profiles_qs if not getattr(p, "is_default", False)]
+    ordered = ([default_profile] if default_profile else []) + other_profiles
+
+    # Redis for connection counters (optional)
+    try:
+        redis_client = RedisClient.get_client()
+    except Exception:
+        redis_client = None
+
+    result: _List[dict] = []
+
+    for p in ordered:
+        if not p:
+            continue
+        if exclude_profile_id and int(p.id) == int(exclude_profile_id):
+            continue
+
+        allowed = True
+        if redis_client:
+            # How many connections does this profile currently have?
+            try:
+                current = int(redis_client.get(f"profile_connections:{p.id}") or 0)
+            except Exception:
+                current = 0
+
+            # If we have a real Channel object, try to avoid double-counting the same
+            # channel using the same profile (common for restarts).
+            channel_using_profile = False
+            if channel is not None:
                 try:
                     existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
                     if existing_stream_id:
@@ -753,17 +796,15 @@ def get_next_profiles_for_stream(channel_id: str, stream_id: int, exclude_profil
                             channel_using_profile = True
                 except Exception:
                     channel_using_profile = False
-                effective = current - (1 if channel_using_profile else 0)
-                if getattr(p, "max_streams", 0) != 0 and effective >= getattr(p, "max_streams", 0):
-                    allowed = False
-            if allowed:
-                result.append({"profile_id": p.id})
-        return result
-    except Exception as e:
-        logger.error(f"Error in get_next_profiles_for_stream: {e}", exc_info=True)
-        return []
 
+            effective = current - (1 if channel_using_profile else 0)
+            if getattr(p, "max_streams", 0) != 0 and effective >= getattr(p, "max_streams", 0):
+                allowed = False
 
+        if allowed:
+            result.append({"profile_id": p.id})
+
+    return result
 def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
     """
     Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
