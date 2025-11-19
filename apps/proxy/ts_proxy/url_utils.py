@@ -137,6 +137,8 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
     try:
         channel_or_stream = get_stream_object(channel_id)
 
+        mac_id: Optional[int] = None
+
         # Handle direct stream preview (custom streams)
         if isinstance(channel_or_stream, Stream):
             stream = channel_or_stream
@@ -146,7 +148,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
             m3u_account = stream.m3u_account
             if not m3u_account:
                 logger.error(f"Stream {stream.id} has no M3U account")
-                return None, None, False, None
+                return None, None, False, None, None
 
             # Get the default profile for this M3U account (custom streams use default)
             m3u_profiles = m3u_account.profiles.all()
@@ -154,7 +156,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
 
             if not profile:
                 logger.error(f"No default profile found for M3U account {m3u_account.id}")
-                return None, None, False, None
+                return None, None, False, None, None
 
             # Get the appropriate user agent
             stream_user_agent = m3u_account.get_user_agent().user_agent
@@ -168,7 +170,8 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
                 input_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
                 if not input_url:
                     logger.error(f"Failed to resolve MAC stream for direct preview (stream ID {stream.id}): {error}")
-                    return None, None, False, None
+                    return None, None, False, None, None
+                mac_id = mac_used.id if mac_used else None
 
             stream_url = input_url
 
@@ -190,11 +193,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
 
             stream_profile_id = stream_profile.id
 
-            mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and 'mac_used' in locals() and mac_used) else None
-
-            mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and 'mac_used' in locals() and mac_used) else None
-
-        return stream_url, stream_user_agent, transcode, stream_profile_id, mac_id, mac_id
+            return stream_url, stream_user_agent, transcode, stream_profile_id, mac_id
 
         # Handle channel preview (existing logic)
         channel = channel_or_stream
@@ -205,7 +204,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
 
         if not stream_id or not profile_id:
             logger.error(f"No stream available for channel {channel_id}: {error_reason}")
-            return None, None, False, None
+            return None, None, False, None, None
 
         # Look up the Stream and Profile objects
         try:
@@ -213,7 +212,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
             profile = M3UAccountProfile.objects.get(id=profile_id)
         except (Stream.DoesNotExist, M3UAccountProfile.DoesNotExist) as e:
             logger.error(f"Error getting stream or profile: {e}")
-            return None, None, False, None
+            return None, None, False, None, None
 
         # Get the M3U account profile for URL pattern
         m3u_profile = profile
@@ -232,7 +231,8 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
             stream_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
             if not stream_url:
                 logger.error(f"Failed to resolve MAC stream for channel {channel_id}: {error}")
-                return None, None, False, None
+                return None, None, False, None, None
+            mac_id = mac_used.id if mac_used else None
         else:
             input_url = stream.url
             stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
@@ -246,10 +246,10 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
 
         stream_profile_id = stream_profile.id
 
-        return stream_url, stream_user_agent, transcode, stream_profile_id
+        return stream_url, stream_user_agent, transcode, stream_profile_id, mac_id
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")
-        return None, None, False, None
+        return None, None, False, None, None
 
 
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
