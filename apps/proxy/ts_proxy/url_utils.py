@@ -124,7 +124,7 @@ def _resolve_mac_stream_with_failover(m3u_account: M3UAccount, stream: Stream) -
     return None, None, "No usable MAC found"
 
 
-def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], bool, Optional[int]]:
+def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], bool, Optional[int], Optional[int]]:
     """
     Generate the appropriate stream URL for a channel or stream based on its profile settings.
 
@@ -132,7 +132,7 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
         channel_id: The UUID of the channel or stream hash
 
     Returns:
-        Tuple[str, str, bool, Optional[int]]: (stream_url, user_agent, transcode_flag, profile_id)
+        Tuple[str, str, bool, Optional[int], Optional[int]]: (stream_url, user_agent, transcode_flag, profile_id, mac_id)
     """
     try:
         channel_or_stream = get_stream_object(channel_id)
@@ -190,7 +190,11 @@ def generate_stream_url(channel_id: str) -> Tuple[Optional[str], Optional[str], 
 
             stream_profile_id = stream_profile.id
 
-            return stream_url, stream_user_agent, transcode, stream_profile_id
+            mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and 'mac_used' in locals() and mac_used) else None
+
+            mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and 'mac_used' in locals() and mac_used) else None
+
+        return stream_url, stream_user_agent, transcode, stream_profile_id, mac_id, mac_id
 
         # Handle channel preview (existing logic)
         channel = channel_or_stream

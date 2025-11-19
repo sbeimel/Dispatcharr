@@ -143,7 +143,7 @@ def stream_ts(request, channel_id):
             # Try to get a stream with fixed interval retries
             while should_retry and time.time() - wait_start_time < retry_timeout:
                 attempt += 1
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, transcode, profile_value, mac_id = (
                     generate_stream_url(channel_id)
                 )
 
@@ -188,7 +188,7 @@ def stream_ts(request, channel_id):
                 logger.info(
                     f"[{client_id}] Making final attempt {attempt} at timeout boundary"
                 )
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, transcode, profile_value, mac_id = (
                     generate_stream_url(channel_id)
                 )
                 if stream_url is not None:
@@ -310,6 +310,7 @@ def stream_ts(request, channel_id):
                 profile_value,
                 stream_id,
                 m3u_profile_id,
+                mac_id,
             )
 
             if not success:
