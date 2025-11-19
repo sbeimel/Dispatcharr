@@ -119,6 +119,139 @@ class StreamManager:
             except Exception:
                 pass
             return False
+    
+    def _try_next_mac(self) -> bool:
+        """
+        Attempt to switch to another MAC address of the SAME stream (for MAC/STB portal accounts)
+        before falling back to profile or alternate-stream failover.
+        Returns True on successful switch, False otherwise.
+        """
+        try:
+            from apps.channels.models import Stream
+            from apps.m3u.models import M3UAccount, M3UAccountMac
+            from apps.m3u.mac_portal_client import MacPortalClient
+            from .redis_keys import RedisKeys
+            from .constants import ChannelMetadataField
+            import time
+
+            # We need a current stream to work with
+            if not getattr(self, "current_stream_id", None):
+                return False
+
+            # Load the current stream and its M3U account
+            stream = Stream.objects.select_related("m3u_account").filter(pk=self.current_stream_id).first()
+            if not stream or not stream.m3u_account:
+                return False
+
+            m3u_account = stream.m3u_account
+            if m3u_account.account_type != M3UAccount.Types.MAC:
+                # Only handle MAC/STB portal accounts here
+                return False
+
+            # Try to read the currently used MAC (if any) from channel metadata
+            current_mac_id = None
+            if hasattr(self, "buffer") and getattr(self.buffer, "redis_client", None):
+                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                md = self.buffer.redis_client.hgetall(metadata_key)
+                key = ChannelMetadataField.M3U_MAC_ID.encode("utf-8")
+                if md and key in md:
+                    try:
+                        current_mac_id = int(md[key].decode("utf-8"))
+                    except Exception:
+                        current_mac_id = None
+
+            # Get candidate MACs in priority order
+            try:
+                candidates = list(m3u_account.get_candidate_macs_for_streaming())
+            except Exception as e:
+                logger.error(f"Error getting candidate MACs for account {m3u_account.id}: {e}", exc_info=True)
+                return False
+
+            if not candidates:
+                return False
+
+            # Filter out the currently used MAC if we know it
+            macs_to_try = [m for m in candidates if not current_mac_id or m.id != current_mac_id]
+            if not macs_to_try:
+                return False
+
+            props = m3u_account.custom_properties or {}
+            proxy = props.get("proxy")
+            timezone = props.get("timezone", "Europe/Berlin")
+
+            # Determine portal command similar to _resolve_mac_stream_with_failover
+            stream_props = stream.custom_properties or {}
+            cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
+
+            # Try each alternative MAC until we get a different, working URL
+            for mac_entry in macs_to_try:
+                mac_value = mac_entry.address
+                try:
+                    client = MacPortalClient(
+                        base_url=m3u_account.server_url,
+                        mac=mac_value,
+                        proxy=proxy,
+                        timezone=timezone,
+                    )
+                    new_url = client.create_link(cmd)
+                except Exception as e:
+                    # Mark this MAC as errored so it will be deprioritized on future attempts
+                    try:
+                        mac_entry.status = M3UAccountMac.Status.ERROR
+                        mac_entry.last_error = str(e)
+                        mac_entry.save(update_fields=["status", "last_error"])
+                    except Exception:
+                        pass
+                    logger.warning(f"MAC failover: MAC {mac_value} failed for account {m3u_account.id}: {e}")
+                    continue
+
+                if not new_url or new_url == getattr(self, "url", None):
+                    # Either no URL or same URL as before – not a useful switch
+                    continue
+
+                logger.info(
+                    f"MAC failover: switching channel {self.channel_id} stream {self.current_stream_id} "
+                    f"to MAC {mac_value} with URL {new_url}"
+                )
+
+                # Keep transcode setting as-is; update user agent if needed
+                new_user_agent = self.user_agent
+
+                # Update runtime params
+                self.user_agent = new_user_agent
+
+                # Update channel metadata in Redis
+                if hasattr(self, "buffer") and getattr(self.buffer, "redis_client", None):
+                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                    mapping = {
+                        ChannelMetadataField.URL: new_url,
+                        ChannelMetadataField.USER_AGENT: new_user_agent,
+                        ChannelMetadataField.STREAM_ID: str(self.current_stream_id),
+                        ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
+                        ChannelMetadataField.STREAM_SWITCH_REASON: "mac_switch_on_failure",
+                        ChannelMetadataField.M3U_MAC_ID: str(mac_entry.id),
+                    }
+                    self.buffer.redis_client.hset(metadata_key, mapping=mapping)
+
+                # Apply URL via existing update method if available, or set directly
+                if hasattr(self, "update_url"):
+                    ok = self.update_url(new_url, self.current_stream_id, None)
+                    if not ok:
+                        continue
+                else:
+                    self.url = new_url
+
+                self.url_switching = True
+                self.url_switch_start_time = time.time()
+                return True
+
+            return False
+        except Exception as e:
+            try:
+                logger.error(f"Error in _try_next_mac: {e}", exc_info=True)
+            except Exception:
+                pass
+            return False
     """Manages a connection to a TS stream without using raw sockets"""
 
     def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
@@ -1552,6 +1685,10 @@ class StreamManager:
         Returns:
             bool: True if successfully switched to a new stream, False otherwise
         """
+        # MAC-first: try another MAC of the SAME stream (for MAC accounts) before profiles/alternate streams
+        if self._try_next_mac():
+            return True
+
         # profile-first: try another M3U profile for the same stream before alternate/backup
         if self._try_next_profile():
             return True

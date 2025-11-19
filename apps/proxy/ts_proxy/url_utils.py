@@ -384,13 +384,16 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
         transcode = not (stream_profile.is_proxy() or stream_profile is None)
         profile_value = stream_profile.id
 
+        mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and mac_used) else None
+
         return {
             'url': stream_url,
             'user_agent': user_agent,
             'transcode': transcode,
             'stream_profile': profile_value,
             'stream_id': stream_id,
-            'm3u_profile_id': m3u_profile_id
+            'm3u_profile_id': m3u_profile_id,
+            'mac_id': mac_id,
         }
     except Exception as e:
         logger.error(f"Error getting stream info for switch: {e}", exc_info=True)
@@ -765,6 +768,8 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
             default_ua = UserAgent.objects.filter(is_active=True).first()
             user_agent = default_ua.user_agent if default_ua else (CoreSettings.get_value("default-user-agent") or None)
 
+        mac_id = mac_used.id if (m3u_account.account_type == M3UAccount.Types.MAC and mac_used) else None
+
         return {
             "url": stream_url,
             "user_agent": user_agent,
@@ -772,6 +777,7 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
             "stream_profile": profile_value,
             "stream_id": stream.id,
             "m3u_profile_id": m3u_profile.id,
+            "mac_id": mac_id,
         }
     except Exception as e:
         logger.error(f"Error in get_stream_info_for_profile: {e}")
