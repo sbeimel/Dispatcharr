@@ -279,18 +279,34 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             flags[key] = validated_data.pop(key, default)
         return flags
 
+    
     def _merge_custom_properties(self, instance, validated_data, flags):
-        # Basis: vorhandene custom_properties (bei Update) oder aus validated_data bzw. {} (bei Create)
-        if instance is not None:
+        """Merge feature flags into custom_properties while respecting incoming values.
+
+        Important behaviour:
+        - If the request explicitly sends custom_properties, this payload is treated
+          as the source of truth (so keys like "proxy" can be added/updated/removed
+          from the UI).
+        - If the request omits custom_properties, we fall back to the instance's
+          existing custom_properties (for backwards compatibility or non-API usage).
+        """
+        # Determine base custom_properties
+        if "custom_properties" in validated_data:
+            # Client provided an explicit payload (e.g. from React form)
+            custom_props = validated_data.get("custom_properties") or {}
+        elif instance is not None:
+            # No explicit payload -> keep existing properties
             custom_props = instance.custom_properties or {}
         else:
-            custom_props = validated_data.get("custom_properties") or {}
+            # Create without explicit custom_properties
+            custom_props = {}
 
+        # Ensure we always work with a dict
         if not isinstance(custom_props, dict):
             # falls z.B. ein String kam, unseren RelaxedJSONField-Fallback respektieren
             custom_props = {}
 
-        # Flags in custom_properties schreiben
+        # Flags in custom_properties schreiben / überschreiben
         custom_props["enable_vod"] = flags["enable_vod"]
         custom_props["auto_enable_new_groups_live"] = flags["auto_enable_new_groups_live"]
         custom_props["auto_enable_new_groups_vod"] = flags["auto_enable_new_groups_vod"]
@@ -298,7 +314,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
         validated_data["custom_properties"] = custom_props
 
-    def _sync_macs_from_mac_address(self, account: M3UAccount):
+def _sync_macs_from_mac_address(self, account: M3UAccount):
         """Helper to sync M3UAccountMac rows from account.mac_address after save."""
         try:
             if account.account_type != M3UAccount.Types.MAC:
