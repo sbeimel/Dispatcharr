@@ -89,10 +89,13 @@ class RedisKeys:
         """Key for client metadata hash"""
         return f"ts_proxy:channel:{channel_id}:clients:{client_id}"
 
-    @staticmethod
-    def m3u_profile_cooldown(profile_id):
-        return f"ts_proxy:m3u_profile:{profile_id}:cooldown"
+@staticmethod
+def profile_cooldown(profile_id):
+    """Key for per-profile cooldown marker"""
+    return f"ts_proxy:m3u_profile:{profile_id}:cooldown"
 
 @staticmethod
-    def m3u_account_cooldown(account_id):
-        return f"ts_proxy:m3u_account:{account_id}:cooldown"
+def account_cooldown(account_id):
+    """Key for per-account cooldown marker"""
+    return f"ts_proxy:m3u_account:{account_id}:cooldown"
+

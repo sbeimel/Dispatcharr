@@ -52,72 +52,10 @@ class StreamManager:
             if not getattr(self, "current_stream_id", None):
                 return False
 
-            candidates = get_next_profiles_for_stream(
-                self.channel_id,
-                self.current_stream_id,
-                exclude_profile_id=current_profile_id,
-            )
+            candidates = get_next_profiles_for_stream(self.channel_id, self.current_stream_id, exclude_profile_id=current_profile_id)
             if not candidates:
-                logger.warning(
-                    "No candidate M3U profiles found for stream %s on channel %s",
-                    getattr(self, "current_stream_id", None),
-                    self.channel_id,
-                )
                 return False
 
-            # Filter out profiles we've already tried for this stream in this manager
-            untried_candidates = []
-            for cand in candidates:
-                pid = cand.get("profile_id")
-                if hasattr(self, "tried_profile_ids") and self.tried_profile_ids and pid in self.tried_profile_ids:
-                    logger.info(
-                        "Skipping already tried M3U profile %s for stream %s on channel %s",
-                        pid,
-                        getattr(self, "current_stream_id", None),
-                        self.channel_id,
-                    )
-                    continue
-                untried_candidates.append(cand)
-
-            if not untried_candidates:
-                logger.warning(
-                    "All M3U profiles for stream %s have already been tried for channel %s",
-                    getattr(self, "current_stream_id", None),
-                    self.channel_id,
-                )
-                return False
-
-            # Optional: access Redis for cooldown check
-            redis_client = None
-            if hasattr(self, "buffer") and getattr(self.buffer, "redis_client", None):
-                redis_client = self.buffer.redis_client
-
-            for cand in untried_candidates:
-                pid = cand["profile_id"]
-
-                # If profile is currently in cooldown, skip it
-                if redis_client is not None:
-                    try:
-                        cooldown_key = RedisKeys.m3u_profile_cooldown(pid)
-                        if redis_client.exists(cooldown_key):
-                            logger.info(
-                                "Skipping M3U profile %s for stream %s on channel %s because it is in cooldown.",
-                                pid,
-                                getattr(self, "current_stream_id", None),
-                                self.channel_id,
-                            )
-                            continue
-                    except Exception as e:
-                        logger.warning(
-                            "Failed to check cooldown for M3U profile %s: %s",
-                            pid,
-                            e,
-                        )
-
-                info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, pid)
-                if not info or "error" in info or not info.get("url"):
-                    continue
-                    
             for cand in candidates:
                 pid = cand["profile_id"]
                 info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, pid)
@@ -129,7 +67,7 @@ class StreamManager:
                 new_transcode = info["transcode"]
                 stream_id = info["stream_id"]
                 m3u_profile_id = info["m3u_profile_id"]
-                
+
                 # Avoid switching to same URL
                 if getattr(self, "url", None) and new_url == self.url:
                     continue
@@ -226,9 +164,6 @@ class StreamManager:
         self.current_stream_id = stream_id
         self.tried_stream_ids = set()
 
-        # Track which M3U profiles have already been tried for the current stream
-        self.tried_profile_ids = set()
-        
         # IMPROVED LOGGING: Better handle and track stream ID
         if stream_id:
             self.tried_stream_ids.add(stream_id)
@@ -445,7 +380,6 @@ class StreamManager:
                         # If we've reached max retries, mark this URL as failed
                         if self.retry_count >= self.max_retries:
                             url_failed = True
-                            self._set_profile_cooldown()
                             logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
                         else:
                             # Wait with exponential backoff before retrying
@@ -460,7 +394,6 @@ class StreamManager:
 
                         if self.retry_count >= self.max_retries:
                             url_failed = True
-                            self._set_profile_cooldown()
                         else:
                             # Wait with exponential backoff before retrying
                             timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
@@ -470,6 +403,9 @@ class StreamManager:
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
                     logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
+
+                    # Record profile-level failure for this URL/profile
+                    self._record_profile_failure(reason="max_retries_exceeded")
 
                     # Try to switch to next stream
                     switch_result = self._try_next_stream()
@@ -1611,6 +1547,72 @@ class StreamManager:
             logger.error(f"Error in buffer check for channel {self.channel_id}: {e}")
             return False
 
+
+    def _record_profile_failure(self, reason="max_retries_exceeded"):
+        """Record a failure for the current M3U profile (and optionally account) using a cooldown key."""
+        try:
+            if not hasattr(self.buffer, "redis_client") or not self.buffer.redis_client:
+                return
+
+            redis_client = self.buffer.redis_client
+            metadata_key = RedisKeys.channel_metadata(self.channel_id)
+            metadata = redis_client.hgetall(metadata_key)
+
+            profile_id = None
+            account_id = None
+
+            if metadata:
+                try:
+                    p_key = ChannelMetadataField.M3U_PROFILE.encode("utf-8")
+                    if p_key in metadata:
+                        profile_id = int(metadata[p_key].decode("utf-8"))
+                except Exception:
+                    profile_id = None
+
+                try:
+                    a_key = ChannelMetadataField.M3U_ACCOUNT.encode("utf-8")
+                    if a_key in metadata:
+                        account_id = int(metadata[a_key].decode("utf-8"))
+                except Exception:
+                    account_id = None
+
+            if profile_id is None and account_id is None:
+                return
+
+            cooldown_seconds = ConfigHelper.get("PROFILE_COOLDOWN_SECONDS", 12 * 3600)
+
+            if profile_id is not None:
+                key = RedisKeys.profile_cooldown(profile_id)
+                redis_client.setex(key, cooldown_seconds, reason)
+                logger.info(
+                    f"Set cooldown of {cooldown_seconds}s for M3U profile {profile_id} "
+                    f"on channel {self.channel_id} (reason={reason})"
+                )
+
+            # Optional: per-account cooldown (disabled by default via config flag)
+            try:
+                if account_id is not None:
+                    enable_account_cd = ConfigHelper.get("ACCOUNT_COOLDOWN_ENABLED", False)
+                    if enable_account_cd:
+                        acc_cd_seconds = ConfigHelper.get("ACCOUNT_COOLDOWN_SECONDS", cooldown_seconds)
+                        acc_key = RedisKeys.account_cooldown(account_id)
+                        redis_client.setex(acc_key, acc_cd_seconds, reason)
+                        logger.info(
+                            f"Set cooldown of {acc_cd_seconds}s for M3U account {account_id} "
+                            f"on channel {self.channel_id} (reason={reason})"
+                        )
+            except Exception:
+                # Don't let account cooldown issues break streaming
+                logger.debug(
+                    f"Failed to set account cooldown for channel {self.channel_id}",
+                    exc_info=True,
+                )
+        except Exception:
+            logger.debug(
+                f"Error while recording profile failure for channel {self.channel_id}",
+                exc_info=True,
+            )
+
     def _try_next_stream(self):
         """
         Try to switch to the next available stream for this channel.
@@ -1681,9 +1683,6 @@ class StreamManager:
 
                 # Update stream ID tracking
                 self.current_stream_id = stream_id
-                # New stream: reset profile-level tried set so profiles can be retried on this stream
-                if hasattr(self, "tried_profile_ids"):
-                    self.tried_profile_ids.clear()
 
                 # Store the new user agent and transcode settings
                 self.user_agent = new_user_agent
@@ -1722,69 +1721,3 @@ class StreamManager:
         self.url_switching = False
         self.url_switch_start_time = 0
         logger.info(f"Reset URL switching state for channel {self.channel_id}")
-
-def _set_profile_cooldown(self):
-        """Put the current M3U profile (and optionally account) on a 12h cooldown in Redis.
-
-        This prevents repeatedly trying clearly failing profiles over and over again.
-        Account cooldown code is prepared but commented out so you can enable it later if desired.
-        """
-        try:
-            if not hasattr(self, "buffer") or not getattr(self.buffer, "redis_client", None):
-                return
-
-            redis_client = self.buffer.redis_client
-            metadata_key = RedisKeys.channel_metadata(self.channel_id)
-            md = redis_client.hgetall(metadata_key)
-            if not md:
-                return
-
-            # Determine current profile from channel metadata
-            key_profile = ChannelMetadataField.M3U_PROFILE.encode("utf-8")
-            m3u_profile_id = None
-            if key_profile in md:
-                try:
-                    m3u_profile_id = md[key_profile].decode("utf-8")
-                except Exception:
-                    m3u_profile_id = md[key_profile]
-
-            if m3u_profile_id:
-                cooldown_key = RedisKeys.m3u_profile_cooldown(m3u_profile_id)
-                # 12 hours cooldown
-                redis_client.setex(cooldown_key, 12 * 3600, "1")
-                logger.warning(
-                    "Put M3U profile %s on 12h cooldown after failures for channel %s",
-                    m3u_profile_id,
-                    self.channel_id,
-                )
-
-            # OPTIONAL: Account-wide cooldown (prepared but inactive by default).
-            # To enable, uncomment the following block AND make sure ChannelMetadataField
-            # has a suitable field for the account identifier.
-            #
-            # key_account = ChannelMetadataField.M3U_ACCOUNT.encode("utf-8")
-            # m3u_account_id = None
-            # if key_account in md:
-            #     try:
-            #         m3u_account_id = md[key_account].decode("utf-8")
-            #     except Exception:
-            #         m3u_account_id = md[key_account]
-            #
-            # if m3u_account_id:
-            #     account_cooldown_key = RedisKeys.m3u_account_cooldown(m3u_account_id)
-            #     redis_client.setex(account_cooldown_key, 12 * 3600, "1")
-            #     logger.warning(
-            #         "Put M3U account %s on 12h cooldown after failures for channel %s "
-            #         "(ACCOUNT COOLDOWN IS INACTIVE BY DEFAULT - you enabled it manually).",
-            #         m3u_account_id,
-            #         self.channel_id,
-            #     )
-
-        except Exception as e:
-            logger.error(
-                "Failed to set profile/account cooldown after URL failure on channel %s: %s",
-                self.channel_id,
-                e,
-            )
-
-
