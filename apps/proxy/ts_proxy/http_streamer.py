@@ -62,7 +62,7 @@ class HTTPStreamReader:
                 self.url,
                 headers=headers,
                 stream=True,
-                timeout=(5, 30)  # 5s connect, 30s read
+                timeout=(3, 30)  # 5s connect, 30s read
             )
 
             if self.response.status_code != 200:
