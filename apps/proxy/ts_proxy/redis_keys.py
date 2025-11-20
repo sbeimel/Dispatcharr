@@ -88,3 +88,11 @@ class RedisKeys:
     def client_metadata(channel_id, client_id):
         """Key for client metadata hash"""
         return f"ts_proxy:channel:{channel_id}:clients:{client_id}"
+
+    @staticmethod
+    def m3u_profile_cooldown(profile_id):
+        return f"ts_proxy:m3u_profile:{profile_id}:cooldown"
+
+@staticmethod
+    def m3u_account_cooldown(account_id):
+        return f"ts_proxy:m3u_account:{account_id}:cooldown"
