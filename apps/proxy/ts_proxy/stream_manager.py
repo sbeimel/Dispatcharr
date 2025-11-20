@@ -52,10 +52,72 @@ class StreamManager:
             if not getattr(self, "current_stream_id", None):
                 return False
 
-            candidates = get_next_profiles_for_stream(self.channel_id, self.current_stream_id, exclude_profile_id=current_profile_id)
+            candidates = get_next_profiles_for_stream(
+                self.channel_id,
+                self.current_stream_id,
+                exclude_profile_id=current_profile_id,
+            )
             if not candidates:
+                logger.warning(
+                    "No candidate M3U profiles found for stream %s on channel %s",
+                    getattr(self, "current_stream_id", None),
+                    self.channel_id,
+                )
                 return False
 
+            # Filter out profiles we've already tried for this stream in this manager
+            untried_candidates = []
+            for cand in candidates:
+                pid = cand.get("profile_id")
+                if hasattr(self, "tried_profile_ids") and self.tried_profile_ids and pid in self.tried_profile_ids:
+                    logger.info(
+                        "Skipping already tried M3U profile %s for stream %s on channel %s",
+                        pid,
+                        getattr(self, "current_stream_id", None),
+                        self.channel_id,
+                    )
+                    continue
+                untried_candidates.append(cand)
+
+            if not untried_candidates:
+                logger.warning(
+                    "All M3U profiles for stream %s have already been tried for channel %s",
+                    getattr(self, "current_stream_id", None),
+                    self.channel_id,
+                )
+                return False
+
+            # Optional: access Redis for cooldown check
+            redis_client = None
+            if hasattr(self, "buffer") and getattr(self.buffer, "redis_client", None):
+                redis_client = self.buffer.redis_client
+
+            for cand in untried_candidates:
+                pid = cand["profile_id"]
+
+                # If profile is currently in cooldown, skip it
+                if redis_client is not None:
+                    try:
+                        cooldown_key = RedisKeys.m3u_profile_cooldown(pid)
+                        if redis_client.exists(cooldown_key):
+                            logger.info(
+                                "Skipping M3U profile %s for stream %s on channel %s because it is in cooldown.",
+                                pid,
+                                getattr(self, "current_stream_id", None),
+                                self.channel_id,
+                            )
+                            continue
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to check cooldown for M3U profile %s: %s",
+                            pid,
+                            e,
+                        )
+
+                info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, pid)
+                if not info or "error" in info or not info.get("url"):
+                    continue
+                    
             for cand in candidates:
                 pid = cand["profile_id"]
                 info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, pid)
@@ -67,7 +129,7 @@ class StreamManager:
                 new_transcode = info["transcode"]
                 stream_id = info["stream_id"]
                 m3u_profile_id = info["m3u_profile_id"]
-
+                
                 # Avoid switching to same URL
                 if getattr(self, "url", None) and new_url == self.url:
                     continue
@@ -383,6 +445,7 @@ class StreamManager:
                         # If we've reached max retries, mark this URL as failed
                         if self.retry_count >= self.max_retries:
                             url_failed = True
+                            self._set_profile_cooldown()
                             logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
                         else:
                             # Wait with exponential backoff before retrying
@@ -397,6 +460,7 @@ class StreamManager:
 
                         if self.retry_count >= self.max_retries:
                             url_failed = True
+                            self._set_profile_cooldown()
                         else:
                             # Wait with exponential backoff before retrying
                             timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
@@ -1617,6 +1681,9 @@ class StreamManager:
 
                 # Update stream ID tracking
                 self.current_stream_id = stream_id
+                # New stream: reset profile-level tried set so profiles can be retried on this stream
+                if hasattr(self, "tried_profile_ids"):
+                    self.tried_profile_ids.clear()
 
                 # Store the new user agent and transcode settings
                 self.user_agent = new_user_agent
