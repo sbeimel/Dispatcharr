@@ -1655,3 +1655,69 @@ class StreamManager:
         self.url_switching = False
         self.url_switch_start_time = 0
         logger.info(f"Reset URL switching state for channel {self.channel_id}")
+
+def _set_profile_cooldown(self):
+        """Put the current M3U profile (and optionally account) on a 12h cooldown in Redis.
+
+        This prevents repeatedly trying clearly failing profiles over and over again.
+        Account cooldown code is prepared but commented out so you can enable it later if desired.
+        """
+        try:
+            if not hasattr(self, "buffer") or not getattr(self.buffer, "redis_client", None):
+                return
+
+            redis_client = self.buffer.redis_client
+            metadata_key = RedisKeys.channel_metadata(self.channel_id)
+            md = redis_client.hgetall(metadata_key)
+            if not md:
+                return
+
+            # Determine current profile from channel metadata
+            key_profile = ChannelMetadataField.M3U_PROFILE.encode("utf-8")
+            m3u_profile_id = None
+            if key_profile in md:
+                try:
+                    m3u_profile_id = md[key_profile].decode("utf-8")
+                except Exception:
+                    m3u_profile_id = md[key_profile]
+
+            if m3u_profile_id:
+                cooldown_key = RedisKeys.m3u_profile_cooldown(m3u_profile_id)
+                # 12 hours cooldown
+                redis_client.setex(cooldown_key, 12 * 3600, "1")
+                logger.warning(
+                    "Put M3U profile %s on 12h cooldown after failures for channel %s",
+                    m3u_profile_id,
+                    self.channel_id,
+                )
+
+            # OPTIONAL: Account-wide cooldown (prepared but inactive by default).
+            # To enable, uncomment the following block AND make sure ChannelMetadataField
+            # has a suitable field for the account identifier.
+            #
+            # key_account = ChannelMetadataField.M3U_ACCOUNT.encode("utf-8")
+            # m3u_account_id = None
+            # if key_account in md:
+            #     try:
+            #         m3u_account_id = md[key_account].decode("utf-8")
+            #     except Exception:
+            #         m3u_account_id = md[key_account]
+            #
+            # if m3u_account_id:
+            #     account_cooldown_key = RedisKeys.m3u_account_cooldown(m3u_account_id)
+            #     redis_client.setex(account_cooldown_key, 12 * 3600, "1")
+            #     logger.warning(
+            #         "Put M3U account %s on 12h cooldown after failures for channel %s "
+            #         "(ACCOUNT COOLDOWN IS INACTIVE BY DEFAULT - you enabled it manually).",
+            #         m3u_account_id,
+            #         self.channel_id,
+            #     )
+
+        except Exception as e:
+            logger.error(
+                "Failed to set profile/account cooldown after URL failure on channel %s: %s",
+                self.channel_id,
+                e,
+            )
+
+
