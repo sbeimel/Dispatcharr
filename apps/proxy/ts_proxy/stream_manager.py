@@ -164,6 +164,9 @@ class StreamManager:
         self.current_stream_id = stream_id
         self.tried_stream_ids = set()
 
+        # Track which M3U profiles have already been tried for the current stream
+        self.tried_profile_ids = set()
+        
         # IMPROVED LOGGING: Better handle and track stream ID
         if stream_id:
             self.tried_stream_ids.add(stream_id)
