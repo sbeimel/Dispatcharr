@@ -9,7 +9,7 @@ class BaseConfig:
     MAX_RETRIES = 1
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 5  # seconds to wait for initial connection
-    MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
+    MAX_STREAM_SWITCHES = 6  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
