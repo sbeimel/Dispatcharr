@@ -254,54 +254,56 @@ def fetch_m3u_lines(account, use_cache=False):
 
                 # Basic validation: check if content looks like an M3U file
                 try:
-                    # First, try UTF-8 decoding
-                    content_str = temp_content.decode('utf-8')
-                except UnicodeDecodeError as e:
-                    logger.warning(
-                        "UTF-8 decode failed for M3U content (account %s): %s. "
-                        "Trying latin-1 fallback.",
-                        account.id,
-                        e,
-                    )
+                    # Decode playlist content robustly:
+                    # 1) Try UTF-8
+                    # 2) Fallback to latin-1 if necessary (many providers still use it)
                     try:
-                        # Many providers still use ISO-8859-1 / Windows-1252
-                        content_str = temp_content.decode('latin-1')
-                    except UnicodeDecodeError:
-                        logger.error(
-                            "Non-text content received for account %s. First 200 bytes: %r",
+                        content_str = temp_content.decode('utf-8')
+                    except UnicodeDecodeError as e:
+                        logger.warning(
+                            "UTF-8 decode failed for M3U content (account %s): %s. "
+                            "Trying latin-1 fallback.",
                             account.id,
-                            temp_content[:200],
+                            e,
                         )
-                        error_msg = (
-                            f"Server provided non-text content from URL: {account.server_url}. "
-                            "Unable to process as M3U file."
-                        )
-                        account.status = M3UAccount.Status.ERROR
-                        account.last_message = error_msg
-                        account.save(update_fields=["status", "last_message"])
-                        send_m3u_update(
-                            account.id,
-                            "downloading",
-                            100,
-                            status="error",
-                            error=error_msg,
-                        )
-                        return [], False
+                        try:
+                            content_str = temp_content.decode('latin-1')
+                        except UnicodeDecodeError:
+                            logger.error(
+                                "Non-text content received for account %s. First 200 bytes: %r",
+                                account.id,
+                                temp_content[:200],
+                            )
+                            error_msg = (
+                                f"Server provided non-text content from URL: {account.server_url}. "
+                                "Unable to process as M3U file."
+                            )
+                            account.status = M3UAccount.Status.ERROR
+                            account.last_message = error_msg
+                            account.save(update_fields=["status", "last_message"])
+                            send_m3u_update(
+                                account.id,
+                                "downloading",
+                                100,
+                                status="error",
+                                error=error_msg,
+                            )
+                            return [], False
 
-                # Normalize line endings and split into lines
-                content_lines = (
-                    content_str.replace("\r\n", "\n").replace("\r", "\n").strip().split("\n")
-                )
+                    # Normalize line endings and split into lines
+                    content_lines = (
+                        content_str.replace('\r\n', '\n').replace('\r', '\n').strip().split('\n')
+                    )
 
-                # Log first few lines for debugging (be careful not to log too much)
-                preview_lines = content_lines[:5]
-                logger.info(f"Content preview (first 5 lines): {preview_lines}")
-                logger.info(f"Total lines in content: {len(content_lines)}")
+                    # Log first few lines for debugging (be careful not to log too much)
+                    preview_lines = content_lines[:5]
+                    logger.info(f"Content preview (first 5 lines): {preview_lines}")
+                    logger.info(f"Total lines in content: {len(content_lines)}")
 
-                # Check if it's a valid M3U file (should start with #EXTM3U or contain M3U-like content)
-                is_valid_m3u = False
+                    # Check if it's a valid M3U file (should start with #EXTM3U or contain M3U-like content)
+                    is_valid_m3u = False
 
-                # First, check if this looks like an error response disguised as 200 OK
+                    # First, check if this looks like an error response disguised as 200 OK
                     content_lower = content_str.lower()
                     if any(error_indicator in content_lower for error_indicator in [
                         '<html', '<!doctype html', 'error', 'not found', '404', '403', '500',
