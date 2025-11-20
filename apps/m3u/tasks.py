@@ -477,41 +477,17 @@ def fetch_m3u_lines(account, use_cache=False):
     elif account.file_path:
         try:
             if account.file_path.endswith(".gz"):
-                # Try UTF-8 first, then fall back to latin-1
-                try:
-                    with gzip.open(account.file_path, "rt", encoding="utf-8") as f:
-                        return f.readlines(), True
-                except UnicodeDecodeError as e:
-                    logger.warning(
-                        "UTF-8 decode failed for gzipped M3U file %s: %s. Trying latin-1 fallback.",
-                        account.file_path,
-                        e,
-                    )
-                    with gzip.open(account.file_path, "rt", encoding="latin-1") as f:
-                        return f.readlines(), True
+                with gzip.open(account.file_path, "rt", encoding="utf-8") as f:
+                    return f.readlines(), True
 
             elif account.file_path.endswith(".zip"):
-                # Read the first .m3u inside the ZIP, with UTF-8 -> latin-1 fallback
-                try:
-                    with zipfile.ZipFile(account.file_path, "r") as zip_file:
-                        for name in zip_file.namelist():
-                            if name.endswith(".m3u"):
-                                try:
-                                    with zip_file.open(name) as f:
-                                        return [
-                                            line.decode("utf-8") for line in f.readlines()
-                                        ], True
-                                except UnicodeDecodeError as e:
-                                    logger.warning(
-                                        "UTF-8 decode failed for M3U inside ZIP %s (%s): %s. Trying latin-1 fallback.",
-                                        account.file_path,
-                                        name,
-                                        e,
-                                    )
-                                    with zip_file.open(name) as f:
-                                        return [
-                                            line.decode("latin-1") for line in f.readlines()
-                                        ], True
+                with zipfile.ZipFile(account.file_path, "r") as zip_file:
+                    for name in zip_file.namelist():
+                        if name.endswith(".m3u"):
+                            with zip_file.open(name) as f:
+                                return [
+                                    line.decode("utf-8") for line in f.readlines()
+                                ], True
 
                     error_msg = (
                         f"No .m3u file found in ZIP archive: {account.file_path}"
@@ -526,20 +502,10 @@ def fetch_m3u_lines(account, use_cache=False):
                     return [], False
 
             else:
-                # Plain file on disk: also use UTF-8 with latin-1 fallback
-                try:
-                    with open(account.file_path, "r", encoding="utf-8") as f:
-                        return f.readlines(), True
-                except UnicodeDecodeError as e:
-                    logger.warning(
-                        "UTF-8 decode failed for M3U file %s: %s. Trying latin-1 fallback.",
-                        account.file_path,
-                        e,
-                    )
-                    with open(account.file_path, "r", encoding="latin-1") as f:
-                        return f.readlines(), True
+                with open(account.file_path, "r", encoding="utf-8") as f:
+                    return f.readlines(), True
 
-        except (IOError, OSError, zipfile.BadZipFile, gzip.BadGzipFile, UnicodeDecodeError) as e:
+        except (IOError, OSError, zipfile.BadZipFile, gzip.BadGzipFile) as e:
             error_msg = f"Error opening file {account.file_path}: {e}"
             logger.error(error_msg)
             account.status = M3UAccount.Status.ERROR
