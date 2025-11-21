@@ -48,7 +48,6 @@ class ChannelMetadataField:
     # Profile fields
     STREAM_PROFILE = "stream_profile"
     M3U_PROFILE = "m3u_profile"
-    M3U_ACCOUNT = "m3u_account"
 
     # Status and error fields
     ERROR_MESSAGE = "error_message"
