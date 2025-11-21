@@ -88,3 +88,22 @@ class RedisKeys:
     def client_metadata(channel_id, client_id):
         """Key for client metadata hash"""
         return f"ts_proxy:channel:{channel_id}:clients:{client_id}"
+        
+    @staticmethod
+    def profile_cooldown(profile_id: int) -> str:
+        """
+        Key for per-profile cooldown marker.
+        Wird gesetzt, wenn ein M3U-Profil als fehlerhaft markiert wird
+        (z.B. 403, 4XX etc.) und soll verhindern, dass dieses Profil
+        in der Cooldown-Zeit erneut verwendet wird.
+        """
+        return f"ts_proxy:m3u_profile:{profile_id}:cooldown"
+
+    @staticmethod
+    def account_cooldown(account_id: int) -> str:
+        """
+        Key for per-account cooldown marker (optional).
+        Kann später verwendet werden, um komplette Accounts
+        temporär zu sperren, wenn alle Profile kaputt sind.
+        """
+        return f"ts_proxy:m3u_account:{account_id}:cooldown"    
