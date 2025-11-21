@@ -17,6 +17,42 @@ import requests
 
 logger = get_logger()
 
+
+# --- Cooldown Extensions ---
+try:
+    from .redis_keys import RedisKeys
+except Exception:
+    from enum import Enum
+    class RedisKeys(Enum):
+        M3U_PROFILE_COOLDOWN = "m3u:profile:%s:cooldown"
+
+from datetime import timedelta, datetime
+
+PROFILE_COOLDOWN_SECONDS = 12*60*60
+
+def get_redis():
+    try:
+        return RedisClient.get_client()
+    except:
+        return None
+
+def set_profile_on_cooldown(profile_id, seconds=PROFILE_COOLDOWN_SECONDS):
+    r = get_redis()
+    if not r: 
+        return
+    key = RedisKeys.M3U_PROFILE_COOLDOWN.value % profile_id
+    r.setex(key, seconds, 1)
+
+def is_profile_on_cooldown(profile_id):
+    r = get_redis()
+    if not r:
+        return False
+    key = RedisKeys.M3U_PROFILE_COOLDOWN.value % profile_id
+    return r.exists(key)
+
+def filter_profiles_not_on_cooldown(profile_ids):
+    return [p for p in profile_ids if not is_profile_on_cooldown(p)]
+# --- End Cooldown ---
 def get_redis_client():
     """
     Kleiner Helper, um den gemeinsamen Redis-Client zu holen.
