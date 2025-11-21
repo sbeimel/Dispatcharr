@@ -12,10 +12,17 @@ from apps.m3u.mac_portal_client import MacPortalClient, MacPortalError
 from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
+from core.utils import RedisClient
 import requests
 
 logger = get_logger()
 
+def get_redis_client():
+    """
+    Kleiner Helper, um den gemeinsamen Redis-Client zu holen.
+    Wird z.B. in get_stream_info_for_switch verwendet.
+    """
+    return RedisClient.get_client()
 
 def get_stream_object(id: str):
     try:
