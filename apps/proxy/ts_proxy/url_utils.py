@@ -348,7 +348,25 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
             profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
 
             selected_profile = None
+            redis_client = get_redis_client()
             for profile in profiles:
+                # Skip profiles that are currently on cooldown
+                if redis_client:
+                    try:
+                        cooldown_key = RedisKeys.profile_cooldown(profile.id)
+                        if redis_client.exists(cooldown_key):
+                            logger.info(
+                                "Skipping M3U profile %s for stream %s because it is on cooldown",
+                                profile.id,
+                                stream_id,
+                            )
+                            continue
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to check cooldown for M3U profile %s: %s",
+                            profile.id,
+                            e,
+                        )
 
                 # Check connection availability
                 if redis_client:

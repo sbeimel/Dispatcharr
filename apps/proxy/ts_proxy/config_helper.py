@@ -101,7 +101,8 @@ class ConfigHelper:
         """Get channel initialization grace period in seconds"""
         return Config.get_channel_init_grace_period()
 
-    @staticmethod
+
+@staticmethod
     def chunk_timeout():
         """
         Get chunk timeout in seconds (used for both socket and HTTP read timeouts).
