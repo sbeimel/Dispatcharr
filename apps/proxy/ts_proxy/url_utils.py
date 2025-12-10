@@ -230,33 +230,8 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 logger.error(f"Stream {stream.id} has no M3U account")
                 return None, None, False, None
 
-<<<<<<< ours
-            # Get active profiles for this M3U account
-            m3u_profiles = m3u_account.profiles.filter(is_active=True)
-            default_profile = next((obj for obj in m3u_profiles if obj.is_default), None)
-
-            if not default_profile:
-                logger.error(f"No default active profile found for M3U account {m3u_account.id}")
-                return None, None, False, None
-
-            # Check profiles in order: default first, then others
-            profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
-
-            # Try to find an available profile with connection capacity
-            redis_client = RedisClient.get_client()
-            selected_profile = None
-
-            for profile in profiles:
-                logger.info(profile)
-
-                # Check connection availability
-                if redis_client:
-                    profile_connections_key = f"profile_connections:{profile.id}"
-                    current_connections = int(redis_client.get(profile_connections_key) or 0)
-=======
             m3u_profiles = m3u_account.profiles.all()
             profile = next((obj for obj in m3u_profiles if getattr(obj, "is_default", False)), None)
->>>>>>> theirs
 
                     # Check if profile has available slots (or unlimited connections)
                     if profile.max_streams == 0 or current_connections < profile.max_streams:
@@ -280,10 +255,8 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
-<<<<<<< ours
+
             # Get stream URL with the selected profile's URL transformation
-            stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
-=======
             # Build stream URL:
             # - for MAC accounts: resolve via portal + MAC failover
             # - otherwise: use normal pattern-based URL transform
@@ -301,7 +274,6 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 m3u_profile = profile
                 input_url = stream.url
                 stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
->>>>>>> theirs
 
             # Determine stream profile (per-stream or default)
             if stream.stream_profile:
