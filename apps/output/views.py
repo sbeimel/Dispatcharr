@@ -29,30 +29,6 @@ import hashlib
 
 logger = logging.getLogger(__name__)
 
-<<<<<<< ours
-def get_client_identifier(request):
-    """Get client information including IP, user agent, and a unique hash identifier
-
-    Returns:
-        tuple: (client_id_hash, client_ip, user_agent)
-    """
-    # Get client IP (handle proxies)
-    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
-    if x_forwarded_for:
-        client_ip = x_forwarded_for.split(',')[0].strip()
-    else:
-        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
-
-    # Get user agent
-    user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
-
-    # Create a hash for a shorter cache key
-    client_str = f"{client_ip}:{user_agent}"
-    client_id_hash = hashlib.md5(client_str.encode()).hexdigest()[:12]
-
-    return client_id_hash, client_ip, user_agent
-=======
-
 def get_basic_auth_user(request):
     """Authenticate request using HTTP Basic Auth against the Django user model.
 
@@ -88,8 +64,6 @@ def get_basic_auth_user(request):
 
     return user
 
->>>>>>> theirs
-
 def m3u_endpoint(request, profile_name=None, user=None):
     logger.debug("m3u_endpoint called: method=%s, profile=%s", request.method, profile_name)
     if not network_access_allowed(request, "M3U_EPG"):
@@ -106,14 +80,6 @@ def m3u_endpoint(request, profile_name=None, user=None):
         )
         return JsonResponse({"error": "Forbidden"}, status=403)
 
-<<<<<<< ours
-    # Handle HEAD requests efficiently without generating content
-    if request.method == "HEAD":
-        logger.debug("Handling HEAD request for M3U")
-        response = HttpResponse(content_type="audio/x-mpegurl")
-        response["Content-Disposition"] = 'attachment; filename="channels.m3u"'
-        return response
-=======
     # Protect /output/m3u with HTTP Basic Auth using Dispatcharr users
     if user is None:
         auth_result = get_basic_auth_user(request)
@@ -121,7 +87,7 @@ def m3u_endpoint(request, profile_name=None, user=None):
         if isinstance(auth_result, HttpResponse):
             return auth_result
         user = auth_result
->>>>>>> theirs
+
 
     return generate_m3u(request, profile_name, user)
 
