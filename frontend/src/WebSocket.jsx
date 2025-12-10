@@ -569,16 +569,8 @@ export const WebsocketProvider = ({ children }) => {
               break;
 
             case 'epg_refresh':
-<<<<<<< ours
               // If we have source/account info, check if EPG exists before processing
               if (parsedEvent.data.source || parsedEvent.data.account) {
-=======
-              // Update the store with progress information
-              updateEPGProgress(parsedEvent.data);
-
-              // If we have source_id/account info, update the EPG source status
-              if (parsedEvent.data.source_id || parsedEvent.data.account) {
->>>>>>> theirs
                 const sourceId =
                   parsedEvent.data.source_id || parsedEvent.data.account;
                 const epg = epgs[sourceId];
