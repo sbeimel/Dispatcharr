@@ -40,6 +40,7 @@ class StreamType:
 
 # Channel metadata field names stored in Redis
 class ChannelMetadataField:
+    M3U_ACCOUNT = "m3u_account"
     # Basic fields
     URL = "url"
     USER_AGENT = "user_agent"

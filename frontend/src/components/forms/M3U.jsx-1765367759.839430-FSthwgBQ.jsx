@@ -372,9 +372,8 @@ const M3U = ({
 
   return (
     <>
-<<<<<<< ours
       <Modal
-        size={700}
+        size={900}
         opened={isOpen}
         onClose={close}
         title="M3U Account"
@@ -384,9 +383,6 @@ const M3U = ({
         trapFocus={false}
         yOffset="2vh"
       >
-=======
-      <Modal size={900} opened={isOpen} onClose={close} title="M3U Account">
->>>>>>> theirs
         <LoadingOverlay
           visible={form.submitting}
           overlayBlur={2}
