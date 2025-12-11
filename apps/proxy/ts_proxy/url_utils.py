@@ -614,3 +614,60 @@ def get_connections_left(m3u_profile_id: int) -> int:
     except Exception as e:
         logger.error(f"Error getting connections left for M3U profile {m3u_profile_id}: {e}")
         return 0
+
+
+def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
+    """
+    Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
+    Return schema compatible with get_stream_info_for_switch(...).
+    """
+    try:
+        obj = get_stream_object(channel_id)
+        if isinstance(obj, Channel):
+            channel = obj
+        else:
+            logger.info(
+                "get_stream_info_for_profile: %s refers to a Stream, skipping profile failover",
+                channel_id,
+            )
+            return {"error": "Channel ID refers to a Stream, not a Channel"}
+        
+        stream = get_object_or_404(Stream, pk=stream_id)
+        m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
+
+        m3u_account = m3u_profile.m3u_account
+
+        if m3u_account.account_type == M3UAccount.Types.MAC:
+            # Use the failover system for MAC accounts
+            from .failover_utils import FailoverManager
+            manager = FailoverManager(channel_id)
+            
+            # Try to get a new MAC for this stream
+            stream_url, profile_id, error = manager._try_mac_account_failover(stream, m3u_account)
+            if not stream_url:
+                return {"error": error or "Failed to resolve MAC stream"}
+        else:
+            input_url = stream.url
+            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+
+        stream_profile = channel.get_stream_profile()
+        transcode = False if (stream_profile is None or stream_profile.is_proxy()) else True
+        profile_value = stream_profile.id if stream_profile else None
+
+        # Get user agent
+        user_agent = m3u_account.get_user_agent().user_agent
+        if not user_agent:
+            default_ua = UserAgent.objects.filter(is_active=True).first()
+            user_agent = default_ua.user_agent if default_ua else None
+
+        return {
+            "url": stream_url,
+            "user_agent": user_agent,
+            "transcode": transcode,
+            "stream_profile": profile_value,
+            "stream_id": stream.id,
+            "m3u_profile_id": m3u_profile.id,
+        }
+    except Exception as e:
+        logger.error(f"Error in get_stream_info_for_profile: {e}")
+        return {"error": str(e)}

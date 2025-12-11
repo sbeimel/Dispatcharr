@@ -352,9 +352,27 @@ class StreamManager:
                             logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
                             gevent.sleep(timeout)  # REPLACE time.sleep(timeout)
 
-                # If URL failed and we're still running, try switching to another stream
+                # If URL failed and we're still running, try MAC failover first, then stream failover
                 if url_failed and self.running:
-                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
+                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying MAC failover first for channel: {self.channel_id}")
+
+                    # First, try to recover by switching to another MAC on the same account/profile (if applicable)
+                    mac_switched = False
+                    try:
+                        mac_switched = self._try_next_mac() 
+                    except Exception:
+                        logger.error("Error while attempting MAC-level failover on channel %s", self.channel_id, exc_info=True)
+                        mac_switched = False
+                    
+                    if mac_switched:
+                        # Successfully switched MAC, reset retry count and continue
+                        self.retry_count = 0
+                        stream_switch_attempts += 1
+                        logger.info(f"Successfully switched MAC for channel {self.channel_id}; continuing streaming")
+                        continue
+                    
+                    # MAC failover did not succeed or is not applicable -> fall back to profile/stream failover
+                    logger.info(f"MAC failover not applicable or failed, trying stream failover for channel: {self.channel_id}")
 
                     # Try to switch to next stream
                     switch_result = self._try_next_stream()
@@ -1575,6 +1593,187 @@ class StreamManager:
             return True  # Return value to indicate check was successful
         except Exception as e:
             logger.error(f"Error in buffer check for channel {self.channel_id}: {e}")
+            return False
+
+    def _try_next_mac(self) -> bool:
+        """
+        Attempt to switch to another MAC for the SAME stream and M3U profile.
+        This is only applicable for MAC-type M3U accounts. It is used as a
+        lower-level failover before we give up on the current profile/stream.
+
+        Returns:
+            bool: True on successful switch to a different MAC (and URL), False otherwise.
+        """
+        try:
+            # We need a current stream_id to work with
+            if not getattr(self, "current_stream_id", None):
+                return False
+
+            redis_client = getattr(self.buffer, "redis_client", None)
+            if not redis_client:
+                return False
+
+            # Figure out which M3U profile is currently in use from metadata
+            from .redis_keys import RedisKeys
+            from .constants import ChannelMetadataField
+            
+            metadata_key = RedisKeys.channel_metadata(self.channel_id)
+            md = redis_client.hgetall(metadata_key)
+            if not md:
+                return False
+
+            m3u_key = ChannelMetadataField.M3U_PROFILE.encode("utf-8")
+            if m3u_key not in md:
+                return False
+
+            try:
+                m3u_profile_id = int(md[m3u_key].decode("utf-8"))
+            except Exception:
+                return False
+
+            # Load stream, profile and account
+            from django.shortcuts import get_object_or_404
+            from apps.channels.models import Stream
+            from apps.m3u.models import M3UAccountProfile, M3UAccount, M3UAccountMac
+            from django.utils import timezone
+            from urllib.parse import urlparse, parse_qs
+            
+            stream = get_object_or_404(Stream, pk=self.current_stream_id)
+            m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
+            m3u_account = m3u_profile.m3u_account
+
+            # Only applicable for MAC-type accounts
+            if m3u_account.account_type != M3UAccount.Types.MAC:
+                return False
+
+            # Try to infer the currently used MAC from the URL (mac=... query parameter)
+            current_mac_value = None
+            try:
+                parsed = urlparse(self.url or "")
+                qs = parse_qs(parsed.query or "")
+                mac_vals = qs.get("mac") or qs.get("MAC") or []
+                if mac_vals:
+                    current_mac_value = mac_vals[0]
+            except Exception:
+                current_mac_value = None
+
+            if current_mac_value:
+                try:
+                    mac_entry = m3u_account.macs.filter(address__iexact=current_mac_value).first()
+                except Exception:
+                    mac_entry = None
+
+                if mac_entry:
+                    try:
+                        mac_entry.status = M3UAccountMac.Status.ERROR
+                        mac_entry.last_error = "runtime_stream_failure"
+                        mac_entry.last_checked = timezone.now()
+                        mac_entry.save(update_fields=["status", "last_error", "last_checked"])
+                        logger.info(
+                            "Marked MAC %s on account %s as ERROR due to runtime failure on channel %s",
+                            current_mac_value,
+                            m3u_account.id,
+                            self.channel_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to mark MAC %s as ERROR for account %s during MAC failover",
+                            current_mac_value,
+                            m3u_account.id,
+                            exc_info=True,
+                        )
+
+                    # Unmark this MAC as busy
+                    try:
+                        from core.utils import RedisClient
+                        redis_client = RedisClient.get_client()
+                    except Exception:
+                        redis_client = None
+
+                    if redis_client:
+                        try:
+                            busy_key = RedisKeys.mac_busy(mac_entry.id)
+                            redis_client.delete(busy_key)
+                        except Exception:
+                            logger.debug(
+                                "Failed to clear busy marker for MAC %s on account %s during MAC failover",
+                                current_mac_value,
+                                m3u_account.id,
+                                exc_info=True,
+                            )
+
+            # Ask url_utils for a new URL on the SAME profile.
+            # Because we have just marked the previous MAC as ERROR, the resolver will pick the next MAC.
+            from .url_utils import get_stream_info_for_profile
+            
+            info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, m3u_profile_id)
+            if not info or "error" in info or not info.get("url"):
+                logger.warning(
+                    "MAC failover could not obtain a new URL for stream %s / profile %s on channel %s: %s",
+                    self.current_stream_id,
+                    m3u_profile_id,
+                    self.channel_id,
+                    info,
+                )
+                return False
+
+            new_url = info["url"]
+            new_user_agent = info["user_agent"]
+            new_transcode = info["transcode"]
+            stream_id = info["stream_id"]
+
+            # Update runtime params
+            self.user_agent = new_user_agent
+            self.transcode = new_transcode
+
+            # Update Redis metadata
+            try:
+                redis_client.hset(
+                    metadata_key,
+                    mapping={
+                        ChannelMetadataField.URL: new_url,
+                        ChannelMetadataField.USER_AGENT: new_user_agent,
+                        ChannelMetadataField.STREAM_PROFILE: info["stream_profile"],
+                        ChannelMetadataField.M3U_PROFILE: str(info["m3u_profile_id"]),
+                        ChannelMetadataField.STREAM_ID: str(stream_id),
+                        ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
+                        ChannelMetadataField.STREAM_SWITCH_REASON: "mac_failover_on_runtime_error",
+                    },
+                )
+                try:
+                    redis_client.set(f"stream_profile:{stream_id}", str(info["m3u_profile_id"]), ex=3600)
+                except Exception:
+                    logger.debug("Failed to update stream_profile mapping in Redis during MAC failover", exc_info=True)
+            except Exception:
+                logger.debug("Failed to update channel metadata in Redis during MAC failover", exc_info=True)
+
+            # Finally, update URL in StreamManager
+            if hasattr(self, "update_url"):
+                ok = self.update_url(new_url, stream_id, info["m3u_profile_id"])
+                if not ok:
+                    logger.warning(
+                        "update_url failed during MAC failover for stream %s / profile %s on channel %s",
+                        stream_id,
+                        info["m3u_profile_id"],
+                        self.channel_id,
+                    )
+                    return False
+
+            logger.info(
+                "Successfully switched to new MAC for account %s on channel %s (stream %s, profile %s)",
+                m3u_account.id,
+                self.channel_id,
+                stream_id,
+                info["m3u_profile_id"],
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "Unexpected error during MAC failover for channel %s: %s",
+                self.channel_id,
+                e,
+                exc_info=True,
+            )
             return False
 
     def _try_next_stream(self):
