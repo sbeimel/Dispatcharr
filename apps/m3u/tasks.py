@@ -2674,9 +2674,9 @@ def refresh_single_m3u_account(account_id):
         streams_created = 0
         streams_updated = 0
 
-        if account.account_type == M3UAccount.Types.STADNARD:
+        if account.account_type in [M3UAccount.Types.STANDARD, M3UAccount.Types.MAC]:
             logger.debug(
-                f"Processing Standard account ({account_id}) with groups: {existing_groups}"
+                f"Processing {account.get_account_type_display()} account ({account_id}) with groups: {existing_groups}"
             )
             # Break into batches and process with threading - use global batch size
             batches = [
@@ -3098,9 +3098,6 @@ def _refresh_mac_account_with_groups(account_id):
                     mac_obj.save()
                     success_count += 1
                     
-                    # For channel import, we only need one working MAC
-                    break
-                    
             except MacPortalError as e:
                 logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
                 mac_obj.status = M3UAccountMac.Status.ERROR
@@ -3229,7 +3226,6 @@ def _refresh_mac_account_direct(account_id):
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
                 mac_obj.save()
-                continue
                 continue
         
         if success_count > 0:
