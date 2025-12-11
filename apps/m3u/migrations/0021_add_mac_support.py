@@ -7,7 +7,7 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('m3u', '0020_alter_m3uaccount_mac_address'),  # Adjust to your latest migration
+        ('m3u', '0018_add_profile_custom_properties'),  # Correct latest migration
     ]
 
     operations = [
