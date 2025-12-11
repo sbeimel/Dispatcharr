@@ -545,7 +545,7 @@ class M3UAccountMac(models.Model):
             return False
         
         # Check standard format XX:XX:XX:XX:XX:XX
-        pattern = r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'$'
+        pattern = r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
         return bool(re.match(pattern, mac))
     
     def save(self, *args, **kwargs):
