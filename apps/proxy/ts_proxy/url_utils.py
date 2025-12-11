@@ -7,225 +7,13 @@ import re
 from typing import Optional, Tuple, List
 from django.shortcuts import get_object_or_404
 from apps.channels.models import Channel, Stream
-from apps.m3u.models import M3UAccount, M3UAccountProfile, M3UAccountMac
+from apps.m3u.models import M3UAccount, M3UAccountProfile
 from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
 import requests
 
 logger = get_logger()
-
-
-def _resolve_mac_stream_with_failover(
-    m3u_account: M3UAccount,
-    stream: Stream,
-) -> Tuple[Optional[str], Optional['M3UAccountMac'], Optional[str]]:
-    """Resolve a MAC/STB-Portal stream URL using the first valid MAC.
-
-    Tries MACs in priority order. Skips those marked EXPIRED/ERROR or with past expires_at.
-    For each MAC, it can also try multiple HTTP proxies (if configured) before giving up
-    on that MAC. On MAC-level errors (expired, unauthorized, etc.) the MAC is marked as
-    EXPIRED/ERROR so it won't be retried until the next refresh.
-    """
-    from apps.m3u.models import M3UAccountMac
-    from apps.m3u.mac_portal_client import MacPortalClient, MacPortalError
-    from django.utils import timezone
-    
-    if m3u_account.account_type != M3UAccount.Types.MAC:
-        return stream.url, None, None
-
-    props = m3u_account.custom_properties or {}
-    proxy_value = props.get("proxy")
-    timezone_str = props.get("timezone", "Europe/Berlin")
-
-    # Parse proxy list: support comma, whitespace or newline separated values
-    proxy_list = []
-    if isinstance(proxy_value, str) and proxy_value.strip():
-        raw = proxy_value.replace("\r", "\n").replace(",", "\n")
-        parts = [p.strip() for p in raw.split() if p.strip()]
-        proxy_list = list(dict.fromkeys(parts))  # Remove duplicates while preserving order
-    elif isinstance(proxy_value, (list, tuple)):
-        seen = set()
-        for p in proxy_value:
-            s = str(p).strip()
-            if s and s not in seen:
-                seen.add(s)
-                proxy_list.append(s)
-
-    # If no proxy configured at all: try direct only
-    if not proxy_list:
-        proxy_list = [None]
-
-    # Try to get a Redis client for MAC busy tracking (optional)
-    try:
-        from core.utils import RedisClient
-        from .redis_keys import RedisKeys
-        redis_client = RedisClient.get_client()
-    except Exception:
-        redis_client = None
-
-    # Determine command for the portal
-    stream_props = stream.custom_properties or {}
-    cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
-
-    # If it's a mac:// URL, extract the cmd
-    if cmd and cmd.startswith("mac://"):
-        try:
-            import base64
-            encoded_data = cmd[6:]  # Remove "mac://" prefix
-            decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
-            parts = decoded_data.split("|", 3)
-            if len(parts) >= 3:
-                cmd = parts[2]  # Extract cmd from mac:// URL
-        except Exception as e:
-            logger.warning(f"Failed to extract cmd from mac:// URL: {e}")
-
-    error_messages = []
-
-    # Get candidate MACs in priority order
-    try:
-        candidates = _get_candidate_macs_for_streaming(m3u_account)
-    except Exception as e:
-        logger.error(f"Error getting candidate MACs for account {m3u_account.id}: {e}")
-        candidates = []
-
-    if not candidates:
-        logger.error(f"No candidate MACs available for account {m3u_account.id}")
-        return None, None, "No candidate MACs available"
-
-    # If Redis is available, prefer MACs that are not currently busy
-    if redis_client:
-        free_candidates = []
-        busy_candidates = []
-        try:
-            for m in candidates:
-                try:
-                    busy_key = RedisKeys.mac_busy(m.id)
-                    is_busy = bool(redis_client.exists(busy_key))
-                except Exception:
-                    is_busy = False
-                if is_busy:
-                    busy_candidates.append(m)
-                else:
-                    free_candidates.append(m)
-        except Exception:
-            # Fallback: if anything goes wrong, use original list
-            free_candidates = candidates
-            busy_candidates = []
-
-        if free_candidates:
-            candidates = free_candidates
-        elif candidates:
-            # All MACs are busy → don't force, return error so caller can fall back to backup streams
-            logger.warning(
-                "All candidate MACs are currently busy for MAC account %s – skipping MAC usage",
-                m3u_account.id,
-            )
-            return None, None, "All MACs busy"
-
-    # Try each MAC, and for each MAC, try each configured proxy until one works
-    for mac_entry in candidates:
-        mac_value = mac_entry.address
-        last_error_for_mac = None
-
-        for proxy in proxy_list:
-            try:
-                client = MacPortalClient(
-                    base_url=m3u_account.server_url,
-                    mac=mac_value,
-                    proxy=proxy,
-                    timezone=timezone_str,
-                )
-                url = client.create_link(cmd)
-                # Successfully built link → mark valid and return
-                try:
-                    mac_entry.status = M3UAccountMac.Status.VALID
-                    mac_entry.last_checked = timezone.now()
-                    mac_entry.last_error = None
-                    mac_entry.save(update_fields=["status", "last_checked", "last_error"])
-                except Exception:
-                    pass
-
-                # Mark MAC as busy if Redis is available
-                if redis_client:
-                    try:
-                        busy_key = RedisKeys.mac_busy(mac_entry.id)
-                        redis_client.setex(busy_key, 3600, "1")  # 1 hour
-                    except Exception:
-                        pass
-
-                return url, mac_entry, None
-
-            except MacPortalError as e:
-                # MAC-level error (expired / unauthorized / etc.) → mark MAC and stop trying further proxies for it
-                msg = str(e)
-                logger.warning(
-                    "MAC portal error for MAC %s on account %s with proxy %s: %s",
-                    mac_value,
-                    m3u_account.id,
-                    proxy,
-                    msg,
-                )
-                error_messages.append(f"{mac_value}: {msg}")
-                last_error_for_mac = msg
-                status = M3UAccountMac.Status.ERROR
-                lowered = msg.lower()
-                if "expir" in lowered or "no active" in lowered or "trial ended" in lowered:
-                    status = M3UAccountMac.Status.EXPIRED
-                try:
-                    mac_entry.status = status
-                    mac_entry.last_error = msg
-                    mac_entry.last_checked = timezone.now()
-                    mac_entry.save(update_fields=["status", "last_error", "last_checked"])
-                except Exception:
-                    pass
-                # MAC is obviously not valid → don't continue with other proxies
-                break
-            except Exception as e:
-                # Network/proxy error: just log, try next proxy or MAC
-                msg = str(e)
-                logger.warning(
-                    "Network/proxy error for MAC %s on account %s with proxy %s: %s",
-                    mac_value,
-                    m3u_account.id,
-                    proxy,
-                    msg,
-                )
-                last_error_for_mac = msg
-                continue
-
-        # If we've tried all proxies and got no URL, but it wasn't a clear MAC error, log the last error for this MAC
-        if last_error_for_mac and mac_entry.status not in (M3UAccountMac.Status.ERROR, M3UAccountMac.Status.EXPIRED):
-            error_messages.append(f"{mac_value}: {last_error_for_mac}")
-
-    if error_messages:
-        return None, None, "; ".join(error_messages)
-
-    return None, None, "No usable MAC found"
-
-
-def _get_candidate_macs_for_streaming(m3u_account: M3UAccount):
-    """Get candidate MACs for streaming, excluding EXPIRED/ERROR and past expires_at."""
-    from apps.m3u.models import M3UAccountMac
-    from django.utils import timezone
-    
-    # Get MACs that are not EXPIRED or ERROR
-    candidates = m3u_account.macs.filter(
-        status__in=[M3UAccountMac.Status.VALID, M3UAccountMac.Status.UNKNOWN]
-    ).order_by('priority')
-    
-    # Filter out MACs with past expiry dates
-    valid_candidates = []
-    now = timezone.now()
-    
-    for mac_obj in candidates:
-        if mac_obj.expires_at and mac_obj.expires_at < now:
-            logger.debug(f"MAC {mac_obj.address} has expired ({mac_obj.expires_at}), skipping")
-            continue
-        valid_candidates.append(mac_obj)
-    
-    return valid_candidates
-
 
 def get_stream_object(id: str):
     try:
@@ -307,20 +95,8 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
-            # Build stream URL: for MAC accounts use portal + MAC failover, otherwise use normal pattern-based URL transform
-            if m3u_account.account_type == M3UAccount.Types.MAC:
-                stream_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
-                if not stream_url:
-                    logger.error(
-                        "Failed to resolve MAC stream for preview of stream %s on account %s: %s",
-                        stream.id,
-                        m3u_account.id,
-                        error,
-                    )
-                    return None, None, False, None
-            else:
-                # Get stream URL with the selected profile's URL transformation
-                stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
+            # Get stream URL with the selected profile's URL transformation
+            stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
 
             # Check if the stream has its own stream_profile set, otherwise use default
             if stream.stream_profile:
@@ -372,17 +148,9 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
             stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
             logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
-        # Generate stream URL based on the selected profile or via MAC portal
-        if m3u_account.account_type == M3UAccount.Types.MAC:
-            # For MAC accounts, resolve via portal + multi-MAC failover, no regex transform
-            stream_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
-            if not stream_url:
-                logger.error(f"Failed to resolve MAC stream for channel {channel_id}: {error}")
-                return None, None, False, None
-        else:
-            # Generate stream URL based on the selected profile
-            input_url = stream.url
-            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+        # Generate stream URL based on the selected profile
+        input_url = stream.url
+        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
 
         # Check if transcoding is needed
         stream_profile = channel.get_stream_profile()
@@ -846,55 +614,3 @@ def get_connections_left(m3u_profile_id: int) -> int:
     except Exception as e:
         logger.error(f"Error getting connections left for M3U profile {m3u_profile_id}: {e}")
         return 0
-
-def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
-    """
-    Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
-    Return schema compatible with get_stream_info_for_switch(...).
-    """
-    try:
-        obj = get_stream_object(channel_id)
-        if isinstance(obj, Channel):
-            channel = obj
-        else:
-            logger.info(
-                "get_stream_info_for_profile: %s refers to a Stream, skipping profile failover",
-                channel_id,
-            )
-            return {"error": "Channel ID refers to a Stream, not a Channel"}
-        
-        stream = get_object_or_404(Stream, pk=stream_id)
-        m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
-
-        m3u_account = m3u_profile.m3u_account
-
-        if m3u_account.account_type == M3UAccount.Types.MAC:
-            input_url, mac_used, error = _resolve_mac_stream_with_failover(m3u_account, stream)
-            if not input_url:
-                return {"error": error or "Failed to resolve MAC stream"}
-            stream_url = input_url
-        else:
-            input_url = stream.url
-            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
-
-        stream_profile = channel.get_stream_profile()
-        transcode = False if (stream_profile is None or stream_profile.is_proxy()) else True
-        profile_value = stream_profile.id if stream_profile else None
-
-        # Get user agent
-        user_agent = m3u_account.get_user_agent().user_agent
-        if not user_agent:
-            default_ua = UserAgent.objects.filter(is_active=True).first()
-            user_agent = default_ua.user_agent if default_ua else None
-
-        return {
-            "url": stream_url,
-            "user_agent": user_agent,
-            "transcode": transcode,
-            "stream_profile": profile_value,
-            "stream_id": stream.id,
-            "m3u_profile_id": m3u_profile.id,
-        }
-    except Exception as e:
-        logger.error(f"Error in get_stream_info_for_profile: {e}")
-        return {"error": str(e)}

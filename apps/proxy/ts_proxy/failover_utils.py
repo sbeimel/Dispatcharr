@@ -104,7 +104,7 @@ class FailoverManager:
         
         # Get candidate MACs for streaming (excludes EXPIRED/ERROR and past expires_at)
         try:
-            candidates = self._get_candidate_macs_for_streaming(m3u_account)
+            candidates = m3u_account.get_candidate_macs_for_streaming()
         except Exception as e:
             logger.error(f"Error getting candidate MACs for account {m3u_account.id}: {e}")
             candidates = []
@@ -374,26 +374,7 @@ class FailoverManager:
         self.redis_client.incr(connections_key)
         self.redis_client.expire(connections_key, 3600)  # 1 hour expiry
     
-    def _get_candidate_macs_for_streaming(self, m3u_account: M3UAccount) -> List[M3UAccountMac]:
-        """Get candidate MACs for streaming, excluding EXPIRED/ERROR and past expires_at."""
-        from django.utils import timezone
-        
-        # Get MACs that are not EXPIRED or ERROR
-        candidates = m3u_account.macs.filter(
-            status__in=[M3UAccountMac.Status.VALID, M3UAccountMac.Status.UNKNOWN]
-        ).order_by('priority')
-        
-        # Filter out MACs with past expiry dates
-        valid_candidates = []
-        now = timezone.now()
-        
-        for mac_obj in candidates:
-            if mac_obj.expires_at and mac_obj.expires_at < now:
-                logger.debug(f"MAC {mac_obj.address} has expired ({mac_obj.expires_at}), skipping")
-                continue
-            valid_candidates.append(mac_obj)
-        
-        return valid_candidates
+
     
     def _get_or_create_mac_profile(self, m3u_account: M3UAccount):
         """Get or create a default profile for MAC account."""

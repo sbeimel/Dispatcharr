@@ -260,6 +260,32 @@ class M3UAccount(models.Model):
         final_count = self.macs.count()
         logger.info(f"Final MAC object count for account {self.id}: {final_count}")
 
+    def get_candidate_macs_for_streaming(self):
+        """Return ordered list of M3UAccountMac objects that are usable for streaming."""
+        if self.account_type != self.Types.MAC:
+            return []
+        
+        # Ensure MAC objects are created from mac_address field
+        self._process_mac_addresses()
+        
+        from django.utils import timezone
+        now = timezone.now()
+        candidates = []
+        
+        for mac in self.macs.order_by("priority", "id"):
+            # Skip EXPIRED MACs
+            if mac.status == M3UAccountMac.Status.EXPIRED:
+                continue
+            # Skip ERROR MACs
+            if mac.status == M3UAccountMac.Status.ERROR:
+                continue
+            # Skip MACs with past expiry dates
+            if mac.expires_at and mac.expires_at <= now:
+                continue
+            candidates.append(mac)
+        
+        return candidates
+
 
 class M3UFilter(models.Model):
     """Defines filters for M3U accounts based on stream name or group title."""

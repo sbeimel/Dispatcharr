@@ -24,22 +24,6 @@
 **Files Modified**:
 - `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Added `resolve_mac_url_with_failover_mac()` method
 - `Dispatcharr-0.14.0/apps/proxy/ts_proxy/failover_utils.py` - Complete rewrite of MAC failover logic based on original patch
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/url_utils.py` - Added `_resolve_mac_stream_with_failover()` and `get_stream_info_for_profile()` functions, integrated MAC logic into `generate_stream_url()`
-
-**What's Implemented from the Patch**:
-- ✅ `_resolve_mac_stream_with_failover()` function with multi-MAC and multi-proxy support
-- ✅ MAC candidate selection (excluding EXPIRED/ERROR MACs)
-- ✅ MAC busy tracking via Redis
-- ✅ MAC status management (VALID/ERROR/EXPIRED)
-- ✅ Integration into `generate_stream_url()` for both stream preview and channel playback
-- ✅ `get_stream_info_for_profile()` function for profile-specific URL generation
-- ✅ Proper MAC failover in `FailoverManager` class
-- ✅ Multi-proxy support per MAC address
-
-**What's NOT Implemented** (but may not be needed):
-- ❌ `_try_next_mac()` method in StreamManager (replaced by modern FailoverManager)
-- ❌ `get_next_profiles_for_stream()` function (complex profile failover helper)
-- ❌ Some advanced profile failover helpers (the core failover logic is implemented)
 
 ### 1. **MAC Object Creation Fix**
 **Problem**: MAC objects weren't being created when all existing MACs had ERROR status.
