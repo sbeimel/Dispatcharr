@@ -2,20 +2,37 @@
 
 ## Issues Fixed
 
-### 1. **Stream URL Generation - localhost Issue (MAJOR FIX)**
-**Problem**: MAC channels were generating URLs like `http://localhost/ch/599_` or `http://tvip.zeroonemac.xyz:8080/ch/599_` instead of the real stream URLs.
+### 1. **Stream URL Generation - On-Demand Resolution (MAJOR FIX)**
+**Problem**: MAC channels were generating URLs like `http://localhost/ch/599_` instead of the real stream URLs.
 
-**Root Cause**: MAC/STB portals don't provide direct stream URLs in the channel list. The `cmd` field (e.g., `ffmpeg http://localhost/ch/599_`) is just a placeholder. You must call the `create_link` API for each channel to get the real stream URL.
+**Root Cause**: MAC/STB portals don't provide direct stream URLs in the channel list. The `cmd` field is just a placeholder. You must call the `create_link` API to get the real stream URL.
 
 **Fix Applied**:
-- Modified `get_channels()` method to call `create_link()` API for each channel
-- Added `resolve_urls` parameter (default True) to control URL resolution
-- Now properly resolves each channel's `cmd` to a real stream URL via the portal's `create_link` API
-- Falls back to URL extraction from `cmd` if resolution fails
+- Channels are now stored with special `mac://` URLs that encode portal info, MAC address, cmd, and proxy
+- URLs are resolved on-demand when the stream is actually played (not during import)
+- `transform_url()` in `url_utils.py` detects `mac://` URLs and resolves them via `create_link` API
+- This makes import fast while still providing working stream URLs at playback time
 
-**File**: `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py`
+**Files Modified**:
+- `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Added `resolve_mac_url()` static method
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/url_utils.py` - Added MAC URL detection in `transform_url()`
 
-**Note**: This fix makes channel loading slower (one API call per channel) but provides working stream URLs.
+### 2. **Failover UUID Issue (MAJOR FIX)**
+**Problem**: Failover was failing with error `"e6a977516830147ace4c798f5461b5b75ad6bdabf7a35bc1110c758147de9d2e" is not a valid UUID`
+
+**Root Cause**: The system sometimes uses stream_hash instead of UUID for channel identification. The failover code only handled UUIDs.
+
+**Fix Applied**:
+- Added `get_channel_by_id()` helper function in `utils.py` that handles both UUID and stream_hash
+- Updated `failover_utils.py` to use the new helper function
+- Updated `url_utils.py` and `stream_manager.py` to use the new helper function
+- Now failover works correctly regardless of whether channel_id is a UUID or stream_hash
+
+**Files Modified**:
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/utils.py` - Added `get_channel_by_id()` helper
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/failover_utils.py` - Fixed channel lookup
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/url_utils.py` - Fixed channel lookup
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/stream_manager.py` - Fixed channel lookup
 
 ### 2. **MAC Address Validation Regex**
 **Problem**: The regex pattern for validating MAC addresses was incomplete (missing closing `$`), causing validation to fail.

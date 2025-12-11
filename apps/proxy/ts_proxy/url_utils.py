@@ -169,6 +169,8 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
     """
     Transform a URL using regex pattern replacement.
+    
+    For MAC portal URLs (mac://...), resolves the URL via create_link API first.
 
     Args:
         input_url: The base URL to transform
@@ -179,6 +181,18 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         str: The transformed URL
     """
     try:
+        # Check if this is a MAC portal URL that needs to be resolved
+        if input_url and input_url.startswith("mac://"):
+            logger.info(f"Resolving MAC portal URL...")
+            try:
+                from apps.m3u.mac_portal_client import MacPortalClient
+                resolved_url = MacPortalClient.resolve_mac_url(input_url)
+                logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+                input_url = resolved_url
+            except Exception as e:
+                logger.error(f"Failed to resolve MAC URL: {e}")
+                raise
+        
         logger.debug("Executing URL pattern replacement:")
         logger.debug(f"  base URL: {input_url}")
         logger.debug(f"  search: {search_pattern}")
@@ -210,8 +224,13 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
     """
     try:
         from core.utils import RedisClient
+        from .utils import get_channel_by_id
 
-        channel = get_object_or_404(Channel, uuid=channel_id)
+        # Use helper function that handles both UUID and stream_hash
+        channel = get_channel_by_id(channel_id)
+        if not channel:
+            return {'error': f'Channel not found: {channel_id}'}
+        
         redis_client = RedisClient.get_client()
 
         # Use the target stream if specified, otherwise use current stream

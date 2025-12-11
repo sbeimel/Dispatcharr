@@ -36,7 +36,24 @@ class FailoverManager:
             Tuple[Optional[str], Optional[int], Optional[str]]: (stream_url, profile_id, error_reason)
         """
         try:
-            channel = get_object_or_404(Channel, uuid=self.channel_id)
+            # Try to get channel by UUID first, then by stream_hash for compatibility
+            channel = None
+            try:
+                channel = Channel.objects.get(uuid=self.channel_id)
+            except (Channel.DoesNotExist, ValueError):
+                # channel_id might be a stream_hash, try to find channel via stream
+                try:
+                    stream = Stream.objects.get(stream_hash=self.channel_id)
+                    # Get the channel this stream belongs to
+                    channel_stream = stream.channelstream_set.first()
+                    if channel_stream:
+                        channel = channel_stream.channel
+                except Stream.DoesNotExist:
+                    pass
+            
+            if not channel:
+                logger.error(f"Could not find channel for ID {self.channel_id}")
+                return None, None, f"Channel not found: {self.channel_id}"
             
             # Check failover attempt count to prevent infinite loops
             attempt_key = RedisKeys.failover_attempt_count(self.channel_id)
