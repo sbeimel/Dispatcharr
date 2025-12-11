@@ -18,16 +18,19 @@ logger = get_logger()
 # Failover configuration constants
 MAC_COOLDOWN_DURATION = 360  # 6 minutes
 PROFILE_COOLDOWN_DURATION = 180  # 3 minutes
+
 MAX_FAILOVER_ATTEMPTS = 15  # Maximum failover attempts per channel (allows MAC + Profile + Stream failover)
 
 
 class FailoverManager:
-    """Manages multi-level failover for streams."""
+    """Manages multi-level failover for streams with proper hierarchy."""
     
     def __init__(self, channel_id: str):
         self.channel_id = channel_id
         self.redis_client = RedisClient.get_client()
     
+
+
     def get_stream_with_failover(self, current_stream_id: Optional[str] = None) -> Tuple[Optional[str], Optional[int], Optional[str]]:
         """
         Get stream URL with multi-level failover support.

@@ -63,7 +63,7 @@ class M3UAccountProfileSerializer(serializers.ModelSerializer):
         return {
             'id': obj.m3u_account.id,
             'name': obj.m3u_account.name,
-            'account_type': obj.m3u_account.account_type,
+            'account_type': obj.m3u_account.get_account_type_display(),
             'is_xtream_codes': obj.m3u_account.account_type == 'XC'
         }
 
@@ -211,6 +211,9 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+
+        # Use display name for account_type instead of raw value
+        data["account_type"] = instance.get_account_type_display()
 
         # Parse custom_properties to get VOD preference and auto_enable_new_groups settings
         custom_props = instance.custom_properties or {}
