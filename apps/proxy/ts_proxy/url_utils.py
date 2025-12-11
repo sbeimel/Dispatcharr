@@ -169,8 +169,6 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
     """
     Transform a URL using regex pattern replacement.
-    
-    For MAC portal URLs (mac://...), resolves the URL via create_link API first.
 
     Args:
         input_url: The base URL to transform
@@ -181,18 +179,6 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         str: The transformed URL
     """
     try:
-        # Check if this is a MAC portal URL that needs to be resolved
-        if input_url and input_url.startswith("mac://"):
-            logger.info(f"Resolving MAC portal URL...")
-            try:
-                from apps.m3u.mac_portal_client import MacPortalClient
-                resolved_url = MacPortalClient.resolve_mac_url(input_url)
-                logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
-                input_url = resolved_url
-            except Exception as e:
-                logger.error(f"Failed to resolve MAC URL: {e}")
-                raise
-        
         logger.debug("Executing URL pattern replacement:")
         logger.debug(f"  base URL: {input_url}")
         logger.debug(f"  search: {search_pattern}")

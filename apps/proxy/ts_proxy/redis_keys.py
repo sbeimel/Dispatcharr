@@ -88,34 +88,3 @@ class RedisKeys:
     def client_metadata(channel_id, client_id):
         """Key for client metadata hash"""
         return f"ts_proxy:channel:{channel_id}:clients:{client_id}"
-
-    # Failover System Keys
-    @staticmethod
-    def mac_cooldown(mac_id):
-        """Key for cooldown marker of a specific MAC address (to avoid retrying bad MACs)."""
-        return f"ts_proxy:mac:{mac_id}:cooldown"
-
-    @staticmethod
-    def profile_cooldown(profile_id):
-        """Key for cooldown marker of a specific M3U profile (to avoid retrying bad profiles)."""
-        return f"ts_proxy:profile:{profile_id}:cooldown"
-
-    @staticmethod
-    def stream_failover_state(channel_id):
-        """Key for storing current failover state of a channel."""
-        return f"ts_proxy:channel:{channel_id}:failover_state"
-
-    @staticmethod
-    def mac_busy(mac_id):
-        """Key indicating MAC address is currently in use."""
-        return f"ts_proxy:mac:{mac_id}:busy"
-
-    @staticmethod
-    def profile_connections(profile_id):
-        """Key for tracking active connections per profile."""
-        return f"ts_proxy:profile:{profile_id}:connections"
-
-    @staticmethod
-    def failover_attempt_count(channel_id):
-        """Key for tracking failover attempt count to prevent infinite loops."""
-        return f"ts_proxy:channel:{channel_id}:failover_attempts"

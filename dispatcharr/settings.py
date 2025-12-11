@@ -221,11 +221,6 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.channels.tasks.maintain_recurring_recordings",
         "schedule": 3600.0,  # Once an hour ensure recurring schedules stay ahead
     },
-    # MAC-specific tasks
-    "cleanup-expired-macs": {
-        "task": "apps.m3u.tasks.cleanup_expired_macs",
-        "schedule": 86400.0,  # Once a day cleanup expired MACs
-    },
 }
 
 MEDIA_ROOT = BASE_DIR / "media"
