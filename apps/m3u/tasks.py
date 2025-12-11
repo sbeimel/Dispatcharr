@@ -1127,6 +1127,8 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                 
                 # Process groups from MAC result
                 groups = mac_result.get('groups', {})
+                extinf_data = mac_result.get('extinf_data', [])
+                
                 if groups:
                     logger.info(f"Processing {len(groups)} groups for MAC account {account_id}")
                     process_groups(account, groups)
@@ -1138,7 +1140,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                 
                 send_m3u_update(account_id, "processing_groups", 100, status="success")
                 release_task_lock("refresh_m3u_account_groups", account_id)
-                return "MAC account refreshed successfully", groups
+                return extinf_data, groups
             else:
                 error_msg = mac_result.get('error', 'Unknown MAC refresh error')
                 logger.error(f"MAC account {account_id} refresh failed: {error_msg}")
@@ -3032,6 +3034,7 @@ def _refresh_mac_account_with_groups(account_id):
         success_count = 0
         total_channels = 0
         groups = {}
+        extinf_data = []
         
         # Try each MAC until one works
         for mac_obj in macs:
@@ -3048,16 +3051,35 @@ def _refresh_mac_account_with_groups(account_id):
                 channels = client.get_channels()
                 
                 if channels:
-                    total_channels = len(channels)
-                    logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
-                    
-                    # Extract groups from channels
-                    for channel in channels:
-                        group_name = channel.get('group', 'Default Group')
-                        if group_name not in groups:
-                            groups[group_name] = {}
-                    
-                    logger.info(f"Extracted {len(groups)} groups from MAC channels")
+                    if not working_mac_found:
+                        # Only process channels from first working MAC
+                        total_channels = len(channels)
+                        logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                        
+                        # Convert MAC channels to EXTINF format and extract groups
+                        for channel in channels:
+                            group_name = channel.get('group', 'Default Group')
+                            if group_name not in groups:
+                                groups[group_name] = {}
+                            
+                            # Convert MAC channel to EXTINF format
+                            extinf_entry = {
+                                'name': channel.get('name', ''),
+                                'url': channel.get('cmd', ''),
+                                'attributes': {
+                                    'group-title': group_name,
+                                    'tvg-id': channel.get('id', ''),
+                                    'tvg-logo': channel.get('logo', ''),
+                                    'tvg-name': channel.get('name', '')
+                                },
+                                'display_name': channel.get('name', '')
+                            }
+                            extinf_data.append(extinf_entry)
+                        
+                        logger.info(f"Extracted {len(groups)} groups and {len(extinf_data)} channels from MAC")
+                        working_mac_found = True
+                    else:
+                        logger.info(f"MAC {mac_obj.address} is also working (backup)")
                     
                     # Update MAC status
                     mac_obj.status = M3UAccountMac.Status.VALID
@@ -3098,7 +3120,8 @@ def _refresh_mac_account_with_groups(account_id):
                 "success": True,
                 "channels": total_channels,
                 "working_macs": success_count,
-                "groups": groups
+                "groups": groups,
+                "extinf_data": extinf_data
             }
         else:
             return {"error": "All MAC addresses failed"}
