@@ -26,15 +26,24 @@ class Migration(migrations.Migration):
             ),
         ),
         
-        # Add mac_address field if it doesn't exist
-        migrations.AddField(
-            model_name='m3uaccount',
-            name='mac_address',
-            field=models.CharField(
-                blank=True,
-                help_text='MAC address(es) for STB/MAC portal accounts. Multiple MACs can be separated by spaces or commas.',
-                max_length=255,
-                null=True,
-            ),
+        # Use RunSQL to safely add mac_address field if it doesn't exist
+        migrations.RunSQL(
+            sql="""
+                DO $$ 
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'm3u_m3uaccount' 
+                        AND column_name = 'mac_address'
+                    ) THEN
+                        ALTER TABLE m3u_m3uaccount 
+                        ADD COLUMN mac_address varchar(255);
+                    END IF;
+                END $$;
+            """,
+            reverse_sql="""
+                ALTER TABLE m3u_m3uaccount DROP COLUMN IF EXISTS mac_address;
+            """,
         ),
     ]
