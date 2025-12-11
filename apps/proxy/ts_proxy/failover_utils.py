@@ -332,7 +332,10 @@ class FailoverManager:
         
         try:
             if profile.search_pattern and profile.replace_pattern:
-                transformed_url = re.sub(profile.search_pattern, profile.replace_pattern, url)
+                # Convert $1, $2, etc. to \1, \2, etc. for proper Python regex backreferences
+                safe_replace_pattern = re.sub(r'\$(\d+)', r'\\\1', profile.replace_pattern)
+                transformed_url = re.sub(profile.search_pattern, safe_replace_pattern, url)
+                logger.debug(f"Profile {profile.id} URL transformation: {url} -> {transformed_url}")
                 return transformed_url
             return url
         except Exception as e:
