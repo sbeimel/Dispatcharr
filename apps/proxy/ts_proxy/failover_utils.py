@@ -77,15 +77,24 @@ class FailoverManager:
             
             # Try each stream with its failover logic
             for stream in streams:
-                # Skip current stream if specified
-                if current_stream_id and str(stream.id) == str(current_stream_id):
-                    continue
-                
                 m3u_account = stream.m3u_account
                 if not m3u_account or not m3u_account.is_active:
                     continue
                 
-                # Handle different account types
+                # For the current stream, try profile failover within the same stream first
+                if current_stream_id and str(stream.id) == str(current_stream_id):
+                    # Only try profile failover for non-MAC accounts (MAC accounts handle their own failover)
+                    if m3u_account.account_type != M3UAccount.Types.MAC:
+                        logger.info(f"Trying profile failover within current stream {stream.id} for channel {self.channel_id}")
+                        result = self._try_standard_account_failover(stream, m3u_account)
+                        if result[0]:  # If we got a URL
+                            # Reset attempt count on success
+                            self.redis_client.delete(attempt_key)
+                            return result
+                    # Skip to other streams after trying profile failover
+                    continue
+                
+                # Handle different account types for other streams
                 if m3u_account.account_type == M3UAccount.Types.MAC:
                     result = self._try_mac_account_failover(stream, m3u_account)
                 else:
