@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
     """
 
     dependencies = [
-        ("m3u", "0023_add_proxy_field"),
+        ("m3u", "0018_add_profile_custom_properties"),
     ]
 
     operations = [
