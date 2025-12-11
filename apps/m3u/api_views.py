@@ -471,6 +471,34 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="refresh-mac-status")
+    def refresh_mac_status(self, request, pk=None):
+        """
+        Trigger MAC status check for all MACs in this account.
+        """
+        account = self.get_object()
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            return Response(
+                {"error": "Not a MAC account"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        try:
+            # Trigger MAC status check task
+            from .tasks import check_mac_expiry
+            check_mac_expiry.delay(account.id)
+            
+            return Response(
+                {"message": "MAC status check initiated"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to initiate MAC status check: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
     queryset = M3UFilter.objects.all()

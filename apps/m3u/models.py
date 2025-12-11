@@ -106,6 +106,12 @@ class M3UAccount(models.Model):
         null=True,
         help_text="MAC address(es) for STB/MAC portal accounts. Multiple MACs can be separated by spaces or commas.",
     )
+    proxy = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Proxy server for MAC portal connections (e.g., http://proxy:8080)",
+    )
 
     def __str__(self):
         return self.name

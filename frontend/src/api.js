@@ -1373,6 +1373,20 @@ export default class API {
     }
   }
 
+  static async refreshMacStatus(accountId) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/refresh-mac-status/`,
+        {
+          method: 'POST',
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to refresh MAC status for account ${accountId}`, e);
+    }
+  }
+
   static async getSettings() {
     try {
       const response = await request(`${host}/api/core/settings/`);

@@ -74,6 +74,7 @@ const M3U = ({
       priority: 0,
       enable_vod: false,
       mac_address: '',
+      proxy: '',
     },
 
     validate: {
@@ -108,6 +109,7 @@ const M3U = ({
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
         mac_address: m3uAccount.mac_address ?? '',
+        proxy: m3uAccount.proxy ?? '',
       });
 
       if (m3uAccount.account_type == 'XC') {
@@ -387,13 +389,22 @@ const M3U = ({
     if (!playlist?.id) return;
 
     try {
-      // Refresh the playlist to get updated MAC status
-      const updatedPlaylist = await API.getPlaylist(playlist.id);
-      setPlaylist(updatedPlaylist);
+      // Trigger actual MAC status check via API
+      await API.refreshMacStatus(playlist.id);
+      
+      // Wait a moment for the check to complete, then refresh playlist
+      setTimeout(async () => {
+        try {
+          const updatedPlaylist = await API.getPlaylist(playlist.id);
+          setPlaylist(updatedPlaylist);
+        } catch (e) {
+          console.error('Error refreshing playlist after MAC check:', e);
+        }
+      }, 2000);
       
       notifications.show({
-        title: 'MAC status refreshed',
-        message: 'MAC address status has been updated.',
+        title: 'MAC status check initiated',
+        message: 'Checking MAC address status...',
       });
     } catch (e) {
       console.error(e);
@@ -537,6 +548,15 @@ const M3U = ({
                     description="One or more MAC addresses (e.g. AA:BB:CC:DD:EE:FF, 11:22:33:44:55:66 or each MAC on a new line)"
                     {...form.getInputProps('mac_address')}
                     key={form.key('mac_address')}
+                  />
+                  
+                  <TextInput
+                    id="proxy"
+                    name="proxy"
+                    label="Proxy Server (Optional)"
+                    description="Proxy server for portal connections (e.g. http://proxy:8080 or socks5://proxy:1080)"
+                    {...form.getInputProps('proxy')}
+                    key={form.key('proxy')}
                   />
                   
                   {macs.length > 0 && (

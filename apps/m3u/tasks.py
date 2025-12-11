@@ -3049,9 +3049,11 @@ def _refresh_mac_account_direct(account_id):
                     mac_obj.save()
                     success_count += 1
                     
-                    # For now, we just test connectivity
-                    # TODO: Implement full channel import like XC accounts
-                    break
+                    # For channel import, we only need one working MAC
+                    # But for status checks, we continue to check all MACs
+                    if not getattr(account, '_status_check_mode', False):
+                        # For normal refresh, break after first success
+                        break
                     
             except MacPortalError as e:
                 logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
@@ -3118,6 +3120,21 @@ def check_mac_expiry(account_id=None):
     
     for account in accounts:
         try:
+            # Set flag to check all MACs, not just first successful one
+            account._status_check_mode = True
+            
+            # Use the direct MAC refresh function for status checking
+            logger.info(f"Checking MAC status for account {account.name}")
+            result = _refresh_mac_account_direct(account.id)
+            
+            if result:
+                logger.info(f"MAC status check completed for account {account.name}: {result}")
+                results.append({
+                    "account": account.name,
+                    "result": result
+                })
+            
+            # Also do individual MAC expiry checks
             macs = account.macs.all()
             
             for mac_obj in macs:
