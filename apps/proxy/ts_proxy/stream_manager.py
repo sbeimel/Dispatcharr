@@ -430,36 +430,6 @@ class StreamManager:
                 except Exception as e:
                     logger.error(f"Failed to update channel state in Redis: {e} for channel {self.channel_id}", exc_info=True)
 
-            # Release failover resources
-            try:
-                from .failover_utils import release_failover_resources
-                
-                # Try to get profile and MAC IDs from metadata for cleanup
-                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                    metadata = self.buffer.redis_client.hgetall(metadata_key)
-                    
-                    profile_id = None
-                    mac_id = None
-                    
-                    if metadata:
-                        profile_str = metadata.get(ChannelMetadataField.M3U_PROFILE.encode())
-                        if profile_str:
-                            try:
-                                profile_id = int(profile_str.decode())
-                            except (ValueError, AttributeError):
-                                pass
-                        
-                        # MAC ID would need to be stored in metadata during failover
-                        # For now, we'll just release profile resources
-                    
-                    if profile_id or mac_id:
-                        release_failover_resources(self.channel_id, profile_id, mac_id)
-                        logger.debug(f"Released failover resources for channel {self.channel_id}")
-                        
-            except Exception as e:
-                logger.error(f"Error releasing failover resources for channel {self.channel_id}: {e}")
-
             # Close database connection for this thread
             try:
                 connection.close()
@@ -1043,14 +1013,14 @@ class StreamManager:
         # Update stream profile if we're switching streams
         if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
             try:
-                # Get the channel by UUID or stream_hash
-                from .utils import get_channel_by_id
-                channel = get_channel_by_id(self.channel_id)
-                if not channel:
-                    logger.warning(f"Could not find channel for ID {self.channel_id} during stream switch")
-                
+                # Get the channel by UUID
+                channel = Channel.objects.get(uuid=self.channel_id)
+
+                # Get stream to find its profile
+                #new_stream = Stream.objects.get(pk=stream_id)
+
                 # Use the new method to update the profile and manage connection counts
-                if channel and m3u_profile_id:
+                if m3u_profile_id:
                     success = channel.update_stream_profile(m3u_profile_id)
                     if success:
                         logger.debug(f"Updated m3u profile for channel {self.channel_id} to use profile from stream {stream_id}")
@@ -1579,48 +1549,14 @@ class StreamManager:
 
     def _try_next_stream(self):
         """
-        Try to switch to the next available stream for this channel using multi-level failover.
-        First attempts MAC-level failover, then profile-level, then stream-level failover.
+        Try to switch to the next available stream for this channel.
+        Will iterate through multiple alternate streams if needed to find one with a different URL.
 
         Returns:
             bool: True if successfully switched to a new stream, False otherwise
         """
         try:
-            logger.info(f"Attempting failover for channel {self.channel_id}, current stream ID: {self.current_stream_id}")
-
-            # Try multi-level failover first
-            from .failover_utils import get_next_failover_stream
-            
-            failover_url, failover_profile_id, error_reason = get_next_failover_stream(
-                self.channel_id, 
-                self.current_stream_id
-            )
-            
-            if failover_url:
-                logger.info(f"Failover system found alternative URL for channel {self.channel_id}: {failover_url}")
-                
-                # Update to the failover URL
-                switch_result = self.update_url(failover_url, None, failover_profile_id)
-                if switch_result:
-                    # Update stream metadata
-                    if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                        metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                        self.buffer.redis_client.hset(metadata_key, mapping={
-                            ChannelMetadataField.URL: failover_url,
-                            ChannelMetadataField.M3U_PROFILE: str(failover_profile_id) if failover_profile_id else "",
-                            ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
-                            ChannelMetadataField.STREAM_SWITCH_REASON: "multi_level_failover"
-                        })
-                    
-                    logger.info(f"Successfully switched to failover URL for channel {self.channel_id}")
-                    return True
-                else:
-                    logger.error(f"Failed to update to failover URL for channel {self.channel_id}")
-            else:
-                logger.warning(f"Failover system could not find alternative for channel {self.channel_id}: {error_reason}")
-
-            # Fallback to legacy stream switching if failover didn't work
-            logger.info(f"Falling back to legacy stream switching for channel {self.channel_id}")
+            logger.info(f"Trying to find alternative stream for channel {self.channel_id}, current stream ID: {self.current_stream_id}")
 
             # Get alternate streams excluding the current one
             alternate_streams = get_alternate_streams(self.channel_id, self.current_stream_id)

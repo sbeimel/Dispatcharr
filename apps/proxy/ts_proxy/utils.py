@@ -114,38 +114,3 @@ def get_logger(component_name=None):
             logger_name = "ts_proxy"
 
     return logging.getLogger(logger_name)
-
-
-def get_channel_by_id(channel_id: str):
-    """
-    Get a Channel object by UUID or stream_hash.
-    
-    This function handles both cases where channel_id is:
-    - A valid UUID (standard channel lookup)
-    - A stream_hash (for streams accessed directly)
-    
-    Args:
-        channel_id: UUID string or stream_hash
-        
-    Returns:
-        Channel object or None if not found
-    """
-    from apps.channels.models import Channel, Stream
-    
-    # Try UUID lookup first
-    try:
-        return Channel.objects.get(uuid=channel_id)
-    except (Channel.DoesNotExist, ValueError):
-        pass
-    
-    # Try stream_hash lookup
-    try:
-        stream = Stream.objects.get(stream_hash=channel_id)
-        # Get the channel this stream belongs to
-        channel_stream = stream.channelstream_set.first()
-        if channel_stream:
-            return channel_stream.channel
-    except Stream.DoesNotExist:
-        pass
-    
-    return None

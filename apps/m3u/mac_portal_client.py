@@ -1,84 +1,23 @@
 """
-MAC/STB Portal Client for Dispatcharr
-Based on MacReplayXC v2.2.1 stb.py - Ported to Django
+MAC Portal Client for Stalker/STB portal communication.
 
-This module provides a comprehensive client for communicating with MAC/STB portals
-(Stalker middleware) for IPTV services.
+This module provides a client for communicating with MAC-based IPTV portals
+(Stalker portals, STB portals). It handles:
+- Portal URL resolution
+- Handshake authentication and token management
+- Channel list retrieval
+- Stream URL resolution via create_link API
+- Proxy support for network routing
 """
+
+import logging
+from urllib.parse import urlparse
+from typing import Optional, Dict, Any, List
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from urllib.parse import urlparse
-import re
-import logging
-import time
-from typing import Optional, Dict, Any, List
-from django.core.cache import cache
-from django.conf import settings
 
 logger = logging.getLogger(__name__)
-
-# Try to import cloudscraper for Cloudflare bypass
-try:
-    import cloudscraper
-    CLOUDSCRAPER_AVAILABLE = True
-except ImportError:
-    CLOUDSCRAPER_AVAILABLE = False
-    logger.info("cloudscraper not available - some portals with Cloudflare protection may not work")
-
-# Session management with periodic refresh to prevent memory leaks
-_session = None
-_session_created = 0
-_SESSION_MAX_AGE = 300  # Refresh session every 5 minutes
-
-
-def _get_session(use_cloudscraper=False):
-    """Get or create a requests session with automatic refresh."""
-    global _session, _session_created
-    
-    current_time = time.time()
-    
-    # Create new session if none exists or if too old
-    if _session is None or (current_time - _session_created) > _SESSION_MAX_AGE:
-        if _session is not None:
-            try:
-                _session.close()
-            except:
-                pass
-        
-        # Use cloudscraper if available and requested (for Cloudflare bypass)
-        if use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
-            _session = cloudscraper.create_scraper(
-                browser={
-                    'browser': 'chrome',
-                    'platform': 'linux',
-                    'desktop': True
-                }
-            )
-            logger.debug("Created cloudscraper session for Cloudflare bypass")
-        else:
-            _session = requests.Session()
-            retries = Retry(total=3, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
-            _session.mount("http://", HTTPAdapter(max_retries=retries))
-            _session.mount("https://", HTTPAdapter(max_retries=retries))
-            logger.debug("Created new requests session")
-        
-        _session_created = current_time
-    
-    return _session
-
-
-def clear_session():
-    """Clear the session to free memory."""
-    global _session, _session_created
-    if _session is not None:
-        try:
-            _session.close()
-        except:
-            pass
-        _session = None
-        _session_created = 0
-        logger.debug("Cleared requests session")
 
 
 class MacPortalError(Exception):
@@ -89,11 +28,13 @@ class MacPortalError(Exception):
 class MacPortalClient:
     """
     Client for Stalker-/STB portals with MAC login.
+    
     Handles:
       - resolving portal URL
       - handshake (token)
       - expiry info
       - channel list (get_all_channels)
+      - stream URL resolution (create_link)
     """
 
     def __init__(
@@ -103,44 +44,60 @@ class MacPortalClient:
         proxy: Optional[str] = None,
         timezone: str = "Europe/Berlin",
     ) -> None:
+        """
+        Initialize the MAC portal client.
+        
+        Args:
+            base_url: Portal base URL (e.g., http://portal.example.com)
+            mac: MAC address for authentication (e.g., 00:1A:79:12:34:56)
+            proxy: Optional HTTP proxy URL
+            timezone: Timezone for portal requests
+        """
         if not base_url:
             raise ValueError("base_url is required")
+        if not mac:
+            raise ValueError("mac is required")
+            
         self.original_base_url = base_url.rstrip("/")
         self.mac = mac
         self.timezone = timezone
         self.proxy = proxy
 
+        # Set up session with retry logic
+        self.session = requests.Session()
+        retries = Retry(
+            total=3,
+            backoff_factor=0.1,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+        )
+        self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+
         self.portal_url: Optional[str] = None
         self.token: Optional[str] = None
-        # cache for genre/category mapping
+        # Cache for genre/category mapping
         self.genres_by_id: Dict[str, str] = {}
-        
-        # Log initialization with proxy info
-        if self.proxy:
-            logger.info(f"MacPortalClient initialized for {self.original_base_url} with MAC {self.mac[:8]}... using proxy: {self.proxy}")
-        else:
-            logger.info(f"MacPortalClient initialized for {self.original_base_url} with MAC {self.mac[:8]}... (no proxy)")
 
     # ------------- helpers -------------
 
     def _get_proxies(self) -> Optional[dict]:
+        """Get proxy configuration for requests."""
         if not self.proxy:
             return None
         return {"http": self.proxy, "https": self.proxy}
 
     def _default_headers(self, with_auth: bool = False) -> dict:
+        """Get default headers for portal requests."""
         headers = {
-            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)",
         }
         if with_auth and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
 
     def _cookies(self) -> dict:
+        """Get cookies for portal requests."""
         return {
             "mac": self.mac,
             "stb_lang": "en",
@@ -152,21 +109,18 @@ class MacPortalClient:
     def resolve_portal_url(self) -> str:
         """
         Try to detect the portal load.php URL.
+        
         If original_base_url already ends with load.php, use it as-is.
         Otherwise probe common paths.
+        
+        Returns:
+            The resolved portal URL
         """
-        cache_key = f"portal_url:{self.original_base_url}"
-        cached_url = cache.get(cache_key)
-        if cached_url:
-            self.portal_url = cached_url
-            return self.portal_url
-
         if self.portal_url:
             return self.portal_url
 
         if self.original_base_url.endswith("load.php"):
             self.portal_url = self.original_base_url
-            cache.set(cache_key, self.portal_url, 3600)  # Cache for 1 hour
             return self.portal_url
 
         parsed = urlparse(self.original_base_url)
@@ -188,7 +142,7 @@ class MacPortalClient:
         for path in candidate_paths:
             url = base + path
             try:
-                r = _get_session().get(
+                r = self.session.get(
                     url,
                     headers=headers,
                     cookies=self._cookies(),
@@ -197,14 +151,12 @@ class MacPortalClient:
                 )
                 if r.status_code < 400:
                     self.portal_url = url
-                    cache.set(cache_key, self.portal_url, 3600)  # Cache for 1 hour
                     logger.info("MAC portal load.php detected: %s", url)
                     return self.portal_url
             except Exception as e:
                 logger.debug("Portal candidate %s failed: %s", url, e)
 
         self.portal_url = self.original_base_url
-        cache.set(cache_key, self.portal_url, 3600)  # Cache for 1 hour
         logger.warning(
             "Could not positively identify load.php, using base URL: %s",
             self.portal_url,
@@ -214,13 +166,15 @@ class MacPortalClient:
     # ------------- step 2: handshake / token -------------
 
     def handshake(self) -> str:
-        """Get authentication token from portal."""
-        cache_key = f"mac_token:{self.mac}:{self.original_base_url}"
-        cached_token = cache.get(cache_key)
-        if cached_token:
-            self.token = cached_token
-            return self.token
-
+        """
+        Perform handshake with portal to obtain session token.
+        
+        Returns:
+            Session token string
+            
+        Raises:
+            MacPortalError: If handshake fails
+        """
         portal = self.resolve_portal_url()
         params = {
             "type": "stb",
@@ -230,24 +184,27 @@ class MacPortalClient:
         proxies = self._get_proxies()
         headers = self._default_headers(with_auth=False)
 
-        r = _get_session().get(
-            portal,
-            params=params,
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
         try:
+            r = self.session.get(
+                portal,
+                params=params,
+                headers=headers,
+                cookies=self._cookies(),
+                proxies=proxies,
+                timeout=10,
+            )
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            raise MacPortalError(f"Handshake request failed: {exc}")
+
+        try:
+            data = r.json()
             token = data["js"]["token"]
-        except Exception as exc:
-            raise MacPortalError(f"Handshake without token: {exc}")
-        
+        except (KeyError, ValueError) as exc:
+            raise MacPortalError(f"Handshake response invalid - no token: {exc}")
+            
         self.token = token
-        cache.set(cache_key, token, 1800)  # Cache for 30 minutes
-        logger.debug("MAC portal token acquired for MAC %s", self.mac)
+        logger.debug("MAC portal token acquired")
         return token
 
     # ------------- step 3: expiry / account info -------------
@@ -255,7 +212,11 @@ class MacPortalClient:
     def get_expires(self) -> Optional[str]:
         """
         Fetch expiry-like info from account_info/get_main_info.
+        
         STB-Proxy uses 'phone' field for that.
+        
+        Returns:
+            Expiry information string or None
         """
         if not self.token:
             self.handshake()
@@ -263,33 +224,36 @@ class MacPortalClient:
         proxies = self._get_proxies()
         headers = self._default_headers(with_auth=True)
 
-        r = _get_session().get(
-            portal,
-            params={
-                "type": "account_info",
-                "action": "get_main_info",
-                "JsHttpRequest": "1-xml",
-            },
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json().get("js") or {}
-        return data.get("phone")  # may contain expiry-like info
+        try:
+            r = self.session.get(
+                portal,
+                params={
+                    "type": "account_info",
+                    "action": "get_main_info",
+                    "JsHttpRequest": "1-xml",
+                },
+                headers=headers,
+                cookies=self._cookies(),
+                proxies=proxies,
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json().get("js") or {}
+            return data.get("phone")  # May contain expiry-like info
+        except Exception as e:
+            logger.warning("Failed to get expiry info: %s", e)
+            return None
 
     # ------------- step 4: genres / categories -------------
 
     def get_genres_map(self) -> Dict[str, str]:
-        """Load mapping of genre/category id -> title from portal, if available."""
+        """
+        Load mapping of genre/category id -> title from portal, if available.
+        
+        Returns:
+            Dictionary mapping genre IDs to titles
+        """
         if self.genres_by_id:
-            return self.genres_by_id
-
-        cache_key = f"mac_genres:{self.original_base_url}"
-        cached_genres = cache.get(cache_key)
-        if cached_genres:
-            self.genres_by_id = cached_genres
             return self.genres_by_id
 
         if not self.token:
@@ -300,7 +264,7 @@ class MacPortalClient:
 
         for action in ("get_genres", "get_genres_short"):
             try:
-                r = _get_session().get(
+                r = self.session.get(
                     portal,
                     params={
                         "type": "itv",
@@ -330,7 +294,6 @@ class MacPortalClient:
 
                 if mapping:
                     self.genres_by_id = mapping
-                    cache.set(cache_key, mapping, 3600)  # Cache for 1 hour
                     logger.info(
                         "Loaded %s MAC genres via %s", len(mapping), action
                     )
@@ -346,32 +309,44 @@ class MacPortalClient:
 
     # ------------- step 5: channels -------------
 
-    def get_all_channels_raw(self):
-        """Get raw channel data from portal."""
+    def get_all_channels_raw(self) -> List[Dict[str, Any]]:
+        """
+        Get raw channel list from portal.
+        
+        Returns:
+            List of raw channel dictionaries from portal
+        """
         if not self.token:
             self.handshake()
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
         headers = self._default_headers(with_auth=True)
 
-        r = _get_session().get(
-            portal,
-            params={
-                "type": "itv",
-                "action": "get_all_channels",
-                "JsHttpRequest": "1-xml",
-            },
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=20,
-        )
-        r.raise_for_status()
-        js = r.json().get("js") or {}
-        data = js.get("data") or []
+        try:
+            r = self.session.get(
+                portal,
+                params={
+                    "type": "itv",
+                    "action": "get_all_channels",
+                    "JsHttpRequest": "1-xml",
+                },
+                headers=headers,
+                cookies=self._cookies(),
+                proxies=proxies,
+                timeout=20,
+            )
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            raise MacPortalError(f"Failed to get channels: {exc}")
+
+        try:
+            js = r.json().get("js") or {}
+            data = js.get("data") or []
+        except (ValueError, KeyError) as exc:
+            raise MacPortalError(f"Invalid channel response: {exc}")
 
         # Log a few sample entries to inspect keys
-        for idx, ch in enumerate(data[:10]):
+        for idx, ch in enumerate(data[:5]):
             try:
                 keys = list(ch.keys())
             except Exception:
@@ -383,6 +358,15 @@ class MacPortalClient:
     def create_link(self, cmd: str) -> str:
         """
         Resolve a portal channel command into a final stream URL using itv/create_link.
+        
+        Args:
+            cmd: Channel command string from portal
+            
+        Returns:
+            Resolved stream URL
+            
+        Raises:
+            MacPortalError: If link creation fails
         """
         if not cmd:
             raise MacPortalError("Missing cmd for create_link")
@@ -407,7 +391,7 @@ class MacPortalClient:
         }
 
         try:
-            r = _get_session().get(
+            r = self.session.get(
                 portal,
                 params=params,
                 headers=headers,
@@ -428,52 +412,20 @@ class MacPortalClient:
         if not cmd_value or not isinstance(cmd_value, str):
             raise MacPortalError("create_link response without cmd field")
 
-        url = None
-        parts = cmd_value.split()
-        for part in reversed(parts):
-            if part.startswith("http://") or part.startswith("https://"):
-                url = part
-                break
-
+        url = self._extract_stream_url(cmd_value)
         if not url:
             raise MacPortalError("Could not extract stream URL from create_link response")
 
         return url
 
     def _extract_stream_url(self, cmd: str) -> Optional[str]:
-        """Extract stream URL from command string."""
+        """Extract HTTP/HTTPS URL from command string."""
         if not cmd:
             return None
-        
         parts = cmd.split()
-        
-        # First, look for absolute URLs
-        for p in parts:
+        for p in reversed(parts):
             if p.startswith("http://") or p.startswith("https://"):
                 return p
-        
-        # Get the base URL from the portal (use original_base_url, not base_url)
-        parsed = urlparse(self.original_base_url)
-        base_url = f"{parsed.scheme}://{parsed.netloc}"
-        
-        # If no absolute URL found, look for relative paths and convert them
-        for p in parts:
-            if p.startswith("/ch/") or p.startswith("ch/"):
-                # Convert relative path to absolute URL using portal base URL
-                if p.startswith("/"):
-                    return f"{base_url}{p}"
-                else:
-                    return f"{base_url}/{p}"
-        
-        # Look for other common relative patterns
-        for p in parts:
-            if "/" in p and not p.startswith("ffmpeg"):
-                # Likely a relative URL path
-                if p.startswith("/"):
-                    return f"{base_url}{p}"
-                else:
-                    return f"{base_url}/{p}"
-        
         return None
 
     def _detect_group_title(self, ch: Dict[str, Any]) -> str:
@@ -521,17 +473,21 @@ class MacPortalClient:
 
         return "MAC"
 
-    def get_channels(self):
-        """Return normalized channels list.
+    def get_channels(self) -> List[Dict[str, Any]]:
+        """
+        Return normalized channels list.
 
         We try to map provider categories/groups onto our 'group' field.
-
         Different portals use different keys for the group/category, so we
         check several common ones in order.
         
-        NOTE: URLs are stored as special mac:// URLs that will be resolved
-        at playback time via create_link API. This is much faster than
-        resolving all URLs during import.
+        Returns:
+            List of normalized channel dictionaries with keys:
+            - id: Channel ID
+            - name: Channel name
+            - group: Group/category title
+            - url: Stream URL (extracted from cmd)
+            - raw: Original channel data
         """
         raw_list = self.get_all_channels_raw()
         normalized = []
@@ -543,132 +499,19 @@ class MacPortalClient:
             group_title = self._detect_group_title(ch)
 
             cmd = ch.get("cmd") or ""
-            if not cmd:
+            url = self._extract_stream_url(cmd)
+            if not url:
+                # Skip channels without extractable URL
                 continue
-            
-            # Create a special MAC URL that encodes the portal info, cmd, and proxy
-            # Format: mac://base64(portal_url|mac|cmd|proxy)
-            # This will be resolved at playback time
-            import base64
-            proxy_str = self.proxy or ""
-            mac_data = f"{self.original_base_url}|{self.mac}|{cmd}|{proxy_str}"
-            encoded_data = base64.urlsafe_b64encode(mac_data.encode()).decode()
-            url = f"mac://{encoded_data}"
 
-            # Extract logo URL if available
-            logo = ch.get("logo") or ch.get("logo_url") or ""
+            normalized.append({
+                "id": ch_id,
+                "name": name,
+                "group": group_title,
+                "url": url,
+                "cmd": cmd,  # Keep original cmd for create_link
+                "raw": ch,
+            })
             
-            normalized.append(
-                {
-                    "id": ch_id,
-                    "name": name,
-                    "group": group_title,
-                    "url": url,
-                    "logo": logo,
-                    "cmd": cmd,
-                    "raw": ch,
-                }
-            )
-        
-        logger.info(f"Normalized {len(normalized)} MAC channels into groups")
+        logger.info("Normalized %s MAC channels into groups", len(normalized))
         return normalized
-    
-    @staticmethod
-    def resolve_mac_url(mac_url: str, proxy: Optional[str] = None) -> str:
-        """Resolve a mac:// URL to a real stream URL.
-        
-        Args:
-            mac_url: URL in format mac://base64(portal_url|mac|cmd|proxy)
-            proxy: Optional proxy to use (overrides encoded proxy)
-            
-        Returns:
-            Real stream URL from create_link API
-        """
-        if not mac_url.startswith("mac://"):
-            return mac_url
-        
-        import base64
-        try:
-            encoded_data = mac_url[6:]  # Remove "mac://" prefix
-            decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
-            parts = decoded_data.split("|", 3)  # Now supports 4 parts with proxy
-            if len(parts) < 3:
-                raise ValueError(f"Invalid mac:// URL format: expected at least 3 parts, got {len(parts)}")
-            
-            portal_url = parts[0]
-            mac = parts[1]
-            cmd = parts[2]
-            encoded_proxy = parts[3] if len(parts) > 3 else None
-            
-            # Use provided proxy, or fall back to encoded proxy
-            use_proxy = proxy or encoded_proxy
-            
-            logger.info(f"Resolving MAC URL for portal {portal_url}, MAC {mac[:8]}..., proxy: {use_proxy or 'none'}")
-            
-            # Create client and resolve URL
-            client = MacPortalClient(base_url=portal_url, mac=mac, proxy=use_proxy)
-            resolved_url = client.create_link(cmd)
-            logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
-            return resolved_url
-        except Exception as e:
-            logger.error(f"Failed to resolve mac:// URL: {e}")
-            raise MacPortalError(f"Failed to resolve MAC URL: {e}")
-
-    def get_epg_data(self, period: int = 7) -> Optional[Dict]:
-        """Get EPG data for specified period (days)."""
-        if not self.token:
-            self.handshake()
-        
-        portal = self.resolve_portal_url()
-        proxies = self._get_proxies()
-        headers = self._default_headers(with_auth=True)
-
-        params = {
-            "type": "itv",
-            "action": "get_epg_info",
-            "period": str(period),
-            "JsHttpRequest": "1-xml"
-        }
-
-        try:
-            logger.debug(f"Getting EPG for MAC {self.mac}")
-            response = _get_session().get(
-                portal,
-                params=params,
-                headers=headers,
-                cookies=self._cookies(),
-                proxies=proxies,
-                timeout=30,
-            )
-            response.raise_for_status()
-            data = response.json().get("js", {}).get("data")
-            if data:
-                logger.debug(f"Got EPG data for {len(data)} channels")
-                return data
-        except Exception as e:
-            logger.debug(f"EPG request failed: {e}")
-        
-        return None
-
-
-def validate_mac_address(mac: str) -> bool:
-    """Validate MAC address format."""
-    if not mac or not isinstance(mac, str):
-        return False
-    
-    pattern = r'^([0-9A-Fa-f]{2}[:-]?){5}([0-9A-Fa-f]{2})$'
-    return bool(re.match(pattern, mac.strip()))
-
-
-def normalize_mac_address(mac: str) -> str:
-    """Normalize MAC address to standard format (XX:XX:XX:XX:XX:XX)."""
-    if not validate_mac_address(mac):
-        return mac
-    
-    # Remove all separators
-    clean_mac = re.sub(r'[:-]', '', mac.strip())
-    
-    # Add colons every 2 characters
-    normalized = ':'.join(clean_mac[i:i+2] for i in range(0, 12, 2))
-    
-    return normalized.upper()
