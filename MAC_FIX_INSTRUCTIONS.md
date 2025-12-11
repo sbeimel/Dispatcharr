@@ -17,6 +17,27 @@ The MAC addresses "00:1A:79:19:1F:00 00:1A:79:19:1F:A7 00:1A:79:19:1F:A9" are va
 - The `_process_mac_addresses()` method parses the `mac_address` field and creates `M3UAccountMac` objects
 - The MAC refresh function checks for missing MAC objects and processes them automatically
 
+### 3. Fixed Celery Anti-Pattern Issues
+- Removed duplicate `continue` statement in `_refresh_mac_account_direct()` function
+- Fixed scope issues with `working_mac_found` variable
+- Ensured all MACs are checked for status, not just the first successful one
+
+### 4. Improved MAC Refresh Logic
+- All MACs are now checked during refresh operations
+- MAC status is updated for all addresses, providing proper failover
+- Groups and channels are extracted from the first working MAC
+- Status refresh checks all MACs individually
+
+### 5. Fixed Channel Import for MAC Accounts
+- MAC accounts now use Standard account processing logic for channel import
+- This ensures that channels from MAC portals are properly imported into activated groups
+- Previously, MAC accounts were falling through to XC processing which doesn't work for MAC data
+
+### 6. Fixed Account Type Constant Typo
+- Fixed typo in account type constant: `STADNARD` → `STANDARD`
+- This was causing MAC accounts to be processed as XC accounts
+- MAC accounts now correctly use Standard processing logic
+
 ## How to Apply the Fix
 
 ### Option 1: Using Docker (Recommended)
@@ -24,14 +45,23 @@ The MAC addresses "00:1A:79:19:1F:00 00:1A:79:19:1F:A7 00:1A:79:19:1F:A9" are va
 # Navigate to the docker directory
 cd Dispatcharr-0.14.0/docker
 
-# Try the debug script first to see what's happening
-docker-compose exec web python /app/debug_mac_fix.py
+# Apply the complete fix (includes all latest fixes)
+docker-compose exec web python /app/complete_mac_fix.py
 
-# If that works, run the main fix
-docker-compose exec web python /app/fix_mac_addresses_standalone.py
+# Alternative: Force MAC object creation if validation fails
+docker-compose exec web python /app/force_mac_fix.py
+
+# Test the MAC refresh functionality
+docker-compose exec web python /app/test_mac_refresh.py
+
+# If the above don't work, try the debug script
+docker-compose exec web python /app/debug_mac_fix.py
 
 # If validation is causing issues, try the simple fix
 docker-compose exec web python /app/simple_mac_fix.py
+
+# IMPORTANT: Restart the web service to load all changes
+docker-compose restart web
 ```
 
 ### Option 2: Using Django Shell (if you have Django installed locally)
@@ -75,7 +105,17 @@ After running the fix, you should see:
    - Fixed duplicate import issue
    - Enhanced `save()` method to auto-process MAC addresses
 
-2. **Fix Scripts Created**
+2. **Dispatcharr-0.14.0/apps/m3u/tasks.py**
+   - Fixed duplicate `continue` statement in `_refresh_mac_account_direct()`
+   - Fixed scope issues with `working_mac_found` variable
+   - Ensured all MACs are checked during refresh operations
+   - Improved MAC failover logic
+
+3. **Fix Scripts Created**
+   - `complete_mac_fix.py` - Complete fix for all MAC issues (LATEST)
+   - `force_mac_fix.py` - Force MAC object creation bypassing validation
+   - `fix_mac_processing.py` - Comprehensive MAC processing fix script
+   - `test_mac_refresh.py` - Test script for MAC refresh functionality
    - `debug_mac_fix.py` - Debug script with detailed logging
    - `simple_mac_fix.py` - Simple fix that bypasses validation
    - `quick_mac_fix.py` - Django shell script

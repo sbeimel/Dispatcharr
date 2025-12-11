@@ -438,10 +438,34 @@ class MacPortalClient:
         """Extract stream URL from command string."""
         if not cmd:
             return None
+        
         parts = cmd.split()
+        
+        # First, look for absolute URLs
         for p in parts:
             if p.startswith("http://") or p.startswith("https://"):
                 return p
+        
+        # If no absolute URL found, look for relative paths and convert them
+        for p in parts:
+            if p.startswith("/ch/") or p.startswith("ch/"):
+                # Convert relative path to absolute URL using portal base URL
+                base_url = self.base_url.rstrip('/')
+                if p.startswith("/"):
+                    return f"{base_url}{p}"
+                else:
+                    return f"{base_url}/{p}"
+        
+        # Look for other common relative patterns
+        for p in parts:
+            if "/" in p and not p.startswith("ffmpeg"):
+                # Likely a relative URL path
+                base_url = self.base_url.rstrip('/')
+                if p.startswith("/"):
+                    return f"{base_url}{p}"
+                else:
+                    return f"{base_url}/{p}"
+        
         return None
 
     def _detect_group_title(self, ch: Dict[str, Any]) -> str:

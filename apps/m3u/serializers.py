@@ -196,6 +196,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "status",
             "last_message",
             "mac_address",
+            "proxy",
             "enable_vod",
             "auto_enable_new_groups_live",
             "auto_enable_new_groups_vod",
