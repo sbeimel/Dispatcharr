@@ -446,11 +446,14 @@ class MacPortalClient:
             if p.startswith("http://") or p.startswith("https://"):
                 return p
         
+        # Get the base URL from the portal (use original_base_url, not base_url)
+        parsed = urlparse(self.original_base_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
         # If no absolute URL found, look for relative paths and convert them
         for p in parts:
             if p.startswith("/ch/") or p.startswith("ch/"):
                 # Convert relative path to absolute URL using portal base URL
-                base_url = self.base_url.rstrip('/')
                 if p.startswith("/"):
                     return f"{base_url}{p}"
                 else:
@@ -460,7 +463,6 @@ class MacPortalClient:
         for p in parts:
             if "/" in p and not p.startswith("ffmpeg"):
                 # Likely a relative URL path
-                base_url = self.base_url.rstrip('/')
                 if p.startswith("/"):
                     return f"{base_url}{p}"
                 else:
@@ -513,16 +515,24 @@ class MacPortalClient:
 
         return "MAC"
 
-    def get_channels(self):
+    def get_channels(self, resolve_urls=True):
         """Return normalized channels list.
 
         We try to map provider categories/groups onto our 'group' field.
 
         Different portals use different keys for the group/category, so we
         check several common ones in order.
+        
+        Args:
+            resolve_urls: If True, resolve each channel's cmd to a real stream URL
+                         via create_link API. This is slower but gives working URLs.
+                         If False, just extract URL from cmd (may not work for all portals).
         """
         raw_list = self.get_all_channels_raw()
         normalized = []
+        resolved_count = 0
+        failed_count = 0
+        
         for ch in raw_list:
             ch_id = ch.get("id")
             name = ch.get("name") or f"Channel {ch_id}"
@@ -530,21 +540,46 @@ class MacPortalClient:
             group_title = self._detect_group_title(ch)
 
             cmd = ch.get("cmd") or ""
-            url = self._extract_stream_url(cmd)
+            url = None
+            
+            if resolve_urls and cmd:
+                # Try to resolve the real stream URL via create_link API
+                try:
+                    url = self.create_link(cmd)
+                    if url:
+                        resolved_count += 1
+                        logger.debug(f"Resolved URL for channel {name}: {url[:50]}...")
+                except MacPortalError as e:
+                    logger.debug(f"Failed to resolve URL for channel {name}: {e}")
+                    failed_count += 1
+                except Exception as e:
+                    logger.debug(f"Error resolving URL for channel {name}: {e}")
+                    failed_count += 1
+            
+            # Fallback to extracting URL from cmd if resolve failed or disabled
+            if not url:
+                url = self._extract_stream_url(cmd)
+            
             if not url:
                 continue
 
+            # Extract logo URL if available
+            logo = ch.get("logo") or ch.get("logo_url") or ""
+            
             normalized.append(
                 {
                     "id": ch_id,
                     "name": name,
                     "group": group_title,
                     "url": url,
+                    "logo": logo,
                     "cmd": cmd,
                     "raw": ch,
                 }
             )
-        logger.info("Normalized %s MAC channels into groups", len(normalized))
+        
+        logger.info(f"Normalized {len(normalized)} MAC channels into groups "
+                   f"(resolved: {resolved_count}, failed: {failed_count})")
         return normalized
 
     def get_epg_data(self, period: int = 7) -> Optional[Dict]:

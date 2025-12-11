@@ -3064,12 +3064,13 @@ def _refresh_mac_account_with_groups(account_id):
                                 groups[group_name] = {}
                             
                             # Convert MAC channel to EXTINF format
+                            # Use 'url' field which contains the properly extracted stream URL
                             extinf_entry = {
                                 'name': channel.get('name', ''),
-                                'url': channel.get('cmd', ''),
+                                'url': channel.get('url', ''),  # Use 'url' not 'cmd'
                                 'attributes': {
                                     'group-title': group_name,
-                                    'tvg-id': channel.get('id', ''),
+                                    'tvg-id': str(channel.get('id', '')),
                                     'tvg-logo': channel.get('logo', ''),
                                     'tvg-name': channel.get('name', '')
                                 },
