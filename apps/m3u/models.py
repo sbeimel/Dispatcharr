@@ -155,7 +155,78 @@ class M3UAccount(models.Model):
             kwargs.setdefault("update_fields", [])
             if "updated_at" in kwargs["update_fields"]:
                 kwargs["update_fields"].remove("updated_at")
+        
+        # Check if this is a MAC account and we need to process MAC addresses
+        is_new = self.pk is None
+        old_mac_address = None
+        if not is_new:
+            try:
+                old_instance = M3UAccount.objects.get(pk=self.pk)
+                old_mac_address = old_instance.mac_address
+            except M3UAccount.DoesNotExist:
+                pass
+        
         super().save(*args, **kwargs)
+        
+        # Process MAC addresses for MAC accounts
+        if self.account_type == self.Types.MAC and self.mac_address:
+            # Only process if MAC addresses changed or this is a new account
+            if is_new or old_mac_address != self.mac_address:
+                self._process_mac_addresses()
+    
+    def _process_mac_addresses(self):
+        """Parse mac_address field and create/update M3UAccountMac objects."""
+        if not self.mac_address:
+            return
+        
+        # Parse MAC addresses from the field (space, comma, or newline separated)
+        import re
+        mac_addresses = []
+        
+        # Split by various separators and clean up
+        raw_macs = re.split(r'[,\s\n\r]+', self.mac_address.strip())
+        
+        for mac in raw_macs:
+            mac = mac.strip()
+            if mac:
+                # Normalize MAC address format
+                normalized_mac = M3UAccountMac.normalize_mac_address(mac)
+                if M3UAccountMac.is_valid_mac_format(normalized_mac):
+                    mac_addresses.append(normalized_mac)
+        
+        if not mac_addresses:
+            return
+        
+        # Get existing MAC objects
+        existing_macs = {mac.address: mac for mac in self.macs.all()}
+        
+        # Create or update MAC objects
+        for i, mac_address in enumerate(mac_addresses):
+            if mac_address in existing_macs:
+                # Update priority if needed
+                mac_obj = existing_macs[mac_address]
+                if mac_obj.priority != i:
+                    mac_obj.priority = i
+                    mac_obj.save(update_fields=['priority'])
+            else:
+                # Create new MAC object
+                M3UAccountMac.objects.create(
+                    account=self,
+                    address=mac_address,
+                    priority=i,
+                    status=M3UAccountMac.Status.UNKNOWN
+                )
+        
+        # Remove MAC objects that are no longer in the list
+        current_addresses = set(mac_addresses)
+        for mac_obj in existing_macs.values():
+            if mac_obj.address not in current_addresses:
+                mac_obj.delete()
+        
+        # Update the mac_address field to reflect the normalized addresses
+        self.mac_address = ' '.join(mac_addresses)
+        if self.mac_address != getattr(self, '_original_mac_address', ''):
+            M3UAccount.objects.filter(pk=self.pk).update(mac_address=self.mac_address)
 
     # def get_channel_groups(self):
     #     return ChannelGroup.objects.filter(m3u_account__m3u_account=self)
@@ -474,7 +545,7 @@ class M3UAccountMac(models.Model):
             return False
         
         # Check standard format XX:XX:XX:XX:XX:XX
-        pattern = r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+        pattern = r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'$'
         return bool(re.match(pattern, mac))
     
     def save(self, *args, **kwargs):

@@ -3002,6 +3002,11 @@ def _refresh_mac_account_direct(account_id):
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
         
+        # Ensure MAC addresses are processed into M3UAccountMac objects
+        if account.mac_address and not account.macs.exists():
+            logger.info(f"Processing MAC addresses for account {account.name}")
+            account._process_mac_addresses()
+        
         # Get MAC addresses for this account
         macs = account.macs.filter(status__in=[
             M3UAccountMac.Status.VALID,
@@ -3009,8 +3014,13 @@ def _refresh_mac_account_direct(account_id):
         ]).order_by('priority')
         
         if not macs.exists():
-            logger.error(f"MAC account {account_id} has no valid MAC addresses")
-            return {"error": "No valid MAC addresses"}
+            # If still no MACs after processing, check if we have raw MAC addresses
+            if account.mac_address:
+                logger.error(f"MAC account {account_id} has MAC addresses in mac_address field but failed to create MAC objects: {account.mac_address}")
+                return {"error": f"Failed to process MAC addresses: {account.mac_address}"}
+            else:
+                logger.error(f"MAC account {account_id} has no MAC addresses configured")
+                return {"error": "No MAC addresses configured"}
         
         success_count = 0
         total_channels = 0
