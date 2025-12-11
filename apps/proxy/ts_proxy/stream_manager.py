@@ -1664,24 +1664,12 @@ class StreamManager:
                     mac_entry = None
 
                 if mac_entry:
-                    try:
-                        mac_entry.status = M3UAccountMac.Status.ERROR
-                        mac_entry.last_error = "runtime_stream_failure"
-                        mac_entry.last_checked = timezone.now()
-                        mac_entry.save(update_fields=["status", "last_error", "last_checked"])
-                        logger.info(
-                            "Marked MAC %s on account %s as ERROR due to runtime failure on channel %s",
-                            current_mac_value,
-                            m3u_account.id,
-                            self.channel_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to mark MAC %s as ERROR for account %s during MAC failover",
-                            current_mac_value,
-                            m3u_account.id,
-                            exc_info=True,
-                        )
+                    logger.info(
+                        "MAC failover triggered for MAC %s on account %s due to runtime failure on channel %s",
+                        current_mac_value,
+                        m3u_account.id,
+                        self.channel_id,
+                    )
 
                     # Unmark this MAC as busy
                     try:
