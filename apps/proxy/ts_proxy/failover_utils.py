@@ -18,7 +18,7 @@ logger = get_logger()
 # Failover configuration constants
 MAC_COOLDOWN_DURATION = 360  # 6 minutes
 PROFILE_COOLDOWN_DURATION = 180  # 3 minutes
-MAX_FAILOVER_ATTEMPTS = 5  # Maximum failover attempts per channel
+MAX_FAILOVER_ATTEMPTS = 15  # Maximum failover attempts per channel (allows MAC + Profile + Stream failover)
 
 
 class FailoverManager:
