@@ -1093,6 +1093,13 @@ def cleanup_streams(account_id, scan_start_time=timezone.now):
 
 @shared_task
 def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
+    # Import required models at the beginning
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from apps.channels.models import Channel, ChannelGroup
+    from django.utils import timezone
+    import re
+    
     if not acquire_task_lock("refresh_m3u_account_groups", account_id):
         return f"Task already running for account_id={account_id}.", None
 
@@ -1111,11 +1118,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
         
         try:
             # Call MAC refresh function directly (avoid Celery anti-pattern)
-            from .models import M3UAccount, M3UAccountMac
-            from .mac_portal_client import MacPortalClient, MacPortalError
-            from apps.channels.models import Channel, ChannelGroup
-            from django.utils import timezone
-            import re
             
             # Execute MAC refresh logic directly
             mac_result = _refresh_mac_account_direct(account_id)
