@@ -175,16 +175,8 @@ class M3UAccount(models.Model):
     
     def _process_mac_addresses(self):
         """Parse mac_address field and create/update M3UAccountMac objects."""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        logger.info(f"_process_mac_addresses called for account {self.id} ({self.name})")
-        
         if not self.mac_address:
-            logger.warning(f"No mac_address field for account {self.id}")
             return
-        
-        logger.info(f"Processing MAC addresses: {self.mac_address}")
         
         # Parse MAC addresses from the field (space, comma, or newline separated)
         import re
@@ -192,27 +184,20 @@ class M3UAccount(models.Model):
         
         # Split by various separators and clean up
         raw_macs = re.split(r'[,\s\n\r]+', self.mac_address.strip())
-        logger.info(f"Raw MACs after split: {raw_macs}")
         
         for mac in raw_macs:
             mac = mac.strip()
             if mac:
                 # Normalize MAC address format
                 normalized_mac = M3UAccountMac.normalize_mac_address(mac)
-                is_valid = M3UAccountMac.is_valid_mac_format(normalized_mac)
-                logger.info(f"MAC '{mac}' -> normalized '{normalized_mac}' -> valid: {is_valid}")
-                if is_valid:
+                if M3UAccountMac.is_valid_mac_format(normalized_mac):
                     mac_addresses.append(normalized_mac)
         
         if not mac_addresses:
-            logger.warning(f"No valid MAC addresses found for account {self.id}")
             return
-        
-        logger.info(f"Valid MAC addresses to process: {mac_addresses}")
         
         # Get existing MAC objects
         existing_macs = {mac.address: mac for mac in self.macs.all()}
-        logger.info(f"Existing MAC objects: {list(existing_macs.keys())}")
         
         # Create or update MAC objects
         for i, mac_address in enumerate(mac_addresses):
@@ -222,43 +207,31 @@ class M3UAccount(models.Model):
                 if mac_obj.priority != i:
                     mac_obj.priority = i
                     mac_obj.save(update_fields=['priority'])
-                logger.info(f"MAC {mac_address} already exists (priority {i})")
             else:
                 # Use get_or_create to avoid duplicate key errors
-                try:
-                    mac_obj, created = M3UAccountMac.objects.get_or_create(
-                        account=self,
-                        address=mac_address,
-                        defaults={
-                            'priority': i,
-                            'status': M3UAccountMac.Status.UNKNOWN
-                        }
-                    )
-                    if created:
-                        logger.info(f"Created new MAC object: {mac_address} (priority {i})")
-                    else:
-                        logger.info(f"MAC {mac_address} already existed in DB")
-                        if mac_obj.priority != i:
-                            mac_obj.priority = i
-                            mac_obj.save(update_fields=['priority'])
-                except Exception as e:
-                    logger.error(f"Error creating MAC object {mac_address}: {e}")
+                mac_obj, created = M3UAccountMac.objects.get_or_create(
+                    account=self,
+                    address=mac_address,
+                    defaults={
+                        'priority': i,
+                        'status': M3UAccountMac.Status.UNKNOWN
+                    }
+                )
+                if not created and mac_obj.priority != i:
+                    # Update priority if MAC exists but priority is different
+                    mac_obj.priority = i
+                    mac_obj.save(update_fields=['priority'])
         
         # Remove MAC objects that are no longer in the list
         current_addresses = set(mac_addresses)
         for mac_obj in existing_macs.values():
             if mac_obj.address not in current_addresses:
                 mac_obj.delete()
-                logger.info(f"Deleted MAC object: {mac_obj.address}")
         
         # Update the mac_address field to reflect the normalized addresses
         self.mac_address = ' '.join(mac_addresses)
         if self.mac_address != getattr(self, '_original_mac_address', ''):
             M3UAccount.objects.filter(pk=self.pk).update(mac_address=self.mac_address)
-        
-        # Verify MAC objects were created
-        final_count = self.macs.count()
-        logger.info(f"Final MAC object count for account {self.id}: {final_count}")
 
 
 class M3UFilter(models.Model):

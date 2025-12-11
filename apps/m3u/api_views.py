@@ -17,7 +17,7 @@ from django.conf import settings
 from .tasks import refresh_m3u_groups
 import json
 
-from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
+from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
@@ -29,9 +29,6 @@ from .serializers import (
     ServerGroupSerializer,
     M3UAccountProfileSerializer,
 )
-import logging
-
-logger = logging.getLogger(__name__)
 
 from .tasks import refresh_single_m3u_account, refresh_m3u_accounts, refresh_account_info
 import json
@@ -310,11 +307,15 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     def _delete_expired_macs_impl(self, account):
         """
         Internal logic for deleting expired/unknown MACs.
-        Deletes EXPIRED and UNKNOWN, re-sorts priorities and
+        Deletes EXPIRED and UNKNOWN, reorders priorities and
         updates the mac_address field based on remaining MACs.
         Returns (deleted_count, remaining_addresses).
         """
+        from .models import M3UAccountMac
         from django.db import transaction
+        import logging
+
+        logger = logging.getLogger(__name__)
 
         if account.account_type != M3UAccount.Types.MAC:
             return 0, []
@@ -330,13 +331,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             qs.delete()
 
             remaining = list(account.macs.order_by("priority", "id"))
-            # Re-set priorities
+            # Reorder priorities
             for idx, m in enumerate(remaining):
                 if m.priority != idx:
                     m.priority = idx
                     m.save(update_fields=["priority"])
 
-            # Build mac_address field from remaining MACs
+            # Update mac_address field from remaining MACs
             mac_list = [m.address for m in remaining]
             account.mac_address = " ".join(mac_list)
             account.save(update_fields=["mac_address"])
@@ -353,7 +354,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     def delete_expired_macs(self, request, pk=None):
         """
         Delete all EXPIRED and UNKNOWN MAC entries for this account.
-        Used by the button in M3U Manager (path: delete-expired-macs/).
+        Used by the button in the M3U manager (path: delete-expired-macs/).
         """
         account = self.get_object()
 
@@ -372,7 +373,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="delete_expired_macs")
     def delete_expired_macs_underscore(self, request, pk=None):
         """
-        Alias endpoint with underscore in path, in case frontend
+        Alias endpoint with underscore in path, in case the frontend
         uses /delete_expired_macs/. Uses the same logic.
         """
         account = self.get_object()
@@ -389,8 +390,10 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["delete"], url_path=r"macs/(?P<mac_id>[^/.]+)")
     def delete_single_mac(self, request, pk=None, mac_id=None):
         """
-        Delete a single MAC by its ID (for the red X in UI).
+        Delete a single MAC by its ID (for the red X in the UI).
         """
+        from .models import M3UAccountMac
+
         account = self.get_object()
         try:
             mac_obj = account.macs.get(id=mac_id)
@@ -402,7 +405,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         mac_obj.delete()
 
-        # Re-set priorities and update mac_address
+        # Reorder priorities and update mac_address
         remaining = list(account.macs.order_by("priority", "id"))
         for idx, m in enumerate(remaining):
             if m.priority != idx:
@@ -425,6 +428,8 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         Adjust the order (priority) of MACs.
         Expects in body: {"order": [mac_id1, mac_id2, ...]} in desired order.
         """
+        from .models import M3UAccountMac
+
         account = self.get_object()
         order = request.data.get("order", [])
         if not isinstance(order, list):
@@ -438,7 +443,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         mac_map = {str(m.id): m for m in mac_qs}
 
         next_idx = 0
-        # First, the IDs from 'order' in exactly that order
+        # First the IDs from 'order' in exactly this order
         for mac_id in order:
             m = mac_map.pop(str(mac_id), None)
             if m is None:
@@ -448,7 +453,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 m.save(update_fields=["priority"])
             next_idx += 1
 
-        # Append all remaining MACs at the end
+        # All remaining MACs append at the end
         for m in mac_map.values():
             if m.priority != next_idx:
                 m.priority = next_idx
@@ -465,6 +470,34 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 "account": serializer.data,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="refresh-mac-status")
+    def refresh_mac_status(self, request, pk=None):
+        """
+        Trigger MAC status check for all MACs in this account.
+        """
+        account = self.get_object()
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            return Response(
+                {"error": "Not a MAC account"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        try:
+            # Trigger MAC status check task
+            from .tasks import check_mac_expiry
+            check_mac_expiry.delay(account.id)
+            
+            return Response(
+                {"message": "MAC status check initiated"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to initiate MAC status check: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
