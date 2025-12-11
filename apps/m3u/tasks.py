@@ -3084,56 +3084,13 @@ def _refresh_mac_account_direct(account_id):
 
 
 @shared_task
+@shared_task
 def refresh_mac_account(account_id):
     """Refresh MAC account channels and status using MAC Portal Client.
     
     This is now a wrapper around the direct function to avoid Celery anti-patterns.
     """
     return _refresh_mac_account_direct(account_id)
-                    
-                    # For now, we just test connectivity
-                    # TODO: Implement full channel import like XC accounts
-                    break
-                    
-            except MacPortalError as e:
-                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
-                mac_obj.status = M3UAccountMac.Status.ERROR
-                mac_obj.last_checked = timezone.now()
-                mac_obj.last_error = str(e)
-                mac_obj.save()
-                continue
-            except Exception as e:
-                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
-                mac_obj.status = M3UAccountMac.Status.ERROR
-                mac_obj.last_checked = timezone.now()
-                mac_obj.last_error = str(e)
-                mac_obj.save()
-                continue
-        
-        if success_count > 0:
-            account.status = M3UAccount.Status.SUCCESS
-            account.last_message = f"Successfully connected with {success_count} MAC(s), found {total_channels} channels"
-            account.updated_at = timezone.now()
-            account.save()
-            
-            return {
-                "success": True,
-                "channels": total_channels,
-                "working_macs": success_count
-            }
-        else:
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = "All MAC addresses failed to connect"
-            account.save()
-            
-            return {"error": "All MAC addresses failed"}
-            
-    except M3UAccount.DoesNotExist:
-        logger.error(f"MAC account {account_id} not found")
-        return {"error": "Account not found"}
-    except Exception as e:
-        logger.error(f"Error refreshing MAC account {account_id}: {e}")
-        return {"error": str(e)}
 
 
 @shared_task
