@@ -3035,8 +3035,9 @@ def _refresh_mac_account_with_groups(account_id):
         total_channels = 0
         groups = {}
         extinf_data = []
+        working_mac_found = False
         
-        # Try each MAC until one works
+        # Try each MAC and check all of them for status
         for mac_obj in macs:
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
