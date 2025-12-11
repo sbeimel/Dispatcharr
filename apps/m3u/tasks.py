@@ -1119,19 +1119,26 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
         try:
             # Call MAC refresh function directly (avoid Celery anti-pattern)
             
-            # Execute MAC refresh logic directly
-            mac_result = _refresh_mac_account_direct(account_id)
+            # Execute MAC refresh logic directly and get groups
+            mac_result = _refresh_mac_account_with_groups(account_id)
             
             if mac_result and not mac_result.get('error'):
                 logger.info(f"MAC account {account_id} refreshed successfully")
+                
+                # Process groups from MAC result
+                groups = mac_result.get('groups', {})
+                if groups:
+                    logger.info(f"Processing {len(groups)} groups for MAC account {account_id}")
+                    process_groups(account, groups)
+                
                 account.status = M3UAccount.Status.SUCCESS
-                account.last_message = f"MAC refresh completed: {mac_result.get('channels', 0)} channels"
+                account.last_message = f"MAC refresh completed: {mac_result.get('channels', 0)} channels, {len(groups)} groups"
                 account.updated_at = timezone.now()
                 account.save(update_fields=["status", "last_message", "updated_at"])
                 
                 send_m3u_update(account_id, "processing_groups", 100, status="success")
                 release_task_lock("refresh_m3u_account_groups", account_id)
-                return "MAC account refreshed successfully", None
+                return "MAC account refreshed successfully", groups
             else:
                 error_msg = mac_result.get('error', 'Unknown MAC refresh error')
                 logger.error(f"MAC account {account_id} refresh failed: {error_msg}")
@@ -2985,6 +2992,125 @@ def send_m3u_update(account_id, action, progress, **kwargs):
     data = None
 
 
+def _refresh_mac_account_with_groups(account_id):
+    """Direct MAC account refresh function that also returns groups for processing."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    try:
+        account = M3UAccount.objects.get(id=account_id)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            logger.warning(f"Account {account_id} is not a MAC account")
+            return {"error": "Not a MAC account"}
+        
+        if not account.server_url:
+            logger.error(f"MAC account {account_id} has no server URL")
+            return {"error": "No server URL configured"}
+        
+        # Ensure MAC addresses are processed into M3UAccountMac objects
+        if account.mac_address and not account.macs.exists():
+            logger.info(f"Processing MAC addresses for account {account.name}")
+            account._process_mac_addresses()
+        
+        # Get MAC addresses for this account
+        macs = account.macs.filter(status__in=[
+            M3UAccountMac.Status.VALID,
+            M3UAccountMac.Status.UNKNOWN
+        ]).order_by('priority')
+        
+        if not macs.exists():
+            # If still no MACs after processing, check if we have raw MAC addresses
+            if account.mac_address:
+                logger.error(f"MAC account {account_id} has MAC addresses in mac_address field but failed to create MAC objects: {account.mac_address}")
+                return {"error": f"Failed to process MAC addresses: {account.mac_address}"}
+            else:
+                logger.error(f"MAC account {account_id} has no MAC addresses configured")
+                return {"error": "No MAC addresses configured"}
+        
+        success_count = 0
+        total_channels = 0
+        groups = {}
+        
+        # Try each MAC until one works
+        for mac_obj in macs:
+            try:
+                logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
+                
+                client = MacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None)
+                )
+                
+                # Test connection and get channels
+                channels = client.get_channels()
+                
+                if channels:
+                    total_channels = len(channels)
+                    logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                    
+                    # Extract groups from channels
+                    for channel in channels:
+                        group_name = channel.get('group', 'Default Group')
+                        if group_name not in groups:
+                            groups[group_name] = {}
+                    
+                    logger.info(f"Extracted {len(groups)} groups from MAC channels")
+                    
+                    # Update MAC status
+                    mac_obj.status = M3UAccountMac.Status.VALID
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    
+                    # Try to get expiry info
+                    try:
+                        expires_text = client.get_expires()
+                        if expires_text:
+                            mac_obj.expires_text = expires_text
+                    except Exception as e:
+                        logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
+                    
+                    mac_obj.save()
+                    success_count += 1
+                    
+                    # For channel import, we only need one working MAC
+                    break
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+        
+        if success_count > 0:
+            return {
+                "success": True,
+                "channels": total_channels,
+                "working_macs": success_count,
+                "groups": groups
+            }
+        else:
+            return {"error": "All MAC addresses failed"}
+            
+    except M3UAccount.DoesNotExist:
+        logger.error(f"MAC account {account_id} not found")
+        return {"error": "Account not found"}
+    except Exception as e:
+        logger.error(f"Error refreshing MAC account {account_id}: {e}")
+        return {"error": str(e)}
+
+
 def _refresh_mac_account_direct(account_id):
     """Direct MAC account refresh function (non-Celery) to avoid anti-pattern."""
     from .models import M3UAccount, M3UAccountMac
@@ -3025,7 +3151,9 @@ def _refresh_mac_account_direct(account_id):
         success_count = 0
         total_channels = 0
         
-        # Try each MAC until one works
+        # Try each MAC and check all of them for status
+        working_mac_found = False
+        
         for mac_obj in macs:
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
@@ -3040,8 +3168,13 @@ def _refresh_mac_account_direct(account_id):
                 channels = client.get_channels()
                 
                 if channels:
-                    total_channels = len(channels)
-                    logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                    if not working_mac_found:
+                        # Only count channels from first working MAC
+                        total_channels = len(channels)
+                        logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                        working_mac_found = True
+                    else:
+                        logger.info(f"MAC {mac_obj.address} is also working (backup)")
                     
                     # Update MAC status
                     mac_obj.status = M3UAccountMac.Status.VALID
@@ -3059,12 +3192,6 @@ def _refresh_mac_account_direct(account_id):
                     mac_obj.save()
                     success_count += 1
                     
-                    # For channel import, we only need one working MAC
-                    # But for status checks, we continue to check all MACs
-                    if not getattr(account, '_status_check_mode', False):
-                        # For normal refresh, break after first success
-                        break
-                    
             except MacPortalError as e:
                 logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
                 mac_obj.status = M3UAccountMac.Status.ERROR
@@ -3078,6 +3205,7 @@ def _refresh_mac_account_direct(account_id):
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
                 mac_obj.save()
+                continue
                 continue
         
         if success_count > 0:

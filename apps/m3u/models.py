@@ -1,6 +1,5 @@
 from django.db import models
 from django.core.exceptions import ValidationError
-from core.models import UserAgent
 import re
 from django.dispatch import receiver
 from apps.channels.models import StreamProfile
@@ -209,13 +208,19 @@ class M3UAccount(models.Model):
                     mac_obj.priority = i
                     mac_obj.save(update_fields=['priority'])
             else:
-                # Create new MAC object
-                M3UAccountMac.objects.create(
+                # Use get_or_create to avoid duplicate key errors
+                mac_obj, created = M3UAccountMac.objects.get_or_create(
                     account=self,
                     address=mac_address,
-                    priority=i,
-                    status=M3UAccountMac.Status.UNKNOWN
+                    defaults={
+                        'priority': i,
+                        'status': M3UAccountMac.Status.UNKNOWN
+                    }
                 )
+                if not created and mac_obj.priority != i:
+                    # Update priority if MAC exists but priority is different
+                    mac_obj.priority = i
+                    mac_obj.save(update_fields=['priority'])
         
         # Remove MAC objects that are no longer in the list
         current_addresses = set(mac_addresses)
