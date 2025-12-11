@@ -515,7 +515,7 @@ class MacPortalClient:
 
         return "MAC"
 
-    def get_channels(self, resolve_urls=True):
+    def get_channels(self):
         """Return normalized channels list.
 
         We try to map provider categories/groups onto our 'group' field.
@@ -523,15 +523,12 @@ class MacPortalClient:
         Different portals use different keys for the group/category, so we
         check several common ones in order.
         
-        Args:
-            resolve_urls: If True, resolve each channel's cmd to a real stream URL
-                         via create_link API. This is slower but gives working URLs.
-                         If False, just extract URL from cmd (may not work for all portals).
+        NOTE: URLs are stored as special mac:// URLs that will be resolved
+        at playback time via create_link API. This is much faster than
+        resolving all URLs during import.
         """
         raw_list = self.get_all_channels_raw()
         normalized = []
-        resolved_count = 0
-        failed_count = 0
         
         for ch in raw_list:
             ch_id = ch.get("id")
@@ -540,28 +537,16 @@ class MacPortalClient:
             group_title = self._detect_group_title(ch)
 
             cmd = ch.get("cmd") or ""
-            url = None
-            
-            if resolve_urls and cmd:
-                # Try to resolve the real stream URL via create_link API
-                try:
-                    url = self.create_link(cmd)
-                    if url:
-                        resolved_count += 1
-                        logger.debug(f"Resolved URL for channel {name}: {url[:50]}...")
-                except MacPortalError as e:
-                    logger.debug(f"Failed to resolve URL for channel {name}: {e}")
-                    failed_count += 1
-                except Exception as e:
-                    logger.debug(f"Error resolving URL for channel {name}: {e}")
-                    failed_count += 1
-            
-            # Fallback to extracting URL from cmd if resolve failed or disabled
-            if not url:
-                url = self._extract_stream_url(cmd)
-            
-            if not url:
+            if not cmd:
                 continue
+            
+            # Create a special MAC URL that encodes the portal info and cmd
+            # Format: mac://base64(portal_url|mac|cmd)
+            # This will be resolved at playback time
+            import base64
+            mac_data = f"{self.original_base_url}|{self.mac}|{cmd}"
+            encoded_data = base64.urlsafe_b64encode(mac_data.encode()).decode()
+            url = f"mac://{encoded_data}"
 
             # Extract logo URL if available
             logo = ch.get("logo") or ch.get("logo_url") or ""
@@ -578,9 +563,39 @@ class MacPortalClient:
                 }
             )
         
-        logger.info(f"Normalized {len(normalized)} MAC channels into groups "
-                   f"(resolved: {resolved_count}, failed: {failed_count})")
+        logger.info(f"Normalized {len(normalized)} MAC channels into groups")
         return normalized
+    
+    @staticmethod
+    def resolve_mac_url(mac_url: str, proxy: Optional[str] = None) -> str:
+        """Resolve a mac:// URL to a real stream URL.
+        
+        Args:
+            mac_url: URL in format mac://base64(portal_url|mac|cmd)
+            proxy: Optional proxy to use
+            
+        Returns:
+            Real stream URL from create_link API
+        """
+        if not mac_url.startswith("mac://"):
+            return mac_url
+        
+        import base64
+        try:
+            encoded_data = mac_url[6:]  # Remove "mac://" prefix
+            decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
+            parts = decoded_data.split("|", 2)
+            if len(parts) != 3:
+                raise ValueError(f"Invalid mac:// URL format: expected 3 parts, got {len(parts)}")
+            
+            portal_url, mac, cmd = parts
+            
+            # Create client and resolve URL
+            client = MacPortalClient(base_url=portal_url, mac=mac, proxy=proxy)
+            return client.create_link(cmd)
+        except Exception as e:
+            logger.error(f"Failed to resolve mac:// URL: {e}")
+            raise MacPortalError(f"Failed to resolve MAC URL: {e}")
 
     def get_epg_data(self, period: int = 7) -> Optional[Dict]:
         """Get EPG data for specified period (days)."""
