@@ -1110,9 +1110,15 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
         logger.info(f"Processing MAC account {account_id} with URL: {account.server_url}")
         
         try:
-            # Delegate to MAC-specific refresh task
-            result = refresh_mac_account.delay(account_id)
-            mac_result = result.get(timeout=300)  # 5 minute timeout
+            # Call MAC refresh function directly (avoid Celery anti-pattern)
+            from .models import M3UAccount, M3UAccountMac
+            from .mac_portal_client import MacPortalClient, MacPortalError
+            from apps.channels.models import Channel, ChannelGroup
+            from django.utils import timezone
+            import re
+            
+            # Execute MAC refresh logic directly
+            mac_result = _refresh_mac_account_direct(account_id)
             
             if mac_result and not mac_result.get('error'):
                 logger.info(f"MAC account {account_id} refreshed successfully")
@@ -2977,9 +2983,8 @@ def send_m3u_update(account_id, action, progress, **kwargs):
     data = None
 
 
-@shared_task
-def refresh_mac_account(account_id):
-    """Refresh MAC account channels and status using MAC Portal Client."""
+def _refresh_mac_account_direct(account_id):
+    """Direct MAC account refresh function (non-Celery) to avoid anti-pattern."""
     from .models import M3UAccount, M3UAccountMac
     from .mac_portal_client import MacPortalClient, MacPortalError
     from django.utils import timezone
@@ -3041,6 +3046,50 @@ def refresh_mac_account(account_id):
                     
                     mac_obj.save()
                     success_count += 1
+                    
+                    # For now, we just test connectivity
+                    # TODO: Implement full channel import like XC accounts
+                    break
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+        
+        if success_count > 0:
+            return {
+                "success": True,
+                "channels": total_channels,
+                "working_macs": success_count
+            }
+        else:
+            return {"error": "All MAC addresses failed"}
+            
+    except M3UAccount.DoesNotExist:
+        logger.error(f"MAC account {account_id} not found")
+        return {"error": "Account not found"}
+    except Exception as e:
+        logger.error(f"Error refreshing MAC account {account_id}: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def refresh_mac_account(account_id):
+    """Refresh MAC account channels and status using MAC Portal Client.
+    
+    This is now a wrapper around the direct function to avoid Celery anti-patterns.
+    """
+    return _refresh_mac_account_direct(account_id)
                     
                     # For now, we just test connectivity
                     # TODO: Implement full channel import like XC accounts
