@@ -20,6 +20,9 @@ import {
   Switch,
   Box,
   PasswordInput,
+  Table,
+  Badge,
+  ActionIcon,
 } from '@mantine/core';
 import M3UGroupFilter from './M3UGroupFilter';
 import useChannelsStore from '../../store/channels';
@@ -28,6 +31,7 @@ import { isNotEmpty, useForm } from '@mantine/form';
 import useEPGsStore from '../../store/epgs';
 import useVODStore from '../../store/useVODStore';
 import M3UFilters from './M3UFilters';
+import { useWebSocket } from '../../WebSocket';
 
 const M3U = ({
   m3uAccount = null,
@@ -50,6 +54,9 @@ const M3U = ({
   const [loadingText, setLoadingText] = useState('');
   const [showCredentialFields, setShowCredentialFields] = useState(false);
 
+  // WebSocket for real-time updates
+  const [isWebSocketReady, , webSocketValue] = useWebSocket();
+
   const form = useForm({
     mode: 'uncontrolled',
     initialValues: {
@@ -66,6 +73,7 @@ const M3U = ({
       stale_stream_days: 7,
       priority: 0,
       enable_vod: false,
+      mac_address: '',
     },
 
     validate: {
@@ -99,6 +107,7 @@ const M3U = ({
             ? m3uAccount.priority
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
+        mac_address: m3uAccount.mac_address ?? '',
       });
 
       if (m3uAccount.account_type == 'XC') {
@@ -118,6 +127,46 @@ const M3U = ({
     }
   }, [form.values.account_type]);
 
+  // Listen for WebSocket updates for this playlist
+  useEffect(() => {
+    if (webSocketValue && playlist?.id) {
+      try {
+        const parsedEvent = JSON.parse(webSocketValue);
+        
+        // Check if this is a playlist update for our current playlist
+        if (parsedEvent.type === 'playlist_updated' && 
+            parsedEvent.data?.account === playlist.id) {
+          
+          // Update the playlist with new data (including MAC status updates)
+          const updatedPlaylist = parsedEvent.data;
+          setPlaylist(updatedPlaylist);
+          
+          // Update form field if MAC addresses changed
+          if (updatedPlaylist.mac_address !== undefined) {
+            form.setFieldValue('mac_address', updatedPlaylist.mac_address ?? '');
+          }
+          
+          // Show notification for MAC status changes
+          if (updatedPlaylist.macs && updatedPlaylist.macs.length > 0) {
+            const hasStatusChanges = updatedPlaylist.macs.some(mac => 
+              mac.status === 'valid' || mac.status === 'expired' || mac.status === 'error'
+            );
+            
+            if (hasStatusChanges) {
+              notifications.show({
+                title: 'MAC Status Updated',
+                message: 'MAC address status has been updated automatically.',
+                color: 'blue',
+              });
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore parsing errors for non-JSON WebSocket messages
+      }
+    }
+  }, [webSocketValue, playlist?.id, form]);
+
   const onSubmit = async () => {
     const { create_epg, ...values } = form.getValues();
 
@@ -125,6 +174,26 @@ const M3U = ({
       // If account XC and no password input, assuming no password change
       // from previously stored value.
       delete values.password;
+    }
+
+    // Validation for MAC accounts
+    if (values.account_type === 'MAC') {
+      if (!values.server_url) {
+        notifications.show({
+          title: 'Validation Error',
+          message: 'Portal URL is required for MAC accounts',
+          color: 'red',
+        });
+        return;
+      }
+      if (!values.mac_address) {
+        notifications.show({
+          title: 'Validation Error', 
+          message: 'MAC address is required for MAC accounts',
+          color: 'red',
+        });
+        return;
+      }
     }
 
     if (values.user_agent == '0') {
@@ -155,11 +224,17 @@ const M3U = ({
         });
       }
 
-      if (values.account_type != 'XC') {
+      if (values.account_type != 'XC' && values.account_type != 'MAC') {
         notifications.show({
           title: 'Fetching M3U Groups',
           message:
             'Configure group filters and auto sync settings once complete.',
+        });
+      } else if (values.account_type === 'MAC') {
+        notifications.show({
+          title: 'Connecting to MAC Portal',
+          message:
+            'Testing MAC portal connection and fetching channels...',
         });
 
         // Don't prompt for group filters, but keeping this here
@@ -220,6 +295,118 @@ const M3U = ({
     }
   }, [playlist, playlistCreated]);
 
+  // MAC Management Handlers
+  const handleDeleteExpiredMacs = async () => {
+    if (!playlist?.id) {
+      return;
+    }
+    try {
+      const res = await API.deleteExpiredMacs(playlist.id);
+      const account = res.account || res;
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+
+      const deleted = res.deleted ?? 0;
+      notifications.show({
+        title: 'MACs updated',
+        message: `${deleted} expired MAC(s) deleted.`,
+      });
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: 'Could not delete expired MACs.',
+      });
+    }
+  };
+
+  const handleDeleteMac = async (macId) => {
+    if (!playlist?.id) return;
+
+    try {
+      const res = await API.deleteAccountMac(playlist.id, macId);
+      const account = res.account || res;
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+      
+      notifications.show({
+        title: 'MAC deleted',
+        message: 'MAC address has been removed.',
+      });
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: 'Could not delete MAC address.',
+      });
+    }
+  };
+
+  const handleMoveMac = async (macId, direction) => {
+    if (!playlist?.id) return;
+
+    const macs = playlist?.macs || [];
+    const ids = macs.map((m) => m.id);
+    const index = ids.indexOf(macId);
+    if (index === -1) return;
+
+    if (direction === 'up' && index > 0) {
+      [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+    } else if (direction === 'down' && index < ids.length - 1) {
+      [ids[index + 1], ids[index]] = [ids[index], ids[index + 1]];
+    } else {
+      return;
+    }
+
+    try {
+      const res = await API.reorderAccountMacs(playlist.id, ids);
+      const account = res.account || res;
+
+      setPlaylist(account);
+      form.setFieldValue('mac_address', account.mac_address ?? '');
+      
+      notifications.show({
+        title: 'MAC order updated',
+        message: 'MAC priority order has been updated.',
+      });
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: 'Could not update MAC order.',
+      });
+    }
+  };
+
+  const handleRefreshMacStatus = async () => {
+    if (!playlist?.id) return;
+
+    try {
+      // Refresh the playlist to get updated MAC status
+      const updatedPlaylist = await API.getPlaylist(playlist.id);
+      setPlaylist(updatedPlaylist);
+      
+      notifications.show({
+        title: 'MAC status refreshed',
+        message: 'MAC address status has been updated.',
+      });
+    } catch (e) {
+      console.error(e);
+      notifications.show({
+        color: 'red',
+        title: 'Error',
+        message: 'Could not refresh MAC status.',
+      });
+    }
+  };
+
+  const macs = playlist?.macs || [];
+
   if (!isOpen) {
     return <></>;
   }
@@ -227,7 +414,7 @@ const M3U = ({
   return (
     <>
       <Modal
-        size={700}
+        size={900}
         opened={isOpen}
         onClose={close}
         title="M3U Account"
@@ -284,6 +471,10 @@ const M3U = ({
                     value: 'XC',
                     label: 'Xtream Codes',
                   },
+                  {
+                    value: 'MAC',
+                    label: 'MAC / STB-Portal',
+                  },
                 ]}
                 key={form.key('account_type')}
                 {...form.getInputProps('account_type')}
@@ -337,7 +528,129 @@ const M3U = ({
                 </Box>
               )}
 
-              {form.getValues().account_type != 'XC' && (
+              {form.getValues().account_type === 'MAC' && (
+                <Box>
+                  <TextInput
+                    id="mac_address"
+                    name="mac_address"
+                    label="MAC Address(es)"
+                    description="One or more MAC addresses (e.g. AA:BB:CC:DD:EE:FF, 11:22:33:44:55:66 or each MAC on a new line)"
+                    {...form.getInputProps('mac_address')}
+                    key={form.key('mac_address')}
+                  />
+                  
+                  {macs.length > 0 && (
+                    <Box mt="sm">
+                      <Group justify="space-between" align="center" mb={4}>
+                        <Group gap="xs" align="center">
+                          <Box fw={500}>MAC Status</Box>
+                          {isWebSocketReady && (
+                            <Badge size="xs" color="green" variant="dot">
+                              Live Updates
+                            </Badge>
+                          )}
+                          {!isWebSocketReady && (
+                            <Badge size="xs" color="gray" variant="dot">
+                              Offline
+                            </Badge>
+                          )}
+                        </Group>
+                        <Group gap="xs">
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            color="blue"
+                            onClick={handleRefreshMacStatus}
+                          >
+                            Refresh Status
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            color="red"
+                            onClick={handleDeleteExpiredMacs}
+                          >
+                            Delete Expired MACs
+                          </Button>
+                        </Group>
+                      </Group>
+                      <Table striped highlightOnHover withTableBorder withColumnBorders>
+                        <Table.Thead>
+                          <Table.Tr>
+                            <Table.Th>#</Table.Th>
+                            <Table.Th>MAC</Table.Th>
+                            <Table.Th>Status</Table.Th>
+                            <Table.Th>Valid Until</Table.Th>
+                            <Table.Th>Actions</Table.Th>
+                          </Table.Tr>
+                        </Table.Thead>
+                        <Table.Tbody>
+                          {macs.map((mac, idx) => {
+                            let color = 'gray';
+                            if (mac.status === 'valid') color = 'green';
+                            if (mac.status === 'expired') color = 'red';
+                            if (mac.status === 'error') color = 'orange';
+
+                            return (
+                              <Table.Tr
+                                key={mac.id || idx}
+                                style={
+                                  mac.status === 'expired'
+                                    ? { color: theme.colors.red[6] }
+                                    : undefined
+                                }
+                              >
+                                <Table.Td>{mac.priority + 1}</Table.Td>
+                                <Table.Td>{mac.address}</Table.Td>
+                                <Table.Td>
+                                  <Badge color={color} size="sm">
+                                    {mac.status}
+                                  </Badge>
+                                </Table.Td>
+                                <Table.Td>
+                                  {mac.expires_text ||
+                                    mac.expires_at ||
+                                    'unknown'}
+                                </Table.Td>
+                                <Table.Td>
+                                  <Group gap="xs" justify="flex-end">
+                                    <ActionIcon
+                                      color="red"
+                                      variant="subtle"
+                                      onClick={() => handleDeleteMac(mac.id)}
+                                      title="Delete MAC"
+                                    >
+                                      ❌
+                                    </ActionIcon>
+                                    <ActionIcon
+                                      variant="subtle"
+                                      onClick={() => handleMoveMac(mac.id, 'up')}
+                                      disabled={idx === 0}
+                                      title="Move Up"
+                                    >
+                                      ↑
+                                    </ActionIcon>
+                                    <ActionIcon
+                                      variant="subtle"
+                                      onClick={() => handleMoveMac(mac.id, 'down')}
+                                      disabled={idx === macs.length - 1}
+                                      title="Move Down"
+                                    >
+                                      ↓
+                                    </ActionIcon>
+                                  </Group>
+                                </Table.Td>
+                              </Table.Tr>
+                            );
+                          })}
+                        </Table.Tbody>
+                      </Table>
+                    </Box>
+                  )}
+                </Box>
+              )}
+
+              {form.getValues().account_type != 'XC' && form.getValues().account_type != 'MAC' && (
                 <FileInput
                   id="file"
                   label="Upload files"

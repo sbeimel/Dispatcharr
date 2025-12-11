@@ -1,7 +1,7 @@
 from core.utils import validate_flexible_url
 from rest_framework import serializers, status
 from rest_framework.response import Response
-from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
+from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
 from core.models import UserAgent
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
 from apps.channels.serializers import (
@@ -11,6 +11,33 @@ import logging
 import json
 
 logger = logging.getLogger(__name__)
+
+
+class M3UAccountMacSerializer(serializers.ModelSerializer):
+    """Serializer for MAC addresses within M3U accounts"""
+    
+    class Meta:
+        model = M3UAccountMac
+        fields = [
+            "id",
+            "address",
+            "priority",
+            "status",
+            "expires_at",
+            "expires_text",
+            "last_checked",
+            "last_error",
+        ]
+        read_only_fields = ["last_checked", "last_error"]
+    
+    def validate_address(self, value):
+        """Validate and normalize MAC address format."""
+        from .mac_portal_client import validate_mac_address, normalize_mac_address
+        
+        if not validate_mac_address(value):
+            raise serializers.ValidationError("Invalid MAC address format. Use format: AA:BB:CC:DD:EE:FF")
+        
+        return normalize_mac_address(value)
 
 
 class M3UFilterSerializer(serializers.ModelSerializer):
@@ -124,6 +151,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     profiles = M3UAccountProfileSerializer(many=True, read_only=True)
+    macs = M3UAccountMacSerializer(many=True, read_only=True)
     read_only_fields = ["locked", "created_at", "updated_at"]
     # channel_groups = serializers.SerializerMethodField()
     channel_groups = ChannelGroupM3UAccountSerializer(
@@ -155,6 +183,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "filters",
             "user_agent",
             "profiles",
+            "macs",
             "locked",
             "channel_groups",
             "refresh_interval",
@@ -166,6 +195,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "priority",
             "status",
             "last_message",
+            "mac_address",
             "enable_vod",
             "auto_enable_new_groups_live",
             "auto_enable_new_groups_vod",

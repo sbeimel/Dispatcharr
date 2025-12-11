@@ -1105,7 +1105,48 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
     extinf_data = []
     groups = {"Default Group": {}}
 
-    if account.account_type == M3UAccount.Types.XC:
+    if account.account_type == M3UAccount.Types.MAC:
+        # Handle MAC/STB Portal accounts
+        logger.info(f"Processing MAC account {account_id} with URL: {account.server_url}")
+        
+        try:
+            # Delegate to MAC-specific refresh task
+            result = refresh_mac_account.delay(account_id)
+            mac_result = result.get(timeout=300)  # 5 minute timeout
+            
+            if mac_result and not mac_result.get('error'):
+                logger.info(f"MAC account {account_id} refreshed successfully")
+                account.status = M3UAccount.Status.SUCCESS
+                account.last_message = f"MAC refresh completed: {mac_result.get('channels', 0)} channels"
+                account.updated_at = timezone.now()
+                account.save(update_fields=["status", "last_message", "updated_at"])
+                
+                send_m3u_update(account_id, "processing_groups", 100, status="success")
+                release_task_lock("refresh_m3u_account_groups", account_id)
+                return "MAC account refreshed successfully", None
+            else:
+                error_msg = mac_result.get('error', 'Unknown MAC refresh error')
+                logger.error(f"MAC account {account_id} refresh failed: {error_msg}")
+                account.status = M3UAccount.Status.ERROR
+                account.last_message = error_msg
+                account.save(update_fields=["status", "last_message"])
+                
+                send_m3u_update(account_id, "processing_groups", 100, status="error", error=error_msg)
+                release_task_lock("refresh_m3u_account_groups", account_id)
+                return error_msg, None
+                
+        except Exception as e:
+            error_msg = f"MAC account refresh failed: {str(e)}"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            
+            send_m3u_update(account_id, "processing_groups", 100, status="error", error=error_msg)
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+
+    elif account.account_type == M3UAccount.Types.XC:
         # Log detailed information about the account
         logger.info(
             f"Processing XC account {account_id} with URL: {account.server_url}"
@@ -2934,3 +2975,234 @@ def send_m3u_update(account_id, action, progress, **kwargs):
 
     # Explicitly clear data reference to help garbage collection
     data = None
+
+
+@shared_task
+def refresh_mac_account(account_id):
+    """Refresh MAC account channels and status using MAC Portal Client."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    try:
+        account = M3UAccount.objects.get(id=account_id)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            logger.warning(f"Account {account_id} is not a MAC account")
+            return {"error": "Not a MAC account"}
+        
+        if not account.server_url:
+            logger.error(f"MAC account {account_id} has no server URL")
+            return {"error": "No server URL configured"}
+        
+        # Get MAC addresses for this account
+        macs = account.macs.filter(status__in=[
+            M3UAccountMac.Status.VALID,
+            M3UAccountMac.Status.UNKNOWN
+        ]).order_by('priority')
+        
+        if not macs.exists():
+            logger.error(f"MAC account {account_id} has no valid MAC addresses")
+            return {"error": "No valid MAC addresses"}
+        
+        success_count = 0
+        total_channels = 0
+        
+        # Try each MAC until one works
+        for mac_obj in macs:
+            try:
+                logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
+                
+                client = MacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None)
+                )
+                
+                # Test connection and get channels
+                channels = client.get_channels()
+                
+                if channels:
+                    total_channels = len(channels)
+                    logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                    
+                    # Update MAC status
+                    mac_obj.status = M3UAccountMac.Status.VALID
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    
+                    # Try to get expiry info
+                    try:
+                        expires_text = client.get_expires()
+                        if expires_text:
+                            mac_obj.expires_text = expires_text
+                    except Exception as e:
+                        logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
+                    
+                    mac_obj.save()
+                    success_count += 1
+                    
+                    # For now, we just test connectivity
+                    # TODO: Implement full channel import like XC accounts
+                    break
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                mac_obj.save()
+                continue
+        
+        if success_count > 0:
+            account.status = M3UAccount.Status.SUCCESS
+            account.last_message = f"Successfully connected with {success_count} MAC(s), found {total_channels} channels"
+            account.updated_at = timezone.now()
+            account.save()
+            
+            return {
+                "success": True,
+                "channels": total_channels,
+                "working_macs": success_count
+            }
+        else:
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = "All MAC addresses failed to connect"
+            account.save()
+            
+            return {"error": "All MAC addresses failed"}
+            
+    except M3UAccount.DoesNotExist:
+        logger.error(f"MAC account {account_id} not found")
+        return {"error": "Account not found"}
+    except Exception as e:
+        logger.error(f"Error refreshing MAC account {account_id}: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def check_mac_expiry(account_id=None):
+    """Check MAC expiry status for accounts."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    if account_id:
+        accounts = M3UAccount.objects.filter(
+            id=account_id,
+            account_type=M3UAccount.Types.MAC,
+            is_active=True
+        )
+    else:
+        accounts = M3UAccount.objects.filter(
+            account_type=M3UAccount.Types.MAC,
+            is_active=True
+        )
+    
+    results = []
+    
+    for account in accounts:
+        try:
+            macs = account.macs.all()
+            
+            for mac_obj in macs:
+                try:
+                    client = MacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
+                    
+                    expires_text = client.get_expires()
+                    
+                    if expires_text:
+                        mac_obj.expires_text = expires_text
+                        mac_obj.status = M3UAccountMac.Status.VALID
+                        
+                        # Try to parse expiry date
+                        # This is portal-specific, so we just store the text for now
+                        
+                    else:
+                        mac_obj.status = M3UAccountMac.Status.UNKNOWN
+                    
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    mac_obj.save()
+                    
+                    results.append({
+                        "account": account.name,
+                        "mac": mac_obj.address,
+                        "status": mac_obj.status,
+                        "expires": expires_text
+                    })
+                    
+                except MacPortalError as e:
+                    logger.error(f"MAC Portal error checking expiry for {mac_obj.address}: {e}")
+                    mac_obj.status = M3UAccountMac.Status.ERROR
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = str(e)
+                    mac_obj.save()
+                    
+                except Exception as e:
+                    logger.error(f"Error checking expiry for MAC {mac_obj.address}: {e}")
+                    mac_obj.status = M3UAccountMac.Status.ERROR
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = str(e)
+                    mac_obj.save()
+        
+        except Exception as e:
+            logger.error(f"Error checking MAC expiry for account {account.id}: {e}")
+    
+    return {"checked": len(results), "results": results}
+
+
+@shared_task
+def cleanup_expired_macs():
+    """Cleanup expired MACs across all accounts."""
+    from .models import M3UAccount, M3UAccountMac
+    from django.db import transaction
+    
+    expired_count = 0
+    
+    try:
+        with transaction.atomic():
+            expired_macs = M3UAccountMac.objects.filter(
+                status=M3UAccountMac.Status.EXPIRED
+            )
+            
+            expired_count = expired_macs.count()
+            
+            if expired_count > 0:
+                logger.info(f"Cleaning up {expired_count} expired MAC addresses")
+                
+                # Group by account to update mac_address field
+                accounts_to_update = set()
+                for mac in expired_macs:
+                    accounts_to_update.add(mac.account_id)
+                
+                # Delete expired MACs
+                expired_macs.delete()
+                
+                # Update mac_address field for affected accounts
+                for account_id in accounts_to_update:
+                    try:
+                        account = M3UAccount.objects.get(id=account_id)
+                        remaining_macs = account.macs.order_by('priority', 'id')
+                        account.mac_address = ' '.join(m.address for m in remaining_macs)
+                        account.save(update_fields=['mac_address'])
+                    except Exception as e:
+                        logger.error(f"Error updating mac_address for account {account_id}: {e}")
+        
+        logger.info(f"Successfully cleaned up {expired_count} expired MAC addresses")
+        return {"cleaned": expired_count}
+        
+    except Exception as e:
+        logger.error(f"Error during MAC cleanup: {e}")
+        return {"error": str(e)}
