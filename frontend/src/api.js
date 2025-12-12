@@ -952,6 +952,29 @@ export default class API {
     }
   }
 
+  static async clearChannels(id) {
+    try {
+      const response = await request(`${host}/api/m3u/accounts/${id}/clear-channels/`, {
+        method: 'POST',
+      });
+
+      // Update the playlist status in the store
+      usePlaylistsStore.getState().fetchPlaylists();
+      
+      // Show success notification
+      notifications.show({
+        title: 'Success',
+        message: `Channels cleared successfully. Removed ${response.streams_deleted} streams and ${response.channels_deleted} channels.`,
+        color: 'green',
+        autoClose: 5000,
+      });
+
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to clear channels for playlist ${id}`, e);
+    }
+  }
+
   static async updatePlaylist(values, isToggle = false) {
     const { id, ...payload } = values;
 

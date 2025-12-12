@@ -91,6 +91,7 @@ const RowActions = ({
   deletePlaylist,
   row,
   refreshPlaylist,
+  clearChannels,
 }) => {
   const iconSize =
     tableSize == 'default' ? 'sm' : tableSize == 'compact' ? 'xs' : 'md';
@@ -115,6 +116,17 @@ const RowActions = ({
       >
         <SquareMinus size={tableSize === 'compact' ? 16 : 18} />
       </ActionIcon>
+      <Tooltip label="Clear Channels">
+        <ActionIcon
+          variant="transparent"
+          size={iconSize}
+          color="orange.5"
+          onClick={() => clearChannels(row.original.id)}
+          disabled={!row.original.is_active}
+        >
+          <X size={tableSize === 'compact' ? 16 : 18} />
+        </ActionIcon>
+      </Tooltip>
       <ActionIcon
         variant="transparent"
         size={iconSize}
@@ -138,6 +150,9 @@ const M3UTable = () => {
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [playlistToDelete, setPlaylistToDelete] = useState(null);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  const [clearTarget, setClearTarget] = useState(null);
+  const [playlistToClear, setPlaylistToClear] = useState(null);
   const [data, setData] = useState([]);
   const [sorting, setSorting] = useState([{ id: 'name', desc: '' }]);
 
@@ -384,6 +399,32 @@ const M3UTable = () => {
     }
   };
 
+  const clearChannels = async (id) => {
+    // Get playlist details for the confirmation dialog
+    const playlist = playlists.find((p) => p.id === id);
+    setPlaylistToClear(playlist);
+    setClearTarget(id);
+
+    // Skip warning if it's been suppressed
+    if (isWarningSuppressed('clear-channels')) {
+      return executeClearChannels(id);
+    }
+
+    setConfirmClearOpen(true);
+  };
+
+  const executeClearChannels = async (id) => {
+    setIsLoading(true);
+    try {
+      await API.clearChannels(id);
+    } catch (error) {
+      console.error('Error clearing channels:', error);
+    } finally {
+      setIsLoading(false);
+      setConfirmClearOpen(false);
+    }
+  };
+
   const deletePlaylist = async (id) => {
     // Get playlist details for the confirmation dialog
     const playlist = playlists.find((p) => p.id === id);
@@ -602,7 +643,7 @@ const M3UTable = () => {
       {
         id: 'actions',
         header: 'Actions',
-        size: tableSize == 'compact' ? 75 : 100,
+        size: tableSize == 'compact' ? 100 : 125,
       },
     ],
     [refreshPlaylist, editPlaylist, deletePlaylist, toggleActive]
@@ -739,6 +780,7 @@ const M3UTable = () => {
             deletePlaylist={deletePlaylist}
             row={row}
             refreshPlaylist={refreshPlaylist}
+            clearChannels={clearChannels}
           />
         );
     }
@@ -913,6 +955,34 @@ This action cannot be undone.`}
         confirmLabel="Delete"
         cancelLabel="Cancel"
         actionKey="delete-m3u"
+        onSuppressChange={suppressWarning}
+        size="lg"
+      />
+
+      <ConfirmationDialog
+        opened={confirmClearOpen}
+        onClose={() => setConfirmClearOpen(false)}
+        onConfirm={() => executeClearChannels(clearTarget)}
+        title="Clear Channels"
+        message={
+          playlistToClear ? (
+            <div style={{ whiteSpace: 'pre-line' }}>
+              {`Are you sure you want to clear all channels from this M3U account?
+
+Name: ${playlistToClear.name}
+Type: ${playlistToClear.account_type === 'XC' ? 'Xtream Codes' : (playlistToClear.account_type === 'MAC' ? 'MAC/STB Portal' : 'Standard')}
+
+This will remove all imported streams and channels from this account.
+You can re-import them by clicking "Refresh" after clearing.
+This is useful for removing duplicate imports.`}
+            </div>
+          ) : (
+            'Are you sure you want to clear all channels from this M3U account?'
+          )
+        }
+        confirmLabel="Clear Channels"
+        cancelLabel="Cancel"
+        actionKey="clear-channels"
         onSuppressChange={suppressWarning}
         size="lg"
       />

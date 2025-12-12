@@ -499,6 +499,67 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+    @action(detail=True, methods=["post"], url_path="clear-channels")
+    def clear_channels(self, request, pk=None):
+        """
+        Clear all channels and streams imported from this M3U account.
+        This removes duplicate imports and allows for a clean re-import.
+        """
+        account = self.get_object()
+        
+        try:
+            from django.db import transaction
+            from apps.channels.models import Stream, Channel, ChannelStream
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            
+            with transaction.atomic():
+                # Count items before deletion for reporting
+                streams_count = account.streams.count()
+                
+                # Get channels that are linked to streams from this account
+                channels_with_account_streams = Channel.objects.filter(
+                    streams__m3u_account=account
+                ).distinct()
+                channels_count = channels_with_account_streams.count()
+                
+                logger.info(f"Clearing channels for M3U account {account.id} ({account.name})")
+                logger.info(f"Found {streams_count} streams and {channels_count} channels to clear")
+                
+                # Delete all streams from this account
+                # This will also remove ChannelStream relationships automatically
+                account.streams.all().delete()
+                
+                # Delete channels that no longer have any streams
+                # (channels that were only connected to streams from this account)
+                orphaned_channels = Channel.objects.filter(streams__isnull=True)
+                orphaned_count = orphaned_channels.count()
+                orphaned_channels.delete()
+                
+                logger.info(f"Deleted {streams_count} streams and {orphaned_count} orphaned channels")
+                
+                # Update account status
+                account.status = M3UAccount.Status.IDLE
+                account.last_message = f"Channels cleared successfully. Removed {streams_count} streams and {orphaned_count} channels."
+                account.save(update_fields=['status', 'last_message'])
+            
+            return Response(
+                {
+                    "message": "Channels cleared successfully",
+                    "streams_deleted": streams_count,
+                    "channels_deleted": orphaned_count,
+                },
+                status=status.HTTP_200_OK,
+            )
+            
+        except Exception as e:
+            logger.error(f"Error clearing channels for account {account.id}: {e}")
+            return Response(
+                {"error": f"Failed to clear channels: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
     queryset = M3UFilter.objects.all()

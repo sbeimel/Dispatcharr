@@ -490,3 +490,69 @@ This transforms the failover system from reactive to proactive, with enterprise-
 **Expected Behavior**: The enhanced MAC portal client should now handle the `http://ueawall.com/portal.php` portal and similar problematic portals that were causing JSON parsing errors.
 
 **Testing**: The client will now provide detailed logs showing exactly what type of response the portal is returning, making it easier to diagnose and fix any remaining compatibility issues.
+
+## Fix #10: Clear Channels Functionality for M3U Accounts
+
+**Issue**: Users sometimes have duplicate streams in their stream list after multiple imports or failed imports from M3U accounts.
+
+**Root Cause**: When M3U accounts are refreshed multiple times or imports fail partially, duplicate streams and channels can accumulate in the database without a clean way to remove them.
+
+**Solution Applied**: Implemented "Clear Channels" functionality that allows users to clean up duplicate imports via the Web UI
+
+### Changes Made:
+
+#### 1. **Backend API Endpoint**
+- **New Endpoint**: `POST /api/m3u/accounts/{id}/clear-channels/`
+- **Functionality**: Removes all streams and orphaned channels associated with a specific M3U account
+- **Transaction Safety**: Uses database transactions to ensure data consistency
+- **Reporting**: Returns count of deleted streams and channels
+- **Status Updates**: Updates account status and last message with operation results
+
+#### 2. **Frontend API Integration**
+- **New Function**: `API.clearChannels(id)` in `frontend/src/api.js`
+- **Success Notification**: Shows detailed results of the clear operation
+- **Error Handling**: Proper error notifications for failed operations
+- **Store Updates**: Refreshes playlist store after successful operation
+
+#### 3. **UI Components**
+- **New Button**: Orange "Clear Channels" button (X icon) in M3U Accounts table
+- **Tooltip**: "Clear Channels" tooltip for better UX
+- **Confirmation Dialog**: Prevents accidental clearing with detailed confirmation
+- **Warning Suppression**: Users can suppress the warning for future operations
+- **Button Positioning**: Placed between Delete and Refresh buttons for logical flow
+
+#### 4. **Smart Cleanup Logic**
+- **Stream Deletion**: Removes all streams linked to the M3U account
+- **Orphaned Channel Cleanup**: Automatically removes channels that no longer have any streams
+- **Relationship Cleanup**: Properly handles ChannelStream many-to-many relationships
+- **Preserve Other Data**: Only removes data specifically imported from the target account
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/m3u/api_views.py` - Added `clear_channels` action endpoint
+- `Dispatcharr-0.14.0/frontend/src/api.js` - Added `clearChannels` API function
+- `Dispatcharr-0.14.0/frontend/src/components/tables/M3UsTable.jsx` - Added UI button and confirmation dialog
+
+### Usage Instructions:
+1. **Navigate to M3U Accounts** in the Dispatcharr Web UI
+2. **Find the account** with duplicate streams
+3. **Click the orange X button** (Clear Channels) in the Actions column
+4. **Confirm the operation** in the dialog that appears
+5. **Wait for completion** - success notification will show results
+6. **Click Refresh** to re-import clean channels from the M3U source
+
+### Benefits:
+- **Clean Imports**: Removes duplicate streams and channels
+- **Safe Operation**: Only affects the selected M3U account
+- **User Friendly**: Simple one-click operation with confirmation
+- **Detailed Feedback**: Shows exactly what was removed
+- **Reversible**: Can re-import by clicking Refresh after clearing
+
+### Expected Behavior:
+- ✅ Removes all streams imported from the selected M3U account
+- ✅ Removes orphaned channels that no longer have streams
+- ✅ Preserves channels that have streams from other accounts
+- ✅ Updates account status with operation results
+- ✅ Shows success notification with deletion counts
+- ✅ Allows immediate re-import via Refresh button
+
+**Status**: ✅ **COMPLETE** - Clear Channels functionality is fully implemented and ready for use. Users can now easily clean up duplicate imports and maintain a clean stream list.
