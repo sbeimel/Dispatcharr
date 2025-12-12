@@ -101,7 +101,7 @@ class MacPortalClient:
         base_url: str,
         mac: str,
         proxy: Optional[str] = None,
-        timezone: str = "Europe/Berlin",
+        timezone: str = "Europe/London",
     ) -> None:
         if not base_url:
             raise ValueError("base_url is required")
@@ -151,9 +151,8 @@ class MacPortalClient:
 
     def resolve_portal_url(self) -> str:
         """
-        Try to detect the portal load.php URL.
-        If original_base_url already ends with load.php, use it as-is.
-        Otherwise probe common paths.
+        Try to detect the portal URL using MacReplay's advanced discovery method.
+        First tries to find xpcom.common.js and parse it, then falls back to common paths.
         """
         cache_key = f"portal_url:{self.original_base_url}"
         cached_url = cache.get(cache_key)
@@ -164,11 +163,21 @@ class MacPortalClient:
         if self.portal_url:
             return self.portal_url
 
-        if self.original_base_url.endswith("load.php"):
+        # If URL already ends with load.php or portal.php, use it as-is
+        if self.original_base_url.endswith(("load.php", "portal.php")):
             self.portal_url = self.original_base_url
             cache.set(cache_key, self.portal_url, 3600)  # Cache for 1 hour
             return self.portal_url
 
+        # Try MacReplay's advanced portal discovery method
+        discovered_url = self._discover_portal_via_xpcom()
+        if discovered_url:
+            self.portal_url = discovered_url
+            cache.set(cache_key, self.portal_url, 3600)  # Cache for 1 hour
+            logger.info("MAC portal discovered via xpcom.common.js: %s", discovered_url)
+            return self.portal_url
+
+        # Fallback to simple path probing
         parsed = urlparse(self.original_base_url)
         if not parsed.scheme:
             self.original_base_url = "http://" + self.original_base_url
@@ -177,9 +186,10 @@ class MacPortalClient:
         base = f"{parsed.scheme}://{parsed.netloc}"
         candidate_paths = [
             "/stalker_portal/server/load.php",
-            "/stalker_portal/load.php",
+            "/stalker_portal/load.php", 
             "/c/load.php",
             "/portal.php",
+            "/server/load.php",
         ]
 
         proxies = self._get_proxies()
@@ -211,10 +221,108 @@ class MacPortalClient:
         )
         return self.portal_url
 
+    def _discover_portal_via_xpcom(self) -> Optional[str]:
+        """
+        Advanced portal discovery using xpcom.common.js parsing (from MacReplay).
+        """
+        def parse_xpcom_response(url, data):
+            try:
+                java = data.text.replace(" ", "").replace("'", "").replace("+", "")
+                pattern = re.search(r"varpattern.*\/(\(http.*)\/;", java).group(1)
+                result = re.search(pattern, url)
+                protocol_index = re.search(r"this\.portal_protocol.*(\d).*;", java).group(1)
+                ip_index = re.search(r"this\.portal_ip.*(\d).*;", java).group(1)
+                path_index = re.search(r"this\.portal_path.*(\d).*;", java).group(1)
+                protocol = result.group(int(protocol_index))
+                ip = result.group(int(ip_index))
+                path = result.group(int(path_index))
+                portal_pattern = re.search(r"this\.ajax_loader=(.*\.php);", java).group(1)
+                portal = (
+                    portal_pattern.replace("this.portal_protocol", protocol)
+                    .replace("this.portal_ip", ip)
+                    .replace("this.portal_path", path)
+                )
+                return portal
+            except Exception as e:
+                logger.debug(f"Failed to parse xpcom.common.js response: {e}")
+                return None
+
+        # Parse the base URL
+        parsed = urlparse(self.original_base_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # If URL already has a path, try to use it
+        url_path = parsed.path.rstrip('/')
+        
+        # Extended list of paths to try (from MacReplay)
+        urls = [
+            "/c/xpcom.common.js",
+            "/client/xpcom.common.js", 
+            "/c_/xpcom.common.js",
+            "/stalker_portal/c/xpcom.common.js",
+            "/stalker_portal/c_/xpcom.common.js",
+            "/portal/c/xpcom.common.js",
+            "/server/c/xpcom.common.js",
+        ]
+        
+        # If URL has a path component, try it first
+        if url_path and url_path != '/':
+            urls.insert(0, f"{url_path}/xpcom.common.js")
+            urls.insert(1, f"{url_path}xpcom.common.js")
+
+        proxies = self._get_proxies()
+        
+        # Enhanced headers to bypass Cloudflare and other protections (from MacReplay)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
+            "Referer": base_url + "/",
+        }
+
+        # Try with proxy first (use cloudscraper for Cloudflare bypass)
+        session = _get_session(use_cloudscraper=True)
+        for path in urls:
+            try:
+                test_url = base_url + path
+                logger.debug(f"Trying xpcom.common.js at: {test_url}")
+                response = session.get(test_url, headers=headers, proxies=proxies, timeout=10)
+                if response.status_code == 200:
+                    logger.debug(f"Found xpcom.common.js at: {test_url}")
+                    portal = parse_xpcom_response(test_url, response)
+                    if portal:
+                        logger.info(f"Successfully parsed portal URL: {portal}")
+                        return portal
+            except Exception as e:
+                logger.debug(f"Failed to fetch {path}: {e}")
+                continue
+
+        # Try without proxy (some portals don't like proxies)
+        logger.debug("Retrying xpcom.common.js discovery without proxy...")
+        for path in urls:
+            try:
+                test_url = base_url + path
+                logger.debug(f"Trying xpcom.common.js at: {test_url} (no proxy)")
+                response = session.get(test_url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    logger.debug(f"Found xpcom.common.js at: {test_url}")
+                    portal = parse_xpcom_response(test_url, response)
+                    if portal:
+                        logger.info(f"Successfully parsed portal URL: {portal}")
+                        return portal
+            except Exception as e:
+                logger.debug(f"Failed to fetch {path} without proxy: {e}")
+                continue
+        
+        logger.debug(f"Could not find xpcom.common.js for {self.original_base_url}")
+        return None
+
     # ------------- step 2: handshake / token -------------
 
     def handshake(self) -> str:
-        """Get authentication token from portal."""
+        """Get authentication token from portal with robust fallback mechanisms."""
         cache_key = f"mac_token:{self.mac}:{self.original_base_url}"
         cached_token = cache.get(cache_key)
         if cached_token:
@@ -222,62 +330,162 @@ class MacPortalClient:
             return self.token
 
         portal = self.resolve_portal_url()
-        params = {
-            "type": "stb",
-            "action": "handshake",
-            "JsHttpRequest": "1-xml",
-        }
         proxies = self._get_proxies()
-        headers = self._default_headers(with_auth=False)
-
-        r = _get_session().get(
-            portal,
-            params=params,
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        try:
-            token = data["js"]["token"]
-        except Exception as exc:
-            raise MacPortalError(f"Handshake without token: {exc}")
         
-        self.token = token
-        cache.set(cache_key, token, 1800)  # Cache for 30 minutes
-        logger.debug("MAC portal token acquired for MAC %s", self.mac)
-        return token
+        # Enhanced headers to bypass protections (from original MacReplay)
+        from urllib.parse import urlparse
+        parsed = urlparse(portal)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "Accept": "*/*",
+            "Referer": base_url + "/",
+            "X-User-Agent": "Model: MAG250; Link: WiFi",
+        }
+        
+        # If URL already contains a path (like /c/ or /stalker_portal/), use it
+        url_path = parsed.path.rstrip('/')
+        
+        # Try different endpoint variations (from original MacReplay)
+        endpoints = []
+        
+        # If URL has a specific path, try it first
+        if url_path and url_path != '/':
+            endpoints.extend([
+                f"{url_path}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml",
+                f"{url_path}/server/load.php?type=stb&action=handshake&JsHttpRequest=1-xml",
+                f"{url_path}?type=stb&action=handshake&JsHttpRequest=1-xml",
+            ])
+        
+        # Standard endpoints
+        endpoints.extend([
+            "?type=stb&action=handshake&JsHttpRequest=1-xml",  # Root
+            "/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml",  # Standard portal.php
+            "/server/load.php?type=stb&action=handshake&JsHttpRequest=1-xml",  # Standard load.php
+            "/stalker_portal/server/load.php?type=stb&action=handshake&JsHttpRequest=1-xml",  # Stalker path
+            "/c/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml",  # /c/ path
+        ])
+        
+        for endpoint in endpoints:
+            try:
+                # Build full URL
+                if endpoint.startswith('/') or endpoint.startswith('?'):
+                    full_url = base_url + endpoint
+                else:
+                    full_url = portal + endpoint
+                
+                logger.debug(f"Trying token endpoint: {full_url}")
+                response = _get_session().get(
+                    full_url,
+                    cookies=self._cookies(),
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=20,
+                )
+                logger.debug(f"Token request status: {response.status_code}")
+                
+                # Try to parse response
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        if "js" in data and "token" in data["js"]:
+                            token = data["js"]["token"]
+                            if token:
+                                self.token = token
+                                cache.set(cache_key, token, 1800)  # Cache for 30 minutes
+                                logger.info(f"Successfully got token for MAC {self.mac} using endpoint: {full_url}")
+                                return token
+                    except Exception as e:
+                        logger.debug(f"Failed to parse JSON response from {endpoint}: {e}")
+                        # Log raw response for debugging
+                        logger.debug(f"Raw response: {response.text[:500]}")
+                        continue
+            except requests.Timeout:
+                logger.debug(f"Timeout on endpoint {endpoint}")
+                continue
+            except requests.RequestException as e:
+                logger.debug(f"Request error on endpoint {endpoint}: {e}")
+                continue
+            except Exception as e:
+                logger.debug(f"Error on endpoint {endpoint}: {e}")
+                continue
+        
+        raise MacPortalError(f"Failed to get token for MAC {self.mac} from all endpoints")
 
-    # ------------- step 3: expiry / account info -------------
+    # ------------- step 3: profile / account info -------------
+
+    def get_profile(self) -> Optional[Dict]:
+        """Get profile information from portal."""
+        if not self.token:
+            self.handshake()
+        
+        portal = self.resolve_portal_url()
+        proxies = self._get_proxies()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)",
+            "Authorization": f"Bearer {self.token}",
+        }
+        
+        try:
+            response = _get_session().get(
+                portal + "?type=stb&action=get_profile&JsHttpRequest=1-xml",
+                cookies=self._cookies(),
+                headers=headers,
+                proxies=proxies,
+                timeout=10,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                profile = data.get("js")
+                if profile:
+                    logger.debug(f"Got profile for MAC {self.mac}")
+                    return profile
+        except Exception as e:
+            logger.debug(f"Failed to get profile for MAC {self.mac}: {e}")
+        
+        return None
 
     def get_expires(self) -> Optional[str]:
         """
-        Fetch expiry-like info from account_info/get_main_info.
+        Fetch expiry-like info from account_info/get_main_info with robust error handling.
         STB-Proxy uses 'phone' field for that.
         """
         if not self.token:
             self.handshake()
+        
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
-        headers = self._default_headers(with_auth=True)
-
-        r = _get_session().get(
-            portal,
-            params={
-                "type": "account_info",
-                "action": "get_main_info",
-                "JsHttpRequest": "1-xml",
-            },
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json().get("js") or {}
-        return data.get("phone")  # may contain expiry-like info
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)",
+            "Authorization": f"Bearer {self.token}",
+        }
+        
+        try:
+            logger.debug(f"Getting expiry for MAC {self.mac}")
+            response = _get_session().get(
+                portal + "?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
+                cookies=self._cookies(),
+                headers=headers,
+                proxies=proxies,
+                timeout=15,
+            )
+            logger.debug(f"Expiry request status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                expires = data["js"]["phone"]
+                if expires:
+                    logger.info(f"Got expiry for MAC {self.mac}: {expires}")
+                    return expires
+        except requests.Timeout:
+            logger.error(f"Timeout getting expiry for MAC {self.mac}")
+        except requests.RequestException as e:
+            logger.error(f"Request error getting expiry for MAC {self.mac}: {e}")
+        except Exception as e:
+            logger.error(f"Error getting expiry for MAC {self.mac}: {e}")
+        
+        return None
 
     # ------------- step 4: genres / categories -------------
 
@@ -347,42 +555,113 @@ class MacPortalClient:
     # ------------- step 5: channels -------------
 
     def get_all_channels_raw(self):
-        """Get raw channel data from portal."""
+        """Get raw channel data from portal with robust fallback mechanisms."""
         if not self.token:
             self.handshake()
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
-        headers = self._default_headers(with_auth=True)
-
-        r = _get_session().get(
-            portal,
-            params={
-                "type": "itv",
-                "action": "get_all_channels",
-                "JsHttpRequest": "1-xml",
-            },
-            headers=headers,
-            cookies=self._cookies(),
-            proxies=proxies,
-            timeout=20,
-        )
-        r.raise_for_status()
-        js = r.json().get("js") or {}
-        data = js.get("data") or []
-
-        # Log a few sample entries to inspect keys
-        for idx, ch in enumerate(data[:10]):
-            try:
-                keys = list(ch.keys())
-            except Exception:
-                keys = []
-            logger.debug("MAC raw channel %s keys: %s", idx, keys)
-
-        return data
+        
+        # Enhanced headers to bypass protections (from original MacReplay)
+        from urllib.parse import urlparse
+        parsed = urlparse(portal)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "*/*",
+            "Referer": base_url + "/",
+            "X-User-Agent": "Model: MAG250; Link: WiFi",
+        }
+        
+        params = {
+            "type": "itv",
+            "action": "get_all_channels",
+            "force_ch_link_check": "",
+            "JsHttpRequest": "1-xml"
+        }
+        
+        # Try GET first (standard)
+        try:
+            logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
+            response = _get_session().get(
+                portal,
+                params=params,
+                cookies=self._cookies(),
+                headers=headers,
+                proxies=proxies,
+                timeout=30,
+            )
+            logger.debug(f"Channels request status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    channels = data["js"]["data"]
+                    if channels:
+                        logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
+                        
+                        # Log a few sample entries to inspect keys
+                        for idx, ch in enumerate(channels[:3]):
+                            try:
+                                keys = list(ch.keys())
+                            except Exception:
+                                keys = []
+                            logger.debug("MAC raw channel %s keys: %s", idx, keys)
+                        
+                        return channels
+                except Exception as e:
+                    logger.debug(f"Failed to parse GET response: {e}")
+                    # Log raw response for debugging
+                    logger.debug(f"Raw response: {response.text[:500]}")
+        except Exception as e:
+            logger.debug(f"GET request failed: {e}, trying POST")
+        
+        # Try POST as fallback (some portals require this)
+        try:
+            logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
+            response = _get_session().post(
+                portal,
+                data=params,
+                cookies=self._cookies(),
+                headers=headers,
+                proxies=proxies,
+                timeout=30,
+            )
+            logger.debug(f"Channels request status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    channels = data["js"]["data"]
+                    if channels:
+                        logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
+                        
+                        # Log a few sample entries to inspect keys
+                        for idx, ch in enumerate(channels[:3]):
+                            try:
+                                keys = list(ch.keys())
+                            except Exception:
+                                keys = []
+                            logger.debug("MAC raw channel %s keys: %s", idx, keys)
+                        
+                        return channels
+                except Exception as e:
+                    logger.debug(f"Failed to parse POST response: {e}")
+                    # Log raw response for debugging
+                    logger.debug(f"Raw response: {response.text[:500]}")
+        except requests.Timeout:
+            logger.error(f"Timeout getting channels for MAC {self.mac}")
+        except requests.RequestException as e:
+            logger.error(f"Request error getting channels for MAC {self.mac}: {e}")
+        except Exception as e:
+            logger.error(f"Error getting channels for MAC {self.mac}: {e}")
+        
+        raise MacPortalError(f"Failed to get channels for MAC {self.mac} from portal")
 
     def create_link(self, cmd: str) -> str:
         """
-        Resolve a portal channel command into a final stream URL using itv/create_link.
+        Resolve a portal channel command into a final stream URL using itv/create_link with robust fallback mechanisms.
         """
         if not cmd:
             raise MacPortalError("Missing cmd for create_link")
@@ -392,8 +671,13 @@ class MacPortalClient:
 
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
-        headers = self._default_headers(with_auth=True)
-
+        
+        # Enhanced headers (from original MacReplay)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)",
+            "Authorization": f"Bearer {self.token}",
+        }
+        
         params = {
             "type": "itv",
             "action": "create_link",
@@ -405,40 +689,52 @@ class MacPortalClient:
             "force_ch_link_check": "false",
             "JsHttpRequest": "1-xml",
         }
-
+        
+        # Try GET first
         try:
-            r = _get_session().get(
+            response = _get_session().get(
                 portal,
                 params=params,
-                headers=headers,
                 cookies=self._cookies(),
+                headers=headers,
                 proxies=proxies,
                 timeout=10,
             )
-            r.raise_for_status()
-        except requests.RequestException as exc:
-            raise MacPortalError(f"create_link request failed: {exc}")
-
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    link = data["js"]["cmd"].split()[-1]
+                    if link and (link.startswith("http://") or link.startswith("https://")):
+                        return link
+                except Exception as e:
+                    logger.debug(f"GET create_link failed to parse: {e}")
+        except Exception as e:
+            logger.debug(f"GET create_link failed: {e}, trying POST")
+        
+        # Try POST as fallback
         try:
-            js = r.json().get("js") or {}
-        except Exception as exc:
-            raise MacPortalError(f"create_link invalid JSON: {exc}")
-
-        cmd_value = js.get("cmd")
-        if not cmd_value or not isinstance(cmd_value, str):
-            raise MacPortalError("create_link response without cmd field")
-
-        url = None
-        parts = cmd_value.split()
-        for part in reversed(parts):
-            if part.startswith("http://") or part.startswith("https://"):
-                url = part
-                break
-
-        if not url:
-            raise MacPortalError("Could not extract stream URL from create_link response")
-
-        return url
+            response = _get_session().post(
+                portal,
+                data=params,
+                cookies=self._cookies(),
+                headers=headers,
+                proxies=proxies,
+                timeout=10,
+            )
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    link = data["js"]["cmd"].split()[-1]
+                    if link and (link.startswith("http://") or link.startswith("https://")):
+                        return link
+                except Exception as e:
+                    logger.debug(f"POST create_link failed to parse: {e}")
+        except Exception as e:
+            logger.debug(f"POST create_link failed: {e}")
+        
+        raise MacPortalError(f"Could not create link for cmd: {cmd}")
 
     def _extract_stream_url(self, cmd: str) -> Optional[str]:
         """Extract stream URL from command string."""
