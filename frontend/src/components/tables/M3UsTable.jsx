@@ -900,7 +900,7 @@ const M3UTable = () => {
               {`Are you sure you want to delete the following M3U account?
 
 Name: ${playlistToDelete.name}
-Type: ${playlistToDelete.account_type === 'XC' ? 'Xtream Codes' : 'Standard'}
+Type: ${playlistToDelete.account_type === 'XC' ? 'Xtream Codes' : (playlistToDelete.account_type === 'MAC' ? 'MAC/STB Portal' : 'Standard')}
 Server: ${playlistToDelete.server_url || 'Local file'}
 
 This will remove all related streams and may affect channels using these streams.

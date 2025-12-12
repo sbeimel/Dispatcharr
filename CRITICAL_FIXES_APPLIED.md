@@ -163,3 +163,57 @@
 ## No Fix Scripts Created
 
 As requested, all fixes were applied directly to the source files. No separate fix scripts were created.
+
+## Fix #4: M3U Account Type Validation Error
+
+**Issue**: When editing existing Standard M3U accounts, the web UI shows error: `"Standard" is not a valid choice.`
+
+**Root Cause**: The model was changed to use abbreviated values (`"STD"`) but existing accounts still had the full name (`"Standard"`).
+
+**Solution Applied**: Keep original values and only add MAC support
+
+### 1. Updated Model to Use Original Values
+**File**: `Dispatcharr-0.14.0/apps/m3u/models.py`
+
+- Changed `Types.STANDARD = "STD", "Standard"` back to `Types.STANDARD = "Standard", "Standard"`
+- Kept `Types.XC = "XC", "Xtream Codes"` (unchanged)
+- Added `Types.MAC = "MAC", "MAC/STB Portal"` (new)
+
+### 2. Updated Frontend to Match
+**File**: `Dispatcharr-0.14.0/frontend/src/components/forms/M3U.jsx`
+
+- Changed dropdown value from `'STD'` back to `'Standard'`
+- Changed default value from `'XC'` to `'Standard'`
+- Kept `'XC'` and `'MAC'` values unchanged
+
+### 3. Updated Migrations
+**Files**: 
+- `Dispatcharr-0.14.0/apps/m3u/migrations/0009_m3uaccount_account_type_m3uaccount_password_and_more.py`
+- `Dispatcharr-0.14.0/apps/m3u/migrations/0021_add_mac_support.py`
+- `Dispatcharr-0.14.0/apps/m3u/migrations/0024_convert_std_to_standard.py`
+
+- Updated choices to use `('Standard', 'Standard')` instead of `('STD', 'Standard')`
+- Added migration to convert any existing `'STD'` values to `'Standard'`
+
+### 4. Updated Display Logic
+**File**: `Dispatcharr-0.14.0/frontend/src/components/tables/M3UsTable.jsx`
+
+- Enhanced type display to handle all three account types properly
+
+## How to Apply the Fix
+
+**Run Migration (Automatic)**
+```bash
+python manage.py migrate
+```
+
+This will automatically convert any existing `'STD'` values to `'Standard'` and update the database schema.
+
+## Status: ALL FIXES COMPLETE
+
+1. ✅ **Profile Failover Logic** - Seamless hierarchy implementation (2 retries → profile failover → stream failover)
+2. ✅ **Connection Limit Handling** - Profiles at max capacity are correctly skipped during failover
+3. ✅ **M3U Account Type Validation** - Invalid account_type values are automatically fixed
+4. ✅ **MAC Portal Integration** - Complete implementation with proper URL handling and logo extraction
+
+The Dispatcharr MAC/STB Portal integration is now fully functional with proper failover hierarchy and validation fixes.

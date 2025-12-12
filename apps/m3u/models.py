@@ -11,7 +11,7 @@ CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
 class M3UAccount(models.Model):
     class Types(models.TextChoices):
-        STANDARD = "STD", "Standard"
+        STANDARD = "Standard", "Standard"
         XC = "XC", "Xtream Codes"
         MAC = "MAC", "MAC/STB Portal"
 
@@ -83,7 +83,7 @@ class M3UAccount(models.Model):
         blank=True,
         related_name="m3u_accounts",
     )
-    account_type = models.CharField(choices=Types.choices, default=Types.STANDARD)
+    account_type = models.CharField(choices=Types.choices, default=Types.STANDARD, max_length=20)
     username = models.CharField(max_length=255, null=True, blank=True)
     password = models.CharField(max_length=255, null=True, blank=True)
     custom_properties = models.JSONField(default=dict, blank=True, null=True)

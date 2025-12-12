@@ -66,7 +66,7 @@ const M3U = ({
       is_active: true,
       max_streams: 0,
       refresh_interval: 24,
-      account_type: 'XC',
+      account_type: 'Standard',
       create_epg: false,
       username: '',
       password: '',
@@ -475,7 +475,7 @@ const M3U = ({
                 }
                 data={[
                   {
-                    value: 'STD',
+                    value: 'Standard',
                     label: 'Standard',
                   },
                   {

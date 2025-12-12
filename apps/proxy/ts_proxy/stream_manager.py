@@ -201,31 +201,17 @@ class StreamManager:
                                  f"Resetting switching state.")
                     self._reset_url_switching_state()
 
-                # NEW: Check for health monitor recovery requests
+                # Check for health monitor recovery requests
                 if hasattr(self, 'needs_reconnect') and self.needs_reconnect and not self.url_switching:
-                    logger.info(f"Health monitor requested reconnect for channel {self.channel_id}")
+                    logger.info(f"Health monitor detected unhealthy stream for channel {self.channel_id}")
                     self.needs_reconnect = False
-
-                    # Attempt reconnect without changing streams
-                    if self._attempt_reconnect():
-                        logger.info(f"Health-requested reconnect successful for channel {self.channel_id}")
-                        continue  # Go back to main loop
-                    else:
-                        logger.warning(f"Health-requested reconnect failed, will try stream switch for channel {self.channel_id}")
-                        self.needs_stream_switch = True
-
-                if hasattr(self, 'needs_stream_switch') and self.needs_stream_switch and not self.url_switching:
-                    logger.info(f"Health monitor requested stream switch for channel {self.channel_id}")
-                    self.needs_stream_switch = False
-
-                    if self._try_next_stream():
-                        logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
-                        stream_switch_attempts += 1
-                        self.retry_count = 0  # Reset retries for new stream
-                        continue  # Go back to main loop with new stream
-                    else:
-                        logger.error(f"Health-requested stream switch failed for channel {self.channel_id}")
-                        # Continue with normal flow
+                    # Force the connection to fail so normal retry logic kicks in
+                    if self.connected:
+                        logger.info(f"Forcing connection close to trigger retry logic for channel {self.channel_id}")
+                        self._close_all_connections()
+                        self.connected = False
+                        # Don't reset retry_count here - let normal retry logic handle it
+                        # This ensures we go through the proper retry sequence before failover
 
                 # Check stream type before connecting
                 self.stream_type = detect_stream_type(self.url)
@@ -1229,6 +1215,10 @@ class StreamManager:
                         self.healthy = False
 
                     consecutive_unhealthy_checks += 1
+                    
+                    # Log subsequent unhealthy checks less frequently
+                    if consecutive_unhealthy_checks > 1 and consecutive_unhealthy_checks % 3 == 0:
+                        logger.debug(f"Stream still unhealthy for channel {self.channel_id} - no data for {inactivity_duration:.1f}s (check {consecutive_unhealthy_checks})")
 
                     # Only set flags if enough time has passed since last action
                     if (consecutive_unhealthy_checks >= max_unhealthy_checks and
@@ -1238,11 +1228,14 @@ class StreamManager:
                         connection_start_time = getattr(self, 'connection_start_time', 0)
                         stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
 
-                        # Always try reconnect first, let the normal retry flow handle profile/stream failover
-                        if not self.needs_reconnect:
+                        # Only trigger health monitor recovery if we're not already in a retry cycle
+                        # This prevents health monitor from bypassing normal retry attempts
+                        if not self.needs_reconnect and self.retry_count == 0:
                             logger.info(f"Setting reconnect flag for unhealthy stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
                             self.needs_reconnect = True
                             self.last_health_action_time = now
+                        elif self.retry_count > 0:
+                            logger.debug(f"Health monitor detected unhealthy stream but retry cycle already active (retry {self.retry_count}/{self.max_retries}) for channel {self.channel_id}")
 
                         consecutive_unhealthy_checks = 0 # Reset after setting flag
 

@@ -17,12 +17,12 @@ class Migration(migrations.Migration):
             name='account_type',
             field=models.CharField(
                 choices=[
-                    ('STD', 'Standard'),
+                    ('Standard', 'Standard'),
                     ('XC', 'Xtream Codes'),
                     ('MAC', 'MAC/STB Portal'),
                 ],
-                default='STD',
-                max_length=3,
+                default='Standard',
+                max_length=20,
             ),
         ),
         
