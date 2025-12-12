@@ -639,6 +639,13 @@ class MacPortalClient:
             import time
             time.sleep(1)
             
+        # Some portals require genres to be loaded first
+        try:
+            logger.info(f"Pre-loading genres for MAC {self.mac} (some portals require this)")
+            self.get_genres_map()
+        except Exception as e:
+            logger.debug(f"Genre pre-loading failed (not critical): {e}")
+            
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
         
@@ -651,6 +658,9 @@ class MacPortalClient:
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Authorization": f"Bearer {self.token}",
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
             "Referer": base_url + "/",
             "X-User-Agent": "Model: MAG250; Link: WiFi",
         }
@@ -693,6 +703,24 @@ class MacPortalClient:
             # Check for empty response before parsing JSON
             if not response.text or response.text.strip() == "":
                 logger.error(f"Empty response from portal for MAC {self.mac} (GET)")
+                # Try to get raw content if text is empty but content exists
+                if response.content:
+                    logger.info(f"Raw content exists ({len(response.content)} bytes), trying manual decode")
+                    try:
+                        import gzip
+                        if response.headers.get('content-encoding') == 'gzip':
+                            decoded_content = gzip.decompress(response.content).decode('utf-8')
+                            logger.info(f"Manual gzip decode result: {decoded_content[:500]!r}")
+                            if decoded_content.strip():
+                                # Use manually decoded content
+                                import json
+                                data = json.loads(decoded_content)
+                                channels = data["js"]["data"]
+                                if channels:
+                                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (manual decode)")
+                                    return channels
+                    except Exception as decode_error:
+                        logger.error(f"Manual decode failed: {decode_error}")
                 raise ValueError("Empty response from portal")
             
             # Simple parsing like original MacReplay - no complex validation
@@ -744,6 +772,24 @@ class MacPortalClient:
             # Check for empty response before parsing JSON
             if not response.text or response.text.strip() == "":
                 logger.error(f"Empty response from portal for MAC {self.mac} (POST)")
+                # Try to get raw content if text is empty but content exists
+                if response.content:
+                    logger.info(f"Raw content exists ({len(response.content)} bytes), trying manual decode")
+                    try:
+                        import gzip
+                        if response.headers.get('content-encoding') == 'gzip':
+                            decoded_content = gzip.decompress(response.content).decode('utf-8')
+                            logger.info(f"Manual gzip decode result: {decoded_content[:500]!r}")
+                            if decoded_content.strip():
+                                # Use manually decoded content
+                                import json
+                                data = json.loads(decoded_content)
+                                channels = data["js"]["data"]
+                                if channels:
+                                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (manual decode)")
+                                    return channels
+                    except Exception as decode_error:
+                        logger.error(f"Manual decode failed: {decode_error}")
                 raise ValueError("Empty response from portal")
             
             # Simple parsing like original MacReplay - no complex validation
