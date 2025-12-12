@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 import re
 import logging
 import time
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from django.core.cache import cache
 from django.conf import settings
 
