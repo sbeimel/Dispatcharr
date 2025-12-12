@@ -1,4 +1,4 @@
-# Critical Fixes Applied - December 11, 2025
+# Critical Fixes Applied - December 12, 2025
 
 ## Issues Fixed
 
@@ -217,3 +217,151 @@ This will automatically convert any existing `'STD'` values to `'Standard'` and 
 4. ✅ **MAC Portal Integration** - Complete implementation with proper URL handling and logo extraction
 
 The Dispatcharr MAC/STB Portal integration is now fully functional with proper failover hierarchy and validation fixes.
+
+## Fix #5: Optimized Buffering Detection for Better User Experience
+
+**Issue**: Buffering detection was too sensitive and timeout too long, causing poor user experience when streams had minor fluctuations.
+
+**Problems**:
+- Buffering timeout of 30 seconds meant users saw frozen video for too long
+- Buffering detection at 0.8x speed triggered on normal IPTV fluctuations
+- Users experienced "buffering" warnings even during normal operation
+
+**Solution Applied**: More aggressive buffering settings for seamless experience
+
+### Changes Made:
+1. **Original Buffering Timeout**: Restored to 15 seconds (original patch value)
+   - Matches the proven working timeout from Dispatcharr-0.12.0-04
+   - Balanced between user experience and stability
+
+2. **Original Speed Detection**: Restored to 1.0x speed (original patch value)  
+   - Only triggers buffering detection when stream is below normal speed (< 100%)
+   - Matches original patch behavior that was proven to work seamlessly
+   - Prevents false alarms during normal IPTV speed variations (0.9x-1.1x)
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/proxy/config.py` - Updated default values
+- `Dispatcharr-0.14.0/core/models.py` - Updated fallback defaults  
+- `Dispatcharr-0.14.0/core/migrations/0014_default_proxy_settings.py` - Updated migration defaults
+- `Dispatcharr-0.14.0/core/api_views.py` - Updated API defaults
+
+### Result:
+- **Original Behavior**: Exactly matches Dispatcharr-0.12.0-04 buffering behavior
+- **Proven Settings**: Uses the same values that worked seamlessly in the original patch
+- **Balanced Detection**: 15 seconds timeout gives streams time to recover from temporary issues
+- **Accurate Threshold**: 1.0x speed threshold only triggers on actual buffering (not normal fluctuations)
+- **Seamless Experience**: Maintains the original patch's seamless failover behavior
+
+**Settings Location**: The buffering settings can be found and adjusted in:
+- **Main Config**: `Dispatcharr-0.14.0/apps/proxy/config.py` (lines 15-16)
+- **Database Defaults**: Stored in CoreSettings and configurable via web UI
+
+**Original Reference**: Settings verified against `Dispatcharr-0.12.0-04/apps/proxy/config.py`
+
+## Fix #6: Advanced MAC Busy Tracking and Cooldown System
+
+**Issue**: Multiple streams could use the same MAC address simultaneously, causing conflicts and connection issues.
+
+**Problems**:
+- No tracking of which MACs are currently in use
+- No cooldown system to prevent immediate retry of failed MACs/profiles
+- No "All MACs busy" handling for graceful fallback to backup streams
+
+**Solution Applied**: Implemented sophisticated MAC busy tracking and cooldown system from original patch
+
+### Changes Made:
+
+#### 1. **MAC Busy Tracking System**
+- **Redis-based tracking**: MACs marked as "busy" when actively streaming
+- **Smart MAC selection**: Prefers free MACs over busy ones during stream start
+- **Automatic cleanup**: Busy status cleared when stream stops or fails
+- **Conflict prevention**: Prevents multiple streams from using same MAC simultaneously
+
+#### 2. **Cooldown System**
+- **MAC Cooldown**: 10 minutes cooldown for failed MACs to prevent immediate retry
+- **Profile Cooldown**: 10 minutes cooldown for failed profiles
+- **Redis-based storage**: All cooldowns stored in Redis with automatic expiration
+- **Intelligent retry**: System respects cooldowns during failover attempts
+
+#### 3. **"All MACs Busy" Handling**
+- **Graceful fallback**: When all MACs busy → try backup streams instead of failing
+- **Smart detection**: System detects when no free MACs available
+- **Proper error propagation**: Clear error messages for debugging
+
+#### 4. **Enhanced MAC URL Resolution**
+- **Busy-aware resolution**: `resolve_mac_url_with_busy_check()` prefers free MACs
+- **Automatic MAC selection**: Chooses best available MAC from account
+- **Fallback logic**: Falls back to original MAC if busy checking fails
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/stream_manager.py` - Added MAC busy tracking and cooldown logic
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/redis_keys.py` - Added MAC busy and cooldown keys (already existed)
+- `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Added busy-aware MAC URL resolution
+
+### Result:
+- **No MAC Conflicts**: Multiple streams can't use same MAC simultaneously
+- **Intelligent Failover**: System respects cooldowns and busy status during failover
+- **Better Stability**: Reduces connection conflicts and improves stream reliability
+- **Graceful Degradation**: Proper fallback when all MACs are busy or in cooldown
+- **Original Behavior**: Matches the sophisticated failover system from Dispatcharr-0.12.0-04
+
+**Technical Details**:
+- MAC busy status stored as `ts_proxy:mac:{mac_id}:busy` in Redis
+- MAC cooldowns stored as `ts_proxy:m3u_mac:{mac_id}:cooldown` (5min TTL)
+- Profile cooldowns stored as `ts_proxy:profile:{profile_id}:cooldown` (5min TTL)
+- Stream-profile mapping stored as `ts_proxy:stream_profile:{stream_id}` (1h TTL)
+- Profile active streams tracked as `ts_proxy:profile:{profile_id}:active_streams` set
+- Automatic cleanup in StreamManager finally block ensures no leaked busy states
+
+## Fix #7: Profile-Stream Mapping and Connection Tracking
+
+**Issue**: No tracking of which profiles are actively used by which streams, making failover decisions less intelligent.
+
+**Problems**:
+- System couldn't track which profile was currently active for a stream
+- No monitoring of profile usage and connection counts
+- Difficult debugging when multiple streams use different profiles
+- Suboptimal failover decisions due to lack of profile state information
+
+**Solution Applied**: Implemented comprehensive profile-stream mapping system from original patch
+
+### Changes Made:
+
+#### 1. **Stream-Profile Mapping**
+- **Redis tracking**: Each active stream mapped to its current profile ID
+- **1-hour TTL**: Mappings automatically expire to prevent stale data
+- **Bidirectional tracking**: Both stream→profile and profile→streams mappings
+- **Failover integration**: Mappings updated during profile switches
+
+#### 2. **Profile Connection Counting**
+- **Active stream sets**: Redis sets track which streams use each profile
+- **Real-time counting**: Accurate count of active connections per profile
+- **Max streams enforcement**: Better respect for profile connection limits
+- **Load balancing**: Foundation for intelligent profile selection
+
+#### 3. **Enhanced Failover Intelligence**
+- **Current profile awareness**: Failover knows which profile is currently active
+- **Avoid retry loops**: System won't retry the same failed profile immediately
+- **Better profile selection**: Can choose profiles based on current load
+- **Improved debugging**: Clear visibility into profile usage patterns
+
+#### 4. **Automatic Cleanup**
+- **Stream end cleanup**: Mappings removed when streams stop
+- **Failover cleanup**: Old mappings cleared during profile switches
+- **TTL protection**: Redis TTL prevents stale mappings from accumulating
+- **Error recovery**: Robust cleanup even during unexpected failures
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/stream_manager.py` - Added profile mapping methods and integration
+- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/redis_keys.py` - Added profile mapping Redis keys
+
+### Result:
+- **Intelligent Failover**: System knows current profile state during failover decisions
+- **Better Monitoring**: Real-time visibility into profile usage and connection counts
+- **Improved Debugging**: Clear tracking of which streams use which profiles
+- **Load Balancing Ready**: Foundation for future profile load balancing features
+- **Original Behavior**: Matches the sophisticated profile tracking from Dispatcharr-0.12.0-04
+
+**New Redis Keys**:
+- `ts_proxy:stream_profile:{stream_id}` - Maps stream to active profile (1h TTL)
+- `ts_proxy:profile:{profile_id}:active_streams` - Set of active streams per profile (1h TTL)

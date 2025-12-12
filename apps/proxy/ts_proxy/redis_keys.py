@@ -119,3 +119,13 @@ class RedisKeys:
     def failover_attempt_count(channel_id):
         """Key for tracking failover attempt count to prevent infinite loops."""
         return f"ts_proxy:channel:{channel_id}:failover_attempts"
+
+    @staticmethod
+    def stream_profile_mapping(stream_id):
+        """Key for mapping stream ID to active profile ID."""
+        return f"ts_proxy:stream_profile:{stream_id}"
+
+    @staticmethod
+    def profile_active_streams(profile_id):
+        """Key for set of active stream IDs using this profile."""
+        return f"ts_proxy:profile:{profile_id}:active_streams"

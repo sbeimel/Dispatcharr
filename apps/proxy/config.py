@@ -11,8 +11,8 @@ class BaseConfig:
     CONNECTION_TIMEOUT = 4  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
-    BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
-    BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
+    BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams (original patch value)
+    BUFFER_SPEED = 1.0 # What speed to consider the stream buffering, 1.0x matches original patch
 
     # Cache for proxy settings (class-level, shared across all instances)
     _proxy_settings_cache = None

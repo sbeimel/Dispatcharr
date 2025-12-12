@@ -50,6 +50,10 @@ class StreamManager:
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
+        # MAC tracking properties for failover and busy tracking
+        self.mac_address = None
+        self.mac_entry_id = None
+
         # Sockets used for transcode jobs
         self.socket = None
         self.transcode = transcode
@@ -247,6 +251,14 @@ class StreamManager:
                             # Store connection start time to measure success duration
                             connection_start_time = time.time()
 
+                            # Mark MAC as busy in Redis once the stream is actually running
+                            self._mark_mac_as_busy()
+
+                            # Register stream-profile mapping for better tracking
+                            current_profile_id = self._get_current_profile_id()
+                            if current_profile_id:
+                                self._register_stream_profile_mapping(current_profile_id)
+
                             # Log reconnection event if this is a retry (not first attempt)
                             if self.retry_count > 0:
                                 try:
@@ -360,6 +372,9 @@ class StreamManager:
                     # MAC failover did not succeed or is not applicable -> try profile failover first
                     logger.info(f"MAC failover not applicable or failed, trying profile failover for channel: {self.channel_id}")
 
+                    # Set profile cooldown to prevent immediate retry
+                    self._set_profile_cooldown()
+
                     # Try profile failover within the same stream
                     profile_switched = False
                     try:
@@ -418,6 +433,12 @@ class StreamManager:
 
             # Close all connections
             self._close_all_connections()
+
+            # Clear MAC busy status
+            self._clear_mac_busy_status()
+
+            # Unregister stream-profile mapping
+            self._unregister_stream_profile_mapping()
 
             # Update channel state in Redis to prevent clients from waiting indefinitely
             if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
@@ -490,6 +511,213 @@ class StreamManager:
 
             logger.info(f"Stream manager stopped for channel {self.channel_id}")
 
+    def _mark_mac_as_busy(self):
+        """Mark the current MAC address as busy in Redis to prevent conflicts."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+
+            # Extract MAC address from current URL
+            mac_address = self._extract_mac_from_url(self.url)
+            if not mac_address:
+                return
+
+            # Get MAC entry from database
+            mac_entry = self._get_mac_entry_from_address(mac_address)
+            if not mac_entry:
+                return
+
+            # Mark as busy in Redis
+            busy_key = RedisKeys.mac_busy(mac_entry.id)
+            self.buffer.redis_client.set(busy_key, '1')
+            
+            # Store MAC info for cleanup later
+            self.mac_address = mac_address
+            self.mac_entry_id = mac_entry.id
+            
+            logger.debug(f"Marked MAC {mac_address} (id={mac_entry.id}) as busy for channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to mark MAC as busy for channel {self.channel_id}: {e}")
+
+    def _clear_mac_busy_status(self):
+        """Clear the busy status for the current MAC address."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+                
+            if not hasattr(self, 'mac_entry_id') or not self.mac_entry_id:
+                return
+
+            busy_key = RedisKeys.mac_busy(self.mac_entry_id)
+            self.buffer.redis_client.delete(busy_key)
+            
+            logger.debug(f"Cleared busy status for MAC {getattr(self, 'mac_address', 'unknown')} (id={self.mac_entry_id}) on channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to clear MAC busy status for channel {self.channel_id}: {e}")
+
+    def _extract_mac_from_url(self, url):
+        """Extract MAC address from URL query parameters."""
+        if not url:
+            return None
+            
+        try:
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query or "")
+            mac_vals = qs.get("mac") or qs.get("MAC") or []
+            return mac_vals[0] if mac_vals else None
+        except Exception:
+            return None
+
+    def _get_mac_entry_from_address(self, mac_address):
+        """Get MAC entry from database by address."""
+        if not mac_address:
+            return None
+            
+        try:
+            from apps.m3u.models import M3UAccountMac
+            return M3UAccountMac.objects.filter(address__iexact=mac_address).first()
+        except Exception:
+            return None
+
+    def _set_profile_cooldown(self):
+        """Set cooldown for current profile to prevent immediate retry."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+
+            # Get current profile ID from metadata
+            metadata_key = RedisKeys.channel_metadata(self.channel_id)
+            metadata = self.buffer.redis_client.hgetall(metadata_key)
+            
+            if metadata:
+                profile_str = metadata.get(ChannelMetadataField.M3U_PROFILE.encode())
+                if profile_str:
+                    try:
+                        profile_id = int(profile_str.decode())
+                        cooldown_key = RedisKeys.profile_cooldown(profile_id)
+                        # 5 minutes cooldown for faster recovery
+                        self.buffer.redis_client.setex(cooldown_key, 300, "1")
+                        logger.debug(f"Set 5min cooldown for profile {profile_id} on channel {self.channel_id}")
+                    except (ValueError, AttributeError):
+                        pass
+                        
+        except Exception as e:
+            logger.debug(f"Failed to set profile cooldown for channel {self.channel_id}: {e}")
+
+    def _set_mac_cooldown(self, mac_entry_id):
+        """Set cooldown for MAC address to prevent immediate retry."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+
+            cooldown_key = RedisKeys.mac_cooldown(mac_entry_id)
+            # 5 minutes cooldown for faster recovery
+            self.buffer.redis_client.setex(cooldown_key, 300, "1")
+            logger.debug(f"Set 5min cooldown for MAC {mac_entry_id} on channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to set MAC cooldown for channel {self.channel_id}: {e}")
+
+    def _register_stream_profile_mapping(self, profile_id):
+        """Register the current stream-profile mapping in Redis."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+                
+            if not self.current_stream_id or not profile_id:
+                return
+
+            # Map stream to profile (1 hour TTL like original)
+            mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+            self.buffer.redis_client.setex(mapping_key, 3600, str(profile_id))
+            
+            # Add stream to profile's active streams set
+            active_streams_key = RedisKeys.profile_active_streams(profile_id)
+            self.buffer.redis_client.sadd(active_streams_key, str(self.current_stream_id))
+            self.buffer.redis_client.expire(active_streams_key, 3600)
+            
+            logger.debug(f"Registered stream {self.current_stream_id} -> profile {profile_id} mapping for channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to register stream-profile mapping for channel {self.channel_id}: {e}")
+
+    def _unregister_stream_profile_mapping(self):
+        """Unregister the current stream-profile mapping from Redis."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+                
+            if not self.current_stream_id:
+                return
+
+            # Get current profile mapping
+            mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+            profile_id_bytes = self.buffer.redis_client.get(mapping_key)
+            
+            if profile_id_bytes:
+                try:
+                    profile_id = int(profile_id_bytes.decode())
+                    
+                    # Remove stream from profile's active streams set
+                    active_streams_key = RedisKeys.profile_active_streams(profile_id)
+                    self.buffer.redis_client.srem(active_streams_key, str(self.current_stream_id))
+                    
+                    logger.debug(f"Unregistered stream {self.current_stream_id} from profile {profile_id} for channel {self.channel_id}")
+                    
+                except (ValueError, AttributeError):
+                    pass
+            
+            # Remove stream-profile mapping
+            self.buffer.redis_client.delete(mapping_key)
+            
+        except Exception as e:
+            logger.debug(f"Failed to unregister stream-profile mapping for channel {self.channel_id}: {e}")
+
+    def _get_profile_active_stream_count(self, profile_id):
+        """Get the number of active streams for a profile."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return 0
+                
+            active_streams_key = RedisKeys.profile_active_streams(profile_id)
+            return self.buffer.redis_client.scard(active_streams_key)
+            
+        except Exception:
+            return 0
+
+    def _get_current_profile_id(self):
+        """Get the current profile ID for this stream from Redis or metadata."""
+        try:
+            # First try stream-profile mapping
+            if self.current_stream_id and hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+                profile_id_bytes = self.buffer.redis_client.get(mapping_key)
+                if profile_id_bytes:
+                    try:
+                        return int(profile_id_bytes.decode())
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # Fallback to channel metadata
+            if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                metadata = self.buffer.redis_client.hgetall(metadata_key)
+                if metadata:
+                    profile_str = metadata.get(ChannelMetadataField.M3U_PROFILE.encode())
+                    if profile_str:
+                        try:
+                            return int(profile_str.decode())
+                        except (ValueError, AttributeError):
+                            pass
+            
+            return None
+            
+        except Exception:
+            return None
+
     def _try_profile_failover(self) -> bool:
         """
         Try profile failover within the same stream.
@@ -518,6 +746,11 @@ class StreamManager:
                             ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
                             ChannelMetadataField.STREAM_SWITCH_REASON: "profile_failover"
                         })
+                    
+                    # Update stream-profile mapping for new profile
+                    if failover_profile_id:
+                        self._register_stream_profile_mapping(failover_profile_id)
+                    
                     return True
                 else:
                     logger.warning(f"Failed to update URL during profile failover for channel {self.channel_id}")

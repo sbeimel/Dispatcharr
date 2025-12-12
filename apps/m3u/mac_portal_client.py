@@ -613,6 +613,88 @@ class MacPortalClient:
         except Exception as e:
             logger.error(f"Failed to resolve mac:// URL: {e}")
             raise MacPortalError(f"Failed to resolve MAC URL: {e}")
+
+    @staticmethod
+    def resolve_mac_url_with_busy_check(mac_url: str, proxy: Optional[str] = None) -> Tuple[str, Optional[str]]:
+        """Resolve a mac:// URL to a real stream URL, preferring non-busy MACs.
+        
+        Args:
+            mac_url: URL in format mac://base64(portal_url|mac|cmd|proxy)
+            proxy: Optional proxy to use (overrides encoded proxy)
+            
+        Returns:
+            Tuple[str, Optional[str]]: (resolved_url, selected_mac) or raises MacPortalError
+        """
+        if not mac_url.startswith("mac://"):
+            return mac_url, None
+        
+        import base64
+        try:
+            encoded_data = mac_url[6:]  # Remove "mac://" prefix
+            decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
+            parts = decoded_data.split("|", 3)
+            if len(parts) < 3:
+                raise ValueError(f"Invalid mac:// URL format")
+            
+            portal_url = parts[0]
+            original_mac = parts[1]
+            cmd = parts[2]
+            encoded_proxy = parts[3] if len(parts) > 3 else None
+            use_proxy = proxy or encoded_proxy
+            
+            # Try to find the M3U account for this MAC to check for alternatives
+            from apps.m3u.models import M3UAccountMac
+            try:
+                mac_entry = M3UAccountMac.objects.filter(address__iexact=original_mac).first()
+                if mac_entry and mac_entry.account:
+                    # Get all candidate MACs for this account
+                    candidates = mac_entry.account.get_candidate_macs_for_streaming()
+                    
+                    # Check Redis for busy status and prefer free MACs
+                    try:
+                        from core.utils import RedisClient
+                        from ..proxy.ts_proxy.redis_keys import RedisKeys
+                        redis_client = RedisClient.get_client()
+                        
+                        free_macs = []
+                        busy_macs = []
+                        
+                        for mac in candidates:
+                            busy_key = RedisKeys.mac_busy(mac.id)
+                            if redis_client.exists(busy_key):
+                                busy_macs.append(mac)
+                            else:
+                                free_macs.append(mac)
+                        
+                        # Prefer free MACs, fallback to busy ones if needed
+                        selected_candidates = free_macs if free_macs else busy_macs
+                        
+                        if not selected_candidates:
+                            raise MacPortalError("All MACs busy")
+                            
+                        # Use the first available MAC (highest priority)
+                        selected_mac = selected_candidates[0].address
+                        
+                    except Exception:
+                        # Fallback to original MAC if Redis check fails
+                        selected_mac = original_mac
+                else:
+                    selected_mac = original_mac
+                    
+            except Exception:
+                selected_mac = original_mac
+            
+            logger.info(f"Resolving MAC URL with MAC {selected_mac[:8]}... (original: {original_mac[:8]}...)")
+            
+            # Create client and resolve URL with selected MAC
+            client = MacPortalClient(base_url=portal_url, mac=selected_mac, proxy=use_proxy)
+            resolved_url = client.create_link(cmd)
+            logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+            return resolved_url, selected_mac
+            
+        except Exception as e:
+            logger.error(f"Failed to resolve mac:// URL with busy check: {e}")
+            raise MacPortalError(f"Failed to resolve MAC URL: {e}")
     
     @staticmethod
     def resolve_mac_url_with_failover_mac(mac_url: str, failover_mac: str, proxy: Optional[str] = None) -> str:
