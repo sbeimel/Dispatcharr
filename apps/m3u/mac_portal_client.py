@@ -709,9 +709,29 @@ class MacPortalClient:
                 int(content_length) > 0 and 
                 len(response.content) == 0):
                 
-                logger.error("Cloudflare gzip issue detected: Content-Length > 0 but no content received")
-                logger.error("This indicates a Cloudflare compression problem where content is lost")
-                raise MacPortalError("Cloudflare gzip compression issue - no content received despite Content-Length > 0")
+                logger.warning("Cloudflare gzip issue detected: Content-Length > 0 but no content received")
+                logger.warning("This indicates a Cloudflare compression problem - trying alternative approach")
+                
+                # Try to make a new request without gzip encoding
+                headers_no_gzip = headers.copy()
+                headers_no_gzip["Accept-Encoding"] = "identity"  # Disable compression
+                
+                try:
+                    logger.info("Retrying request without gzip compression")
+                    response = session.get(
+                        portal,
+                        params=params,
+                        cookies=self._cookies(),
+                        headers=headers_no_gzip,
+                        proxies=proxies,
+                        timeout=30,
+                    )
+                    response_text = response.text
+                    logger.info(f"Retry without gzip - got {len(response_text)} chars")
+                except Exception as retry_e:
+                    logger.error(f"Retry without gzip failed: {retry_e}")
+                    # If retry fails, continue to POST fallback
+                    raise MacPortalError("Cloudflare gzip compression issue - retry failed")
             
             elif not response_text and response.content and content_encoding == 'gzip':
                 try:
@@ -796,9 +816,28 @@ class MacPortalClient:
                 int(content_length) > 0 and 
                 len(response.content) == 0):
                 
-                logger.error("Cloudflare gzip issue detected (POST): Content-Length > 0 but no content received")
-                logger.error("This indicates a Cloudflare compression problem where content is lost")
-                raise MacPortalError("Cloudflare gzip compression issue - no content received despite Content-Length > 0")
+                logger.warning("Cloudflare gzip issue detected (POST): Content-Length > 0 but no content received")
+                logger.warning("This indicates a Cloudflare compression problem - trying alternative approach")
+                
+                # Try to make a new request without gzip encoding
+                headers_no_gzip = headers.copy()
+                headers_no_gzip["Accept-Encoding"] = "identity"  # Disable compression
+                
+                try:
+                    logger.info("Retrying POST request without gzip compression")
+                    response = session.post(
+                        portal,
+                        data=params,
+                        cookies=self._cookies(),
+                        headers=headers_no_gzip,
+                        proxies=proxies,
+                        timeout=30,
+                    )
+                    response_text = response.text
+                    logger.info(f"POST retry without gzip - got {len(response_text)} chars")
+                except Exception as retry_e:
+                    logger.error(f"POST retry without gzip failed: {retry_e}")
+                    raise MacPortalError("Cloudflare gzip compression issue - POST retry failed")
             
             elif not response_text and response.content and content_encoding == 'gzip':
                 try:

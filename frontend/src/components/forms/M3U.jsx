@@ -126,6 +126,8 @@ const M3U = ({
   useEffect(() => {
     if (form.values.account_type == 'XC') {
       setShowCredentialFields(true);
+    } else {
+      setShowCredentialFields(false);
     }
   }, [form.values.account_type]);
 
