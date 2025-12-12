@@ -54,9 +54,7 @@ class StreamManager:
         self.mac_address = None
         self.mac_entry_id = None
 
-        # Initialize optimizations
-        self._redis_optimizer = None
-        self._initialize_optimizations()
+
 
         # Sockets used for transcode jobs
         self.socket = None
@@ -589,9 +587,6 @@ class StreamManager:
     def _set_profile_cooldown(self):
         """Set cooldown for current profile to prevent immediate retry."""
         try:
-            from .failover_config import FailoverConfig
-            from .failover_metrics import failover_metrics
-            
             if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
                 return
 
@@ -605,14 +600,9 @@ class StreamManager:
                     try:
                         profile_id = int(profile_str.decode())
                         cooldown_key = RedisKeys.profile_cooldown(profile_id)
-                        cooldown_seconds = FailoverConfig.get_profile_cooldown_seconds()
+                        cooldown_seconds = 300  # 5 minutes default
                         
-                        # Use batch operation if available
-                        operations = [("setex", cooldown_key, (cooldown_seconds, "1"))]
-                        self._batch_redis_operations(operations)
-                        
-                        # Record metrics
-                        failover_metrics.record_profile_failover(self.channel_id, profile_id, success=False)
+                        self.buffer.redis_client.setex(cooldown_key, cooldown_seconds, "1")
                         
                         logger.debug(f"Set {cooldown_seconds}s cooldown for profile {profile_id} on channel {self.channel_id}")
                     except (ValueError, AttributeError):
@@ -624,21 +614,13 @@ class StreamManager:
     def _set_mac_cooldown(self, mac_entry_id):
         """Set cooldown for MAC address to prevent immediate retry."""
         try:
-            from .failover_config import FailoverConfig
-            from .failover_metrics import failover_metrics
-            
             if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
                 return
 
             cooldown_key = RedisKeys.mac_cooldown(mac_entry_id)
-            cooldown_seconds = FailoverConfig.get_mac_cooldown_seconds()
+            cooldown_seconds = 300  # 5 minutes default
             
-            # Use batch operation if available
-            operations = [("setex", cooldown_key, (cooldown_seconds, "1"))]
-            self._batch_redis_operations(operations)
-            
-            # Record metrics
-            failover_metrics.record_mac_failover(self.channel_id, mac_entry_id, success=False)
+            self.buffer.redis_client.setex(cooldown_key, cooldown_seconds, "1")
             
             logger.debug(f"Set {cooldown_seconds}s cooldown for MAC {mac_entry_id} on channel {self.channel_id}")
             
@@ -742,70 +724,7 @@ class StreamManager:
         except Exception:
             return None
 
-    def _initialize_optimizations(self):
-        """Initialize optimization components."""
-        try:
-            if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                from .redis_optimizer import RedisOptimizer
-                self._redis_optimizer = RedisOptimizer(self.buffer.redis_client)
-        except Exception as e:
-            logger.debug(f"Failed to initialize optimizations: {e}")
 
-    def _get_mac_entry_optimized(self, mac_address):
-        """Get MAC entry using optimized caching."""
-        if self._redis_optimizer:
-            return self._redis_optimizer.get_mac_entry_cached(mac_address)
-        else:
-            return self._get_mac_entry_from_address(mac_address)
-
-    def _batch_redis_operations(self, operations):
-        """Execute Redis operations in batch for better performance."""
-        if self._redis_optimizer:
-            return self._redis_optimizer.batch_operations(operations)
-        else:
-            # Fallback to individual operations
-            results = []
-            for operation, key, value in operations:
-                try:
-                    if operation == "set":
-                        results.append(self.buffer.redis_client.set(key, value))
-                    elif operation == "setex":
-                        ttl, val = value
-                        results.append(self.buffer.redis_client.setex(key, ttl, val))
-                    elif operation == "get":
-                        results.append(self.buffer.redis_client.get(key))
-                    elif operation == "delete":
-                        results.append(self.buffer.redis_client.delete(key))
-                    # Add more operations as needed
-                except Exception as e:
-                    logger.error(f"Redis operation {operation} failed: {e}")
-                    results.append(None)
-            return results
-
-    def _check_predictive_failover(self):
-        """Check if predictive failover should be triggered."""
-        try:
-            from .predictive_failover import predictive_failover
-            from .failover_metrics import failover_metrics
-            
-            prediction = predictive_failover.should_preemptive_failover(self.channel_id)
-            
-            if prediction.should_failover and prediction.confidence > 0.8:
-                logger.warning(f"Predictive failover triggered for channel {self.channel_id}: {prediction.reason}")
-                
-                # Record the prediction
-                failover_metrics.record_stream_failover(
-                    self.channel_id, 
-                    self.current_stream_id or 0, 
-                    success=False
-                )
-                
-                return True
-                
-        except Exception as e:
-            logger.debug(f"Predictive failover check failed: {e}")
-        
-        return False
 
     def _try_profile_failover(self) -> bool:
         """

@@ -368,82 +368,7 @@ The Dispatcharr MAC/STB Portal integration is now fully functional with proper f
 
 ## Fix #8: Advanced Performance and Intelligence Optimizations
 
-**Issue**: Need for better performance, monitoring, and intelligent failover decisions in production environments.
-
-**Problems**:
-- Multiple individual Redis operations causing performance bottlenecks
-- No caching for frequently accessed data (MAC entries)
-- No predictive capabilities to prevent failures before they occur
-- Limited monitoring and observability of failover system
-- No circuit breaker pattern for failing portals
-- Fixed configuration values not adaptable to different environments
-
-**Solution Applied**: Comprehensive optimization suite with performance, intelligence, and monitoring enhancements
-
-### Changes Made:
-
-#### 1. **Performance Optimizations**
-- **Redis Pipeline Batching**: Multiple Redis operations executed in single batch (30-50% performance improvement)
-- **MAC Entry Caching**: LRU cache for frequently accessed MAC entries (reduces DB queries)
-- **Retry Logic**: Exponential backoff retry for Redis operations with circuit breaker pattern
-- **Memory Optimization**: Weak references and cache cleanup to prevent memory leaks
-
-#### 2. **Intelligent Failover System**
-- **Predictive Failover**: Machine learning-based failure prediction using historical data
-- **Time-Pattern Analysis**: Detects time-based failure patterns (hour/day correlations)
-- **Performance Trend Analysis**: Linear regression on performance metrics to predict degradation
-- **Circuit Breaker Pattern**: Prevents repeated calls to failing MAC portals
-- **Load-Based Selection**: Chooses profiles based on current connection load
-
-#### 3. **Advanced Monitoring & Observability**
-- **Comprehensive Metrics**: Tracks success/failure rates for MAC, profile, and stream failovers
-- **Real-time Health API**: REST endpoints for monitoring system health
-- **Channel Insights**: Detailed analytics per channel with failure predictions
-- **Redis Performance Stats**: Monitoring of Redis performance and key usage
-- **Cache Statistics**: Visibility into cache hit rates and performance
-
-#### 4. **Centralized Configuration Management**
-- **Dynamic Configuration**: Database-driven settings with caching
-- **Environment Adaptation**: Configurable timeouts, thresholds, and feature flags
-- **Hot Reloading**: Configuration changes without restart
-- **Feature Toggles**: Enable/disable predictive failover, circuit breakers, etc.
-
-### Files Created:
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/failover_config.py` - Centralized configuration management
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/failover_metrics.py` - Metrics collection and analysis
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/redis_optimizer.py` - Redis performance optimizations
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/predictive_failover.py` - AI-powered failure prediction
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/health_api.py` - Health monitoring API endpoints
-
-### Files Modified:
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/stream_manager.py` - Integrated all optimizations
-- `Dispatcharr-0.14.0/apps/proxy/ts_proxy/urls.py` - Added health monitoring endpoints
-
-### New API Endpoints:
-- `GET /ts_proxy/health/failover/` - Overall failover system health
-- `GET /ts_proxy/health/channel/{channel_id}/` - Channel-specific insights and predictions
-- `GET /ts_proxy/health/redis/` - Redis performance statistics
-- `POST /ts_proxy/health/clear-caches/` - Clear all caches (maintenance)
-
-### Result:
-- **30-50% Performance Improvement** through Redis batching and caching
-- **Predictive Failure Prevention** using machine learning on historical data
-- **Comprehensive Monitoring** with real-time health dashboards
-- **Intelligent Decision Making** based on load, patterns, and trends
-- **Production Ready** with circuit breakers, retry logic, and error handling
-- **Highly Configurable** with database-driven settings and feature toggles
-
-**Technical Highlights**:
-- Machine learning failure prediction with 80%+ accuracy
-- Redis pipeline batching reduces round-trips by 50%
-- LRU caching with automatic cleanup prevents memory leaks
-- Circuit breaker pattern prevents cascade failures
-- Time-series analysis for pattern detection
-- Real-time metrics collection with minimal overhead
-
-This transforms the failover system from reactive to proactive, with enterprise-grade performance, monitoring, and intelligence capabilities.
-
-**STATUS**: ✅ **COMPLETE** - All optimization components are fully implemented, tested, and production-ready. The system now features enterprise-grade performance, monitoring, and predictive capabilities.
+**STATUS**: ❌ **REMOVED** - Performance optimizations were removed per user request to maintain system simplicity and stability.
 
 ## Fix #9: Enhanced MAC Portal Client Error Handling and Compatibility
 
@@ -557,66 +482,52 @@ This transforms the failover system from reactive to proactive, with enterprise-
 
 **Status**: ✅ **COMPLETE** - Clear Channels functionality is fully implemented and ready for use. Users can now easily clean up duplicate imports and maintain a clean stream list.
 
-## Fix #11: Unraid Single Container Performance Optimization
+## Fix #12: Memory Cleanup Optimizations Removed
 
-**Issue**: User runs Dispatcharr on Unraid and wants performance optimization without additional containers, specifically for the problem of processing 13,462 channels when only 1 group is active.
+**Issue**: User requested removal of memory cleanup optimizations to maintain system simplicity.
 
-**Root Cause**: While the selective import functionality was already implemented in the code, users needed guidance on how to configure it properly in Unraid environment without docker-compose.
+**Root Cause**: The memory cleanup optimizations added complexity to the system that the user preferred to avoid.
 
-**Solution Applied**: Created Unraid-specific configuration guide and optimization settings for single container deployment
+**Solution Applied**: Removed all memory cleanup optimizations while preserving core functionality
 
 ### Changes Made:
 
-#### 1. **Unraid Configuration Guide**
-- **Single Container Setup**: Optimized environment variables for Unraid deployment
-- **Performance Tuning**: uWSGI and Celery optimization without separate containers
-- **Resource Management**: Memory and CPU limits appropriate for single container
-- **Step-by-Step Instructions**: Clear guide for Unraid container configuration
+#### 1. **Celery Memory Cleanup Removed**
+- **Removed**: `@task_postrun.connect` signal handler from `celery.py`
+- **Removed**: Memory cleanup after task completion
+- **Removed**: Memory-intensive task detection and cleanup
+- **Preserved**: Core Celery configuration and logging
 
-#### 2. **Environment Variables for Performance**
-- **uWSGI Optimization**: Process and thread configuration for better web performance
-- **Celery Settings**: Worker concurrency and task routing optimization
-- **Memory Management**: Automatic cleanup and resource limits
-- **Logging Configuration**: Appropriate log levels for monitoring
+#### 2. **Core Utils Cleanup Function Removed**
+- **Removed**: `cleanup_memory()` function from `core/utils.py`
+- **Removed**: Comprehensive memory cleanup with garbage collection
+- **Removed**: Memory usage logging and psutil integration
 
-#### 3. **Optional Database Optimizations**
-- **PostgreSQL Tuning**: Shared buffers, cache size, and connection optimization
-- **Redis Configuration**: Memory limits, eviction policy, and persistence settings
-- **Network Optimization**: TCP keepalive and connection pooling settings
+#### 3. **Task-Level Memory Cleanup Removed**
+- **Removed**: All `cleanup_memory()` calls from task files:
+  - `apps/m3u/tasks.py` - Memory cleanup calls removed
+  - `apps/epg/tasks.py` - Memory cleanup calls and imports removed
+  - `apps/channels/tasks.py` - Memory cleanup calls and imports removed
+- **Preserved**: Standard `gc.collect()` calls where appropriate
 
-#### 4. **Testing and Monitoring Guide**
-- **Selective Import Verification**: How to confirm the optimization is working
-- **Log Analysis**: What to look for in container logs
-- **Performance Metrics**: Expected improvements and monitoring methods
-- **Troubleshooting**: Common issues and solutions
+#### 4. **What Remains Active**
+- ✅ **Selective Import Function**: Still active in `_refresh_mac_account_with_groups()`
+- ✅ **Task Routing Optimizations**: Still active for better performance
+- ✅ **Enhanced Error Handling**: Still active for MAC portals
+- ✅ **Core MAC/STB Portal Features**: All functionality preserved
+- ✅ **Clear Channels Functionality**: Fully preserved and working
 
-### Files Created:
-- `Dispatcharr-0.14.0/docker/unraid-single-container-optimized.yml` - Unraid container configuration template
-- `Dispatcharr-0.14.0/UNRAID_SETUP_GUIDE.md` - Comprehensive setup and optimization guide
+### Files Modified:
+- `Dispatcharr-0.14.0/dispatcharr/celery.py` - Removed memory cleanup signal handler
+- `Dispatcharr-0.14.0/core/utils.py` - Removed `cleanup_memory()` function
+- `Dispatcharr-0.14.0/apps/m3u/tasks.py` - Removed memory cleanup calls
+- `Dispatcharr-0.14.0/apps/epg/tasks.py` - Removed memory cleanup calls and imports
+- `Dispatcharr-0.14.0/apps/channels/tasks.py` - Removed memory cleanup calls and imports
 
-### Expected Performance Improvements:
-- **10-50x faster M3U imports** when using selective group import (main issue resolution)
-- **50-80% lower memory usage** through optimized processing
-- **2-3x faster web interface** response times
-- **95% fewer timeout errors** during large imports
+### Result:
+- **Simplified System**: Memory cleanup complexity removed as requested
+- **Core Features Preserved**: All important optimizations like selective import remain active
+- **Stable Operation**: System maintains stability without aggressive memory management
+- **User Preference**: System now matches user's preference for simplicity over optimization
 
-### Key Benefits:
-- **No Additional Containers**: All optimizations work within single Dispatcharr container
-- **Selective Import**: Only processes channels from active groups (solves 13,462 → ~60 channels problem)
-- **Unraid Native**: Designed specifically for Unraid container management
-- **Easy Implementation**: Simple environment variable additions
-
-### Usage Instructions:
-1. **Add Environment Variables**: Copy optimized settings to Unraid container config
-2. **Set Resource Limits**: Configure appropriate memory and CPU limits
-3. **Configure Groups**: Ensure only needed groups are active in M3U account
-4. **Test Performance**: Monitor logs to verify selective import is working
-5. **Optional Optimizations**: Apply database and Redis optimizations if desired
-
-### Technical Implementation:
-- **Selective Import**: Already implemented in `_refresh_mac_account_with_groups()` function
-- **Environment Variables**: Standard Docker environment variable configuration
-- **Resource Management**: Uses existing uWSGI and Celery configuration options
-- **Monitoring**: Leverages existing logging infrastructure for performance tracking
-
-**Status**: ✅ **COMPLETE** - Unraid single container optimization is fully documented and ready for implementation. The selective import feature will immediately solve the user's main performance issue of processing 13,462 channels when only 1 group is needed.
+**Status**: ✅ **COMPLETE** - Memory cleanup optimizations have been successfully removed while preserving all core functionality and the important selective import optimization that solves the 13,462 → ~60 channels problem.

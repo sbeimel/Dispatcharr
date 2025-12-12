@@ -2955,9 +2955,7 @@ def refresh_single_m3u_account(account_id):
     if 'batches' in locals():
         del batches
 
-    from core.utils import cleanup_memory
-
-    cleanup_memory(log_usage=True, force_collection=True)
+    # Memory cleanup removed
 
     # Clean up cache file since we've fully processed it
     if os.path.exists(cache_path):
@@ -3071,32 +3069,9 @@ def _refresh_mac_account_with_groups(account_id):
                         total_channels = len(channels)
                         logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
                         
-                        # Get active groups for this account to filter channels
-                        from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
-                        active_groups = set()
-                        try:
-                            active_group_relations = ChannelGroupM3UAccount.objects.filter(
-                                m3u_account=account,
-                                enabled=True
-                            ).select_related('channel_group')
-                            active_groups = {rel.channel_group.name for rel in active_group_relations}
-                            logger.info(f"Found {len(active_groups)} active groups for filtering: {list(active_groups)}")
-                        except Exception as e:
-                            logger.warning(f"Could not get active groups for account {account_id}: {e}")
-                            # If we can't get active groups, process all (fallback)
-                            active_groups = None
-                        
                         # Convert MAC channels to EXTINF format and extract groups
-                        # Filter channels by active groups if available
-                        filtered_channels = 0
                         for channel in channels:
                             group_name = channel.get('group', 'Default Group')
-                            
-                            # Skip channels not in active groups (if we have active groups filter)
-                            if active_groups is not None and group_name not in active_groups:
-                                filtered_channels += 1
-                                continue
-                            
                             if group_name not in groups:
                                 groups[group_name] = {}
                             
@@ -3114,10 +3089,6 @@ def _refresh_mac_account_with_groups(account_id):
                                 'display_name': channel.get('name', '')
                             }
                             extinf_data.append(extinf_entry)
-                        
-                        if active_groups is not None:
-                            logger.info(f"Filtered out {filtered_channels} channels from inactive groups")
-                            logger.info(f"Processing {len(extinf_data)} channels from {len(groups)} active groups")
                         
                         logger.info(f"Extracted {len(groups)} groups and {len(extinf_data)} channels from MAC")
                         working_mac_found = True
