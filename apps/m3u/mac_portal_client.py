@@ -128,7 +128,8 @@ class MacPortalClient:
             return None
         return {"http": self.proxy, "https": self.proxy}
 
-    def _default_headers(self, with_auth: bool = False) -> dict:
+    def _default_headers(self, with_auth: bool = False, enhanced: bool = False) -> dict:
+        # Standard STB headers
         headers = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Accept": "*/*",
@@ -136,6 +137,22 @@ class MacPortalClient:
             "Accept-Encoding": "gzip, deflate",
             "Connection": "keep-alive",
         }
+        
+        # Enhanced headers for problematic portals
+        if enhanced:
+            headers.update({
+                "X-User-Agent": "Model: MAG250; Link: WiFi",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            })
+            
+            # Add referer if we have portal URL
+            if self.portal_url:
+                from urllib.parse import urlparse
+                parsed = urlparse(self.portal_url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                headers["Referer"] = base_url + "/"
+        
         if with_auth and self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         return headers
@@ -328,6 +345,29 @@ class MacPortalClient:
         if cached_token:
             self.token = cached_token
             return self.token
+        
+        # Try different authentication methods
+        methods = [
+            self._handshake_standard,
+            self._handshake_with_profile_check,
+            self._handshake_with_session_reset
+        ]
+        
+        for method in methods:
+            try:
+                token = method()
+                if token:
+                    self.token = token
+                    cache.set(cache_key, token, 1800)  # Cache for 30 minutes
+                    return token
+            except Exception as e:
+                logger.debug(f"Handshake method {method.__name__} failed: {e}")
+                continue
+        
+        raise MacPortalError(f"Failed to get token for MAC {self.mac} from all methods")
+    
+    def _handshake_standard(self) -> str:
+        """Standard handshake method."""
 
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
@@ -388,17 +428,29 @@ class MacPortalClient:
                 # Try to parse response
                 if response.status_code == 200:
                     try:
+                        # Check if response has content
+                        if not response.text or response.text.strip() == "":
+                            logger.debug(f"Empty response from {endpoint}")
+                            continue
+                        
+                        # Check if response looks like JSON
+                        response_text = response.text.strip()
+                        if not (response_text.startswith('{') or response_text.startswith('[')):
+                            logger.debug(f"Non-JSON response from {endpoint}: {response_text[:200]}")
+                            continue
+                        
                         data = response.json()
                         if "js" in data and "token" in data["js"]:
                             token = data["js"]["token"]
                             if token:
-                                self.token = token
-                                cache.set(cache_key, token, 1800)  # Cache for 30 minutes
                                 logger.info(f"Successfully got token for MAC {self.mac} using endpoint: {full_url}")
                                 return token
+                    except ValueError as e:
+                        logger.debug(f"JSON decode error from {endpoint}: {e}")
+                        logger.debug(f"Raw response: {response.text[:500]}")
+                        continue
                     except Exception as e:
-                        logger.debug(f"Failed to parse JSON response from {endpoint}: {e}")
-                        # Log raw response for debugging
+                        logger.debug(f"Failed to parse response from {endpoint}: {e}")
                         logger.debug(f"Raw response: {response.text[:500]}")
                         continue
             except requests.Timeout:
@@ -411,7 +463,32 @@ class MacPortalClient:
                 logger.debug(f"Error on endpoint {endpoint}: {e}")
                 continue
         
-        raise MacPortalError(f"Failed to get token for MAC {self.mac} from all endpoints")
+        return None
+    
+    def _handshake_with_profile_check(self) -> str:
+        """Handshake with profile check - some portals require this."""
+        token = self._handshake_standard()
+        if not token:
+            return None
+        
+        # Try to get profile to validate token
+        try:
+            profile = self.get_profile()
+            if profile:
+                logger.debug(f"Token validated with profile check for MAC {self.mac}")
+                return token
+        except Exception as e:
+            logger.debug(f"Profile check failed for MAC {self.mac}: {e}")
+        
+        return None
+    
+    def _handshake_with_session_reset(self) -> str:
+        """Handshake with session reset - clear session and try again."""
+        # Clear session to force new connection
+        clear_session()
+        
+        # Try standard handshake with fresh session
+        return self._handshake_standard()
 
     # ------------- step 3: profile / account info -------------
 
@@ -596,6 +673,17 @@ class MacPortalClient:
             
             if response.status_code == 200:
                 try:
+                    # Check if response has content
+                    if not response.text or response.text.strip() == "":
+                        logger.debug("Empty response from get_all_channels (GET)")
+                        raise ValueError("Empty response")
+                    
+                    # Check if response looks like JSON
+                    response_text = response.text.strip()
+                    if not (response_text.startswith('{') or response_text.startswith('[')):
+                        logger.debug(f"Non-JSON response from get_all_channels (GET): {response_text[:200]}")
+                        raise ValueError("Non-JSON response")
+                    
                     data = response.json()
                     channels = data["js"]["data"]
                     if channels:
@@ -610,9 +698,11 @@ class MacPortalClient:
                             logger.debug("MAC raw channel %s keys: %s", idx, keys)
                         
                         return channels
+                except ValueError as e:
+                    logger.debug(f"JSON decode error in get_all_channels (GET): {e}")
+                    logger.debug(f"Raw response: {response.text[:500]}")
                 except Exception as e:
                     logger.debug(f"Failed to parse GET response: {e}")
-                    # Log raw response for debugging
                     logger.debug(f"Raw response: {response.text[:500]}")
         except Exception as e:
             logger.debug(f"GET request failed: {e}, trying POST")
@@ -632,6 +722,17 @@ class MacPortalClient:
             
             if response.status_code == 200:
                 try:
+                    # Check if response has content
+                    if not response.text or response.text.strip() == "":
+                        logger.debug("Empty response from get_all_channels (POST)")
+                        raise ValueError("Empty response")
+                    
+                    # Check if response looks like JSON
+                    response_text = response.text.strip()
+                    if not (response_text.startswith('{') or response_text.startswith('[')):
+                        logger.debug(f"Non-JSON response from get_all_channels (POST): {response_text[:200]}")
+                        raise ValueError("Non-JSON response")
+                    
                     data = response.json()
                     channels = data["js"]["data"]
                     if channels:
@@ -703,12 +804,27 @@ class MacPortalClient:
             
             if response.status_code == 200:
                 try:
+                    # Check if response has content
+                    if not response.text or response.text.strip() == "":
+                        logger.debug("Empty response from create_link (GET)")
+                        raise ValueError("Empty response")
+                    
+                    # Check if response looks like JSON
+                    response_text = response.text.strip()
+                    if not (response_text.startswith('{') or response_text.startswith('[')):
+                        logger.debug(f"Non-JSON response from create_link (GET): {response_text[:200]}")
+                        raise ValueError("Non-JSON response")
+                    
                     data = response.json()
                     link = data["js"]["cmd"].split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
+                except ValueError as e:
+                    logger.debug(f"JSON decode error in create_link (GET): {e}")
+                    logger.debug(f"Raw response: {response.text[:500]}")
                 except Exception as e:
                     logger.debug(f"GET create_link failed to parse: {e}")
+                    logger.debug(f"Raw response: {response.text[:500]}")
         except Exception as e:
             logger.debug(f"GET create_link failed: {e}, trying POST")
         
@@ -725,12 +841,27 @@ class MacPortalClient:
             
             if response.status_code == 200:
                 try:
+                    # Check if response has content
+                    if not response.text or response.text.strip() == "":
+                        logger.debug("Empty response from create_link (POST)")
+                        raise ValueError("Empty response")
+                    
+                    # Check if response looks like JSON
+                    response_text = response.text.strip()
+                    if not (response_text.startswith('{') or response_text.startswith('[')):
+                        logger.debug(f"Non-JSON response from create_link (POST): {response_text[:200]}")
+                        raise ValueError("Non-JSON response")
+                    
                     data = response.json()
                     link = data["js"]["cmd"].split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
+                except ValueError as e:
+                    logger.debug(f"JSON decode error in create_link (POST): {e}")
+                    logger.debug(f"Raw response: {response.text[:500]}")
                 except Exception as e:
                     logger.debug(f"POST create_link failed to parse: {e}")
+                    logger.debug(f"Raw response: {response.text[:500]}")
         except Exception as e:
             logger.debug(f"POST create_link failed: {e}")
         
