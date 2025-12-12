@@ -632,21 +632,20 @@ class MacPortalClient:
     # ------------- step 5: channels -------------
 
     def get_all_channels_raw(self):
-        """Get raw channel data from portal - exactly like original MacReplay with enhanced debugging."""
+        """Get all channels with support for GET and POST methods - EXACT MacReplayXC copy."""
         if not self.token:
             self.handshake()
-            
+
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
+        cookies = self._cookies()
         
-        # Exact headers from original MacReplay
-        from urllib.parse import urlparse
+        # Enhanced headers - EXACT MacReplayXC copy
         parsed = urlparse(portal)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
-        
         headers = {
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": "Bearer " + self.token,
             "Accept": "*/*",
             "Referer": base_url + "/",
             "X-User-Agent": "Model: MAG250; Link: WiFi",
@@ -659,17 +658,13 @@ class MacPortalClient:
             "JsHttpRequest": "1-xml"
         }
         
-        # Try GET first (standard) - exactly like original MacReplay
+        # Try GET first (standard) - EXACT MacReplayXC copy
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
-            
-            # Use regular session like MacReplayXC (cloudscraper only for portal discovery)
-            session = _get_session()
-            
-            response = session.get(
+            response = _get_session().get(
                 portal,
                 params=params,
-                cookies=self._cookies(),
+                cookies=cookies,
                 headers=headers,
                 proxies=proxies,
                 timeout=30,
@@ -679,28 +674,16 @@ class MacPortalClient:
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
                 return channels
-                
         except Exception as e:
             logger.debug(f"GET request failed: {e}, trying POST")
-            # Enhanced error logging
-            try:
-                logger.error(f"GET error details - Exception: {type(e).__name__}: {str(e)}")
-                logger.error(f"GET error details - Response status: {response.status_code if 'response' in locals() else 'No response'}")
-                logger.error(f"GET error details - Response text: {response.text[:500] if 'response' in locals() else 'No response'}")
-            except:
-                pass
         
-        # Try POST as fallback (some portals require this) - exactly like original MacReplay
+        # Try POST as fallback (some portals require this) - EXACT MacReplayXC copy
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
-            
-            # Use regular session like MacReplayXC (cloudscraper only for portal discovery)
-            session = _get_session()
-            
-            response = session.post(
+            response = _get_session().post(
                 portal,
                 data=params,
-                cookies=self._cookies(),
+                cookies=cookies,
                 headers=headers,
                 proxies=proxies,
                 timeout=30,
@@ -710,7 +693,6 @@ class MacPortalClient:
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
                 return channels
-                
         except requests.Timeout:
             logger.error(f"Timeout getting channels for MAC {self.mac}")
         except requests.RequestException as e:
@@ -718,43 +700,7 @@ class MacPortalClient:
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
         
-        # Try without proxy as final fallback (like MacReplayXC)
-        if proxies:
-            logger.debug("Retrying without proxy...")
-            try:
-                # Try GET without proxy
-                session = _get_session()
-                response = session.get(
-                    portal,
-                    params=params,
-                    cookies=self._cookies(),
-                    headers=headers,
-                    timeout=30,
-                )
-                channels = response.json()["js"]["data"]
-                if channels:
-                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (no proxy)")
-                    return channels
-            except Exception as e:
-                logger.debug(f"GET without proxy failed: {e}")
-            
-            try:
-                # Try POST without proxy
-                response = session.post(
-                    portal,
-                    data=params,
-                    cookies=self._cookies(),
-                    headers=headers,
-                    timeout=30,
-                )
-                channels = response.json()["js"]["data"]
-                if channels:
-                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST (no proxy)")
-                    return channels
-            except Exception as e:
-                logger.debug(f"POST without proxy failed: {e}")
-        
-        raise MacPortalError(f"Failed to get channels for MAC {self.mac} from portal")
+        return None
 
     def create_link(self, cmd: str) -> str:
         """
