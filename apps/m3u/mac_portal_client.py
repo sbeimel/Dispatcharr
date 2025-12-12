@@ -664,11 +664,11 @@ class MacPortalClient:
         
         # Try GET first (standard) - exactly like original MacReplay
         try:
-            logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
-            logger.debug(f"Portal URL: {portal}")
-            logger.debug(f"Params: {params}")
-            logger.debug(f"Headers: {headers}")
-            logger.debug(f"Cookies: {self._cookies()}")
+            logger.info(f"Getting all channels for MAC {self.mac} (GET)")
+            logger.info(f"Portal URL: {portal}")
+            logger.info(f"Params: {params}")
+            logger.info(f"Headers: {headers}")
+            logger.info(f"Cookies: {self._cookies()}")
             
             response = _get_session().get(
                 portal,
@@ -678,9 +678,22 @@ class MacPortalClient:
                 proxies=proxies,
                 timeout=30,
             )
-            logger.debug(f"Channels request status: {response.status_code}")
-            logger.debug(f"Response headers: {dict(response.headers)}")
-            logger.debug(f"Raw response (first 1000 chars): {response.text[:1000]}")
+            logger.info(f"Channels request status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response content-type: {response.headers.get('content-type', 'Not specified')}")
+            logger.info(f"Response content-length: {response.headers.get('content-length', 'Not specified')}")
+            logger.info(f"Raw response length: {len(response.text)} chars")
+            logger.info(f"Raw response (first 1000 chars): {response.text[:1000]!r}")
+            
+            # Check HTTP status first
+            if response.status_code != 200:
+                logger.error(f"HTTP error {response.status_code} from portal for MAC {self.mac} (GET)")
+                raise ValueError(f"HTTP error {response.status_code}")
+            
+            # Check for empty response before parsing JSON
+            if not response.text or response.text.strip() == "":
+                logger.error(f"Empty response from portal for MAC {self.mac} (GET)")
+                raise ValueError("Empty response from portal")
             
             # Simple parsing like original MacReplay - no complex validation
             channels = response.json()["js"]["data"]
@@ -707,7 +720,7 @@ class MacPortalClient:
         
         # Try POST as fallback (some portals require this) - exactly like original MacReplay
         try:
-            logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
+            logger.info(f"Getting all channels for MAC {self.mac} (POST)")
             response = _get_session().post(
                 portal,
                 data=params,
@@ -716,8 +729,22 @@ class MacPortalClient:
                 proxies=proxies,
                 timeout=30,
             )
-            logger.debug(f"Channels request status: {response.status_code}")
-            logger.debug(f"Raw response (first 1000 chars): {response.text[:1000]}")
+            logger.info(f"Channels request status: {response.status_code}")
+            logger.info(f"Response headers: {dict(response.headers)}")
+            logger.info(f"Response content-type: {response.headers.get('content-type', 'Not specified')}")
+            logger.info(f"Response content-length: {response.headers.get('content-length', 'Not specified')}")
+            logger.info(f"Raw response length: {len(response.text)} chars")
+            logger.info(f"Raw response (first 1000 chars): {response.text[:1000]!r}")
+            
+            # Check HTTP status first
+            if response.status_code != 200:
+                logger.error(f"HTTP error {response.status_code} from portal for MAC {self.mac} (POST)")
+                raise ValueError(f"HTTP error {response.status_code}")
+            
+            # Check for empty response before parsing JSON
+            if not response.text or response.text.strip() == "":
+                logger.error(f"Empty response from portal for MAC {self.mac} (POST)")
+                raise ValueError("Empty response from portal")
             
             # Simple parsing like original MacReplay - no complex validation
             channels = response.json()["js"]["data"]

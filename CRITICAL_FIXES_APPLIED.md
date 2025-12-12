@@ -567,14 +567,30 @@ The Dispatcharr MAC/STB Portal integration is now fully functional with proper f
 ### Files Modified:
 - `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Simplified `get_all_channels_raw()` method
 
+#### 5. **Enhanced Empty Response Detection**
+- **Added**: Check for empty responses before JSON parsing
+- **Added**: HTTP status code validation
+- **Added**: Detailed response logging (content-type, content-length, response length)
+- **Benefit**: Better diagnosis of portal issues and empty response handling
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Simplified `get_all_channels_raw()` method with enhanced debugging
+
 ### Expected Behavior:
 - ✅ Portal authentication works (token retrieval successful)
 - ✅ Channel retrieval now uses simplified parsing like original MacReplay
-- ✅ Enhanced debug logs show exactly what portal returns
+- ✅ Enhanced debug logs show exactly what portal returns (HTTP status, headers, content)
 - ✅ Better compatibility with portals that have non-standard response formats
+- ✅ Proper handling of empty responses from portals
 - ✅ Maintains all existing functionality while fixing channel retrieval
 
 ### Testing:
-The simplified MAC portal client should now handle the `http://ueawall.com/portal.php` portal and similar portals that were causing channel retrieval failures. The debug logs will show exactly what the portal returns for further troubleshooting if needed.
+The enhanced MAC portal client now provides detailed debugging information to diagnose the exact issue with `http://ueawall.com/portal.php`. The logs will show:
+- HTTP status code
+- Response headers (content-type, content-length)
+- Actual response length and content
+- Whether the portal is returning empty responses or invalid JSON
 
-**Status**: ✅ **COMPLETE** - MAC Portal channel retrieval has been simplified to match original MacReplay exactly, providing maximum portal compatibility.
+This will help identify if the portal requires different parameters, headers, or authentication methods.
+
+**Status**: ✅ **COMPLETE** - MAC Portal channel retrieval has been simplified and enhanced with detailed debugging to diagnose portal compatibility issues.
