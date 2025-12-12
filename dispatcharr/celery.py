@@ -36,6 +36,24 @@ app = Celery("dispatcharr")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
+# Configure task routing for optimized queues
+app.conf.task_routes = {
+    # Fast queue for M3U/MAC operations
+    'apps.m3u.tasks.refresh_single_m3u_account': {'queue': 'm3u_refresh'},
+    'apps.m3u.tasks.refresh_m3u_accounts': {'queue': 'm3u_refresh'},
+    'apps.m3u.tasks.refresh_m3u_groups': {'queue': 'm3u_refresh'},
+    'apps.m3u.tasks.check_mac_expiry': {'queue': 'mac_check'},
+    'apps.m3u.tasks.refresh_account_info': {'queue': 'fast'},
+    
+    # Stream operations
+    'apps.proxy.ts_proxy.tasks.*': {'queue': 'stream_failover'},
+    
+    # Slow queue for background tasks
+    'apps.epg.tasks.*': {'queue': 'slow'},
+    'apps.channels.tasks.*': {'queue': 'slow'},
+    'core.tasks.*': {'queue': 'slow'},
+}
+
 # Use environment variable for log level with fallback to INFO
 CELERY_LOG_LEVEL = os.environ.get('DISPATCHARR_LOG_LEVEL', 'INFO').upper()
 print(f"Celery using log level from environment: {CELERY_LOG_LEVEL}")
