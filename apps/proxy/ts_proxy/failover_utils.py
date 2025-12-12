@@ -84,6 +84,7 @@ class FailoverManager:
                 # For the current stream, try profile failover within the same stream first
                 if current_stream_id and str(stream.id) == str(current_stream_id):
                     # Only try profile failover for non-MAC accounts (MAC accounts handle their own failover)
+                    logger.debug(f"Current stream {stream.id}: account_type={m3u_account.account_type}, is_MAC={m3u_account.account_type == M3UAccount.Types.MAC}")
                     if m3u_account.account_type != M3UAccount.Types.MAC:
                         logger.info(f"Trying profile failover within current stream {stream.id} for channel {self.channel_id}")
                         result = self._try_standard_account_failover(stream, m3u_account)
@@ -91,6 +92,8 @@ class FailoverManager:
                             # Reset attempt count on success
                             self.redis_client.delete(attempt_key)
                             return result
+                    else:
+                        logger.info(f"Skipping profile failover for MAC account (stream {stream.id}) for channel {self.channel_id}")
                     # Skip to other streams after trying profile failover
                     continue
                 
@@ -192,6 +195,10 @@ class FailoverManager:
             profile_list = [default_profile] + list(profiles.exclude(is_default=True))
         else:
             profile_list = list(profiles)
+        
+        logger.info(f"Profile failover for account {m3u_account.id}: found {len(profile_list)} active profiles")
+        for i, p in enumerate(profile_list):
+            logger.info(f"  Profile {i+1}: ID={p.id}, name='{p.name}', default={p.is_default}")
         
         for profile in profile_list:
             if self._is_profile_in_cooldown(profile.id):
@@ -335,9 +342,16 @@ class FailoverManager:
                 # Convert $1, $2, etc. to \1, \2, etc. for proper Python regex backreferences
                 safe_replace_pattern = re.sub(r'\$(\d+)', r'\\\1', profile.replace_pattern)
                 transformed_url = re.sub(profile.search_pattern, safe_replace_pattern, url)
-                logger.debug(f"Profile {profile.id} URL transformation: {url} -> {transformed_url}")
+                logger.info(f"Profile {profile.id} ({profile.name}) URL transformation:")
+                logger.info(f"  Original URL: {url}")
+                logger.info(f"  Search pattern: {profile.search_pattern}")
+                logger.info(f"  Replace pattern: {profile.replace_pattern}")
+                logger.info(f"  Safe replace pattern: {safe_replace_pattern}")
+                logger.info(f"  Transformed URL: {transformed_url}")
                 return transformed_url
-            return url
+            else:
+                logger.warning(f"Profile {profile.id} has no search/replace patterns, returning original URL")
+                return url
         except Exception as e:
             logger.error(f"Error transforming URL with profile {profile.id}: {e}")
             return url
