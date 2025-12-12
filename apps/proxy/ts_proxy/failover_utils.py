@@ -214,12 +214,16 @@ class FailoverManager:
                 # For standard accounts, use the stream URL with profile transformation
                 stream_url = self._transform_stream_url(stream.url, profile)
                 
-                if stream_url:
+                # Check if the URL actually changed - if not, try next profile
+                if stream_url and stream_url != stream.url:
                     # Increment profile connection count
                     self._increment_profile_connections(profile.id)
                     
                     logger.info(f"Profile failover successful: {profile.id} for channel {self.channel_id}")
                     return stream_url, profile.id, None
+                elif stream_url == stream.url:
+                    logger.info(f"Profile {profile.id} did not change URL, trying next profile")
+                    continue
                     
             except Exception as e:
                 logger.error(f"Profile failover failed for {profile.id}: {e}")
