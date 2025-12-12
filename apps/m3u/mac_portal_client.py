@@ -662,7 +662,15 @@ class MacPortalClient:
         # Try GET first (standard) - exactly like original MacReplay
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
-            response = _get_session().get(
+            
+            # Try cloudscraper first for better Cloudflare compatibility
+            if CLOUDSCRAPER_AVAILABLE:
+                logger.info("Using cloudscraper session for better Cloudflare compatibility")
+                session = _get_session(use_cloudscraper=True)
+            else:
+                session = _get_session()
+            
+            response = session.get(
                 portal,
                 params=params,
                 cookies=self._cookies(),
@@ -684,7 +692,28 @@ class MacPortalClient:
             
             # Handle Cloudflare gzip compression issues
             response_text = response.text
-            if not response_text and response.content and response.headers.get('content-encoding') == 'gzip':
+            
+            # Debug the actual response content
+            logger.info(f"Debug - response.content type: {type(response.content)}")
+            logger.info(f"Debug - response.content length: {len(response.content)}")
+            logger.info(f"Debug - response.content raw bytes: {response.content!r}")
+            logger.info(f"Debug - response.text type: {type(response.text)}")
+            logger.info(f"Debug - response.text length: {len(response.text)}")
+            
+            # Check if we have a Cloudflare gzip issue
+            content_length = response.headers.get('content-length', '0')
+            content_encoding = response.headers.get('content-encoding', '')
+            
+            if (not response_text and 
+                content_encoding == 'gzip' and 
+                int(content_length) > 0 and 
+                len(response.content) == 0):
+                
+                logger.error("Cloudflare gzip issue detected: Content-Length > 0 but no content received")
+                logger.error("This indicates a Cloudflare compression problem where content is lost")
+                raise MacPortalError("Cloudflare gzip compression issue - no content received despite Content-Length > 0")
+            
+            elif not response_text and response.content and content_encoding == 'gzip':
                 try:
                     import gzip
                     logger.info("Attempting manual gzip decompression for Cloudflare issue")
@@ -720,7 +749,15 @@ class MacPortalClient:
         # Try POST as fallback (some portals require this) - exactly like original MacReplay
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
-            response = _get_session().post(
+            
+            # Try cloudscraper first for better Cloudflare compatibility
+            if CLOUDSCRAPER_AVAILABLE:
+                logger.info("Using cloudscraper session for POST request (Cloudflare compatibility)")
+                session = _get_session(use_cloudscraper=True)
+            else:
+                session = _get_session()
+            
+            response = session.post(
                 portal,
                 data=params,
                 cookies=self._cookies(),
@@ -742,7 +779,28 @@ class MacPortalClient:
             
             # Handle Cloudflare gzip compression issues
             response_text = response.text
-            if not response_text and response.content and response.headers.get('content-encoding') == 'gzip':
+            
+            # Debug the actual response content (POST)
+            logger.info(f"Debug POST - response.content type: {type(response.content)}")
+            logger.info(f"Debug POST - response.content length: {len(response.content)}")
+            logger.info(f"Debug POST - response.content raw bytes: {response.content!r}")
+            logger.info(f"Debug POST - response.text type: {type(response.text)}")
+            logger.info(f"Debug POST - response.text length: {len(response.text)}")
+            
+            # Check if we have a Cloudflare gzip issue
+            content_length = response.headers.get('content-length', '0')
+            content_encoding = response.headers.get('content-encoding', '')
+            
+            if (not response_text and 
+                content_encoding == 'gzip' and 
+                int(content_length) > 0 and 
+                len(response.content) == 0):
+                
+                logger.error("Cloudflare gzip issue detected (POST): Content-Length > 0 but no content received")
+                logger.error("This indicates a Cloudflare compression problem where content is lost")
+                raise MacPortalError("Cloudflare gzip compression issue - no content received despite Content-Length > 0")
+            
+            elif not response_text and response.content and content_encoding == 'gzip':
                 try:
                     import gzip
                     logger.info("Attempting manual gzip decompression for Cloudflare issue (POST)")
