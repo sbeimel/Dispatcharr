@@ -632,13 +632,17 @@ class MacPortalClient:
     # ------------- step 5: channels -------------
 
     def get_all_channels_raw(self):
-        """Get raw channel data from portal with robust fallback mechanisms."""
+        """Get raw channel data from portal - simplified to match original MacReplay exactly."""
         if not self.token:
             self.handshake()
+            # Some portals need a small delay after handshake
+            import time
+            time.sleep(1)
+            
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
         
-        # Enhanced headers to bypass protections (from original MacReplay)
+        # Enhanced headers (from original MacReplay)
         from urllib.parse import urlparse
         parsed = urlparse(portal)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -658,9 +662,14 @@ class MacPortalClient:
             "JsHttpRequest": "1-xml"
         }
         
-        # Try GET first (standard)
+        # Try GET first (standard) - exactly like original MacReplay
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
+            logger.debug(f"Portal URL: {portal}")
+            logger.debug(f"Params: {params}")
+            logger.debug(f"Headers: {headers}")
+            logger.debug(f"Cookies: {self._cookies()}")
+            
             response = _get_session().get(
                 portal,
                 params=params,
@@ -670,44 +679,33 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
+            logger.debug(f"Response headers: {dict(response.headers)}")
+            logger.debug(f"Raw response (first 1000 chars): {response.text[:1000]}")
             
-            if response.status_code == 200:
-                try:
-                    # Check if response has content
-                    if not response.text or response.text.strip() == "":
-                        logger.debug("Empty response from get_all_channels (GET)")
-                        raise ValueError("Empty response")
-                    
-                    # Check if response looks like JSON
-                    response_text = response.text.strip()
-                    if not (response_text.startswith('{') or response_text.startswith('[')):
-                        logger.debug(f"Non-JSON response from get_all_channels (GET): {response_text[:200]}")
-                        raise ValueError("Non-JSON response")
-                    
-                    data = response.json()
-                    channels = data["js"]["data"]
-                    if channels:
-                        logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
-                        
-                        # Log a few sample entries to inspect keys
-                        for idx, ch in enumerate(channels[:3]):
-                            try:
-                                keys = list(ch.keys())
-                            except Exception:
-                                keys = []
-                            logger.debug("MAC raw channel %s keys: %s", idx, keys)
-                        
-                        return channels
-                except ValueError as e:
-                    logger.debug(f"JSON decode error in get_all_channels (GET): {e}")
-                    logger.debug(f"Raw response: {response.text[:500]}")
-                except Exception as e:
-                    logger.debug(f"Failed to parse GET response: {e}")
-                    logger.debug(f"Raw response: {response.text[:500]}")
+            # Simple parsing like original MacReplay - no complex validation
+            channels = response.json()["js"]["data"]
+            if channels:
+                logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
+                
+                # Log a few sample entries to inspect keys
+                for idx, ch in enumerate(channels[:3]):
+                    try:
+                        keys = list(ch.keys())
+                    except Exception:
+                        keys = []
+                    logger.debug("MAC raw channel %s keys: %s", idx, keys)
+                
+                return channels
+                
         except Exception as e:
             logger.debug(f"GET request failed: {e}, trying POST")
+            logger.debug(f"Exception details: {type(e).__name__}: {str(e)}")
+            try:
+                logger.debug(f"Response text on GET error: {response.text[:1000]}")
+            except:
+                pass
         
-        # Try POST as fallback (some portals require this)
+        # Try POST as fallback (some portals require this) - exactly like original MacReplay
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
             response = _get_session().post(
@@ -719,44 +717,34 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
+            logger.debug(f"Raw response (first 1000 chars): {response.text[:1000]}")
             
-            if response.status_code == 200:
-                try:
-                    # Check if response has content
-                    if not response.text or response.text.strip() == "":
-                        logger.debug("Empty response from get_all_channels (POST)")
-                        raise ValueError("Empty response")
-                    
-                    # Check if response looks like JSON
-                    response_text = response.text.strip()
-                    if not (response_text.startswith('{') or response_text.startswith('[')):
-                        logger.debug(f"Non-JSON response from get_all_channels (POST): {response_text[:200]}")
-                        raise ValueError("Non-JSON response")
-                    
-                    data = response.json()
-                    channels = data["js"]["data"]
-                    if channels:
-                        logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
-                        
-                        # Log a few sample entries to inspect keys
-                        for idx, ch in enumerate(channels[:3]):
-                            try:
-                                keys = list(ch.keys())
-                            except Exception:
-                                keys = []
-                            logger.debug("MAC raw channel %s keys: %s", idx, keys)
-                        
-                        return channels
-                except Exception as e:
-                    logger.debug(f"Failed to parse POST response: {e}")
-                    # Log raw response for debugging
-                    logger.debug(f"Raw response: {response.text[:500]}")
+            # Simple parsing like original MacReplay - no complex validation
+            channels = response.json()["js"]["data"]
+            if channels:
+                logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
+                
+                # Log a few sample entries to inspect keys
+                for idx, ch in enumerate(channels[:3]):
+                    try:
+                        keys = list(ch.keys())
+                    except Exception:
+                        keys = []
+                    logger.debug("MAC raw channel %s keys: %s", idx, keys)
+                
+                return channels
+                
         except requests.Timeout:
             logger.error(f"Timeout getting channels for MAC {self.mac}")
         except requests.RequestException as e:
             logger.error(f"Request error getting channels for MAC {self.mac}: {e}")
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
+            # Log raw response for debugging
+            try:
+                logger.debug(f"Raw response on POST error: {response.text[:1000]}")
+            except:
+                pass
         
         raise MacPortalError(f"Failed to get channels for MAC {self.mac} from portal")
 
