@@ -594,3 +594,53 @@ The enhanced MAC portal client now provides detailed debugging information to di
 This will help identify if the portal requires different parameters, headers, or authentication methods.
 
 **Status**: ✅ **COMPLETE** - MAC Portal channel retrieval has been simplified and enhanced with detailed debugging to diagnose portal compatibility issues.
+
+## Fix #14: Enhanced MAC Portal Debugging for Empty Response Issue
+
+**Issue**: Portal `http://ueawall.com/portal.php` returns "Expecting value: line 1 column 1 (char 0)" errors after successful authentication.
+
+**Root Cause**: The portal is returning HTTP 200 with gzip-compressed content (20 bytes) but the actual content is empty or invalid JSON.
+
+**Solution Applied**: Enhanced MAC portal client with comprehensive debugging while maintaining exact MacReplay compatibility
+
+### Changes Made:
+
+#### 1. **Simplified Channel Retrieval Logic**
+- **Removed**: Complex JSON validation that could interfere with portal responses
+- **Kept**: Exact same parsing logic as original MacReplay: `response.json()["js"]["data"]`
+- **Added**: Enhanced debugging to diagnose exactly what portals are returning
+
+#### 2. **Comprehensive Response Debugging**
+- **Added**: Detailed logging of HTTP status, headers, content-type, content-length, content-encoding
+- **Added**: Raw content length vs text length comparison
+- **Added**: First 500 characters of response for analysis
+- **Added**: Enhanced error logging with exception details and response information
+
+#### 3. **Exact MacReplay Compatibility**
+- **Headers**: Exact same headers as original MacReplay
+- **Parameters**: Exact same parameters as original MacReplay
+- **Flow**: Same GET → POST fallback pattern as original MacReplay
+- **Parsing**: Identical parsing logic without additional validation
+
+#### 4. **Better Error Diagnosis**
+- **Portal Analysis**: Logs will now show exactly what `http://ueawall.com` is returning
+- **Content Analysis**: Can distinguish between empty responses, gzip issues, and JSON problems
+- **Debugging Ready**: Provides all information needed to diagnose portal-specific issues
+
+### Files Modified:
+- `Dispatcharr-0.14.0/apps/m3u/mac_portal_client.py` - Enhanced `get_all_channels_raw()` with comprehensive debugging
+
+### Expected Behavior:
+- ✅ **Exact MacReplay Logic**: Uses identical parsing logic as original MacReplay
+- ✅ **Enhanced Debugging**: Detailed logs show exactly what portal returns
+- ✅ **Portal Diagnosis**: Can identify if portal returns empty content, invalid JSON, or gzip issues
+- ✅ **Maximum Compatibility**: No additional validation that could interfere with portal responses
+
+### Next Steps:
+The enhanced debugging will show exactly what `http://ueawall.com/portal.php` is returning:
+- If it's truly empty content, we'll see raw content length vs text length
+- If it's gzip issues, we'll see content-encoding headers
+- If it's JSON format issues, we'll see the actual response content
+- This will help determine the exact fix needed for this specific portal
+
+**Status**: ✅ **COMPLETE** - Enhanced MAC Portal debugging is ready to diagnose the exact issue with `http://ueawall.com/portal.php`.

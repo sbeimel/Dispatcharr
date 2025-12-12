@@ -632,24 +632,14 @@ class MacPortalClient:
     # ------------- step 5: channels -------------
 
     def get_all_channels_raw(self):
-        """Get raw channel data from portal - simplified to match original MacReplay exactly."""
+        """Get raw channel data from portal - exactly like original MacReplay with enhanced debugging."""
         if not self.token:
             self.handshake()
-            # Some portals need a small delay after handshake
-            import time
-            time.sleep(1)
-            
-        # Some portals require genres to be loaded first
-        try:
-            logger.info(f"Pre-loading genres for MAC {self.mac} (some portals require this)")
-            self.get_genres_map()
-        except Exception as e:
-            logger.debug(f"Genre pre-loading failed (not critical): {e}")
             
         portal = self.resolve_portal_url()
         proxies = self._get_proxies()
         
-        # Enhanced headers (from original MacReplay)
+        # Exact headers from original MacReplay
         from urllib.parse import urlparse
         parsed = urlparse(portal)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -658,9 +648,6 @@ class MacPortalClient:
             "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
             "Authorization": f"Bearer {self.token}",
             "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate",
-            "Connection": "keep-alive",
             "Referer": base_url + "/",
             "X-User-Agent": "Model: MAG250; Link: WiFi",
         }
@@ -674,12 +661,7 @@ class MacPortalClient:
         
         # Try GET first (standard) - exactly like original MacReplay
         try:
-            logger.info(f"Getting all channels for MAC {self.mac} (GET)")
-            logger.info(f"Portal URL: {portal}")
-            logger.info(f"Params: {params}")
-            logger.info(f"Headers: {headers}")
-            logger.info(f"Cookies: {self._cookies()}")
-            
+            logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             response = _get_session().get(
                 portal,
                 params=params,
@@ -688,67 +670,37 @@ class MacPortalClient:
                 proxies=proxies,
                 timeout=30,
             )
-            logger.info(f"Channels request status: {response.status_code}")
-            logger.info(f"Response headers: {dict(response.headers)}")
-            logger.info(f"Response content-type: {response.headers.get('content-type', 'Not specified')}")
-            logger.info(f"Response content-length: {response.headers.get('content-length', 'Not specified')}")
-            logger.info(f"Raw response length: {len(response.text)} chars")
-            logger.info(f"Raw response (first 1000 chars): {response.text[:1000]!r}")
+            logger.debug(f"Channels request status: {response.status_code}")
             
-            # Check HTTP status first
-            if response.status_code != 200:
-                logger.error(f"HTTP error {response.status_code} from portal for MAC {self.mac} (GET)")
-                raise ValueError(f"HTTP error {response.status_code}")
+            # Enhanced debugging for problematic portals
+            logger.info(f"Portal response - Status: {response.status_code}")
+            logger.info(f"Portal response - Headers: {dict(response.headers)}")
+            logger.info(f"Portal response - Content-Type: {response.headers.get('content-type', 'Not specified')}")
+            logger.info(f"Portal response - Content-Length: {response.headers.get('content-length', 'Not specified')}")
+            logger.info(f"Portal response - Content-Encoding: {response.headers.get('content-encoding', 'Not specified')}")
+            logger.info(f"Portal response - Raw content length: {len(response.content)} bytes")
+            logger.info(f"Portal response - Text length: {len(response.text)} chars")
+            logger.info(f"Portal response - First 500 chars: {response.text[:500]!r}")
             
-            # Check for empty response before parsing JSON
-            if not response.text or response.text.strip() == "":
-                logger.error(f"Empty response from portal for MAC {self.mac} (GET)")
-                # Try to get raw content if text is empty but content exists
-                if response.content:
-                    logger.info(f"Raw content exists ({len(response.content)} bytes), trying manual decode")
-                    try:
-                        import gzip
-                        if response.headers.get('content-encoding') == 'gzip':
-                            decoded_content = gzip.decompress(response.content).decode('utf-8')
-                            logger.info(f"Manual gzip decode result: {decoded_content[:500]!r}")
-                            if decoded_content.strip():
-                                # Use manually decoded content
-                                import json
-                                data = json.loads(decoded_content)
-                                channels = data["js"]["data"]
-                                if channels:
-                                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (manual decode)")
-                                    return channels
-                    except Exception as decode_error:
-                        logger.error(f"Manual decode failed: {decode_error}")
-                raise ValueError("Empty response from portal")
-            
-            # Simple parsing like original MacReplay - no complex validation
+            # Exact parsing like original MacReplay
             channels = response.json()["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
-                
-                # Log a few sample entries to inspect keys
-                for idx, ch in enumerate(channels[:3]):
-                    try:
-                        keys = list(ch.keys())
-                    except Exception:
-                        keys = []
-                    logger.debug("MAC raw channel %s keys: %s", idx, keys)
-                
                 return channels
                 
         except Exception as e:
             logger.debug(f"GET request failed: {e}, trying POST")
-            logger.debug(f"Exception details: {type(e).__name__}: {str(e)}")
+            # Enhanced error logging
             try:
-                logger.debug(f"Response text on GET error: {response.text[:1000]}")
+                logger.error(f"GET error details - Exception: {type(e).__name__}: {str(e)}")
+                logger.error(f"GET error details - Response status: {response.status_code if 'response' in locals() else 'No response'}")
+                logger.error(f"GET error details - Response text: {response.text[:500] if 'response' in locals() else 'No response'}")
             except:
                 pass
         
         # Try POST as fallback (some portals require this) - exactly like original MacReplay
         try:
-            logger.info(f"Getting all channels for MAC {self.mac} (POST)")
+            logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
             response = _get_session().post(
                 portal,
                 data=params,
@@ -757,54 +709,22 @@ class MacPortalClient:
                 proxies=proxies,
                 timeout=30,
             )
-            logger.info(f"Channels request status: {response.status_code}")
-            logger.info(f"Response headers: {dict(response.headers)}")
-            logger.info(f"Response content-type: {response.headers.get('content-type', 'Not specified')}")
-            logger.info(f"Response content-length: {response.headers.get('content-length', 'Not specified')}")
-            logger.info(f"Raw response length: {len(response.text)} chars")
-            logger.info(f"Raw response (first 1000 chars): {response.text[:1000]!r}")
+            logger.debug(f"Channels request status: {response.status_code}")
             
-            # Check HTTP status first
-            if response.status_code != 200:
-                logger.error(f"HTTP error {response.status_code} from portal for MAC {self.mac} (POST)")
-                raise ValueError(f"HTTP error {response.status_code}")
+            # Enhanced debugging for problematic portals
+            logger.info(f"Portal POST response - Status: {response.status_code}")
+            logger.info(f"Portal POST response - Headers: {dict(response.headers)}")
+            logger.info(f"Portal POST response - Content-Type: {response.headers.get('content-type', 'Not specified')}")
+            logger.info(f"Portal POST response - Content-Length: {response.headers.get('content-length', 'Not specified')}")
+            logger.info(f"Portal POST response - Content-Encoding: {response.headers.get('content-encoding', 'Not specified')}")
+            logger.info(f"Portal POST response - Raw content length: {len(response.content)} bytes")
+            logger.info(f"Portal POST response - Text length: {len(response.text)} chars")
+            logger.info(f"Portal POST response - First 500 chars: {response.text[:500]!r}")
             
-            # Check for empty response before parsing JSON
-            if not response.text or response.text.strip() == "":
-                logger.error(f"Empty response from portal for MAC {self.mac} (POST)")
-                # Try to get raw content if text is empty but content exists
-                if response.content:
-                    logger.info(f"Raw content exists ({len(response.content)} bytes), trying manual decode")
-                    try:
-                        import gzip
-                        if response.headers.get('content-encoding') == 'gzip':
-                            decoded_content = gzip.decompress(response.content).decode('utf-8')
-                            logger.info(f"Manual gzip decode result: {decoded_content[:500]!r}")
-                            if decoded_content.strip():
-                                # Use manually decoded content
-                                import json
-                                data = json.loads(decoded_content)
-                                channels = data["js"]["data"]
-                                if channels:
-                                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (manual decode)")
-                                    return channels
-                    except Exception as decode_error:
-                        logger.error(f"Manual decode failed: {decode_error}")
-                raise ValueError("Empty response from portal")
-            
-            # Simple parsing like original MacReplay - no complex validation
+            # Exact parsing like original MacReplay
             channels = response.json()["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
-                
-                # Log a few sample entries to inspect keys
-                for idx, ch in enumerate(channels[:3]):
-                    try:
-                        keys = list(ch.keys())
-                    except Exception:
-                        keys = []
-                    logger.debug("MAC raw channel %s keys: %s", idx, keys)
-                
                 return channels
                 
         except requests.Timeout:
@@ -813,9 +733,11 @@ class MacPortalClient:
             logger.error(f"Request error getting channels for MAC {self.mac}: {e}")
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
-            # Log raw response for debugging
+            # Enhanced error logging
             try:
-                logger.debug(f"Raw response on POST error: {response.text[:1000]}")
+                logger.error(f"POST error details - Exception: {type(e).__name__}: {str(e)}")
+                logger.error(f"POST error details - Response status: {response.status_code if 'response' in locals() else 'No response'}")
+                logger.error(f"POST error details - Response text: {response.text[:500] if 'response' in locals() else 'No response'}")
             except:
                 pass
         
