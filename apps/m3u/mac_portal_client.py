@@ -682,8 +682,27 @@ class MacPortalClient:
             logger.info(f"Portal response - Text length: {len(response.text)} chars")
             logger.info(f"Portal response - First 500 chars: {response.text[:500]!r}")
             
-            # Exact parsing like original MacReplay
-            channels = response.json()["js"]["data"]
+            # Handle Cloudflare gzip compression issues
+            response_text = response.text
+            if not response_text and response.content and response.headers.get('content-encoding') == 'gzip':
+                try:
+                    import gzip
+                    logger.info("Attempting manual gzip decompression for Cloudflare issue")
+                    decompressed = gzip.decompress(response.content)
+                    response_text = decompressed.decode('utf-8')
+                    logger.info(f"Manual decompression result: {response_text[:500]!r}")
+                except Exception as e:
+                    logger.error(f"Manual gzip decompression failed: {e}")
+                    raise
+            
+            # Parse JSON from response text
+            if response_text:
+                import json
+                data = json.loads(response_text)
+            else:
+                data = response.json()
+            
+            channels = data["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
                 return channels
@@ -721,8 +740,27 @@ class MacPortalClient:
             logger.info(f"Portal POST response - Text length: {len(response.text)} chars")
             logger.info(f"Portal POST response - First 500 chars: {response.text[:500]!r}")
             
-            # Exact parsing like original MacReplay
-            channels = response.json()["js"]["data"]
+            # Handle Cloudflare gzip compression issues
+            response_text = response.text
+            if not response_text and response.content and response.headers.get('content-encoding') == 'gzip':
+                try:
+                    import gzip
+                    logger.info("Attempting manual gzip decompression for Cloudflare issue (POST)")
+                    decompressed = gzip.decompress(response.content)
+                    response_text = decompressed.decode('utf-8')
+                    logger.info(f"Manual decompression result (POST): {response_text[:500]!r}")
+                except Exception as e:
+                    logger.error(f"Manual gzip decompression failed (POST): {e}")
+                    raise
+            
+            # Parse JSON from response text
+            if response_text:
+                import json
+                data = json.loads(response_text)
+            else:
+                data = response.json()
+            
+            channels = data["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
                 return channels
