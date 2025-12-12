@@ -663,12 +663,8 @@ class MacPortalClient:
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             
-            # Try cloudscraper first for better Cloudflare compatibility
-            if CLOUDSCRAPER_AVAILABLE:
-                logger.info("Using cloudscraper session for better Cloudflare compatibility")
-                session = _get_session(use_cloudscraper=True)
-            else:
-                session = _get_session()
+            # Use regular session like MacReplayXC (cloudscraper only for portal discovery)
+            session = _get_session()
             
             response = session.get(
                 portal,
@@ -679,79 +675,7 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
-            
-            # Enhanced debugging for problematic portals
-            logger.info(f"Portal response - Status: {response.status_code}")
-            logger.info(f"Portal response - Headers: {dict(response.headers)}")
-            logger.info(f"Portal response - Content-Type: {response.headers.get('content-type', 'Not specified')}")
-            logger.info(f"Portal response - Content-Length: {response.headers.get('content-length', 'Not specified')}")
-            logger.info(f"Portal response - Content-Encoding: {response.headers.get('content-encoding', 'Not specified')}")
-            logger.info(f"Portal response - Raw content length: {len(response.content)} bytes")
-            logger.info(f"Portal response - Text length: {len(response.text)} chars")
-            logger.info(f"Portal response - First 500 chars: {response.text[:500]!r}")
-            
-            # Handle Cloudflare gzip compression issues
-            response_text = response.text
-            
-            # Debug the actual response content
-            logger.info(f"Debug - response.content type: {type(response.content)}")
-            logger.info(f"Debug - response.content length: {len(response.content)}")
-            logger.info(f"Debug - response.content raw bytes: {response.content!r}")
-            logger.info(f"Debug - response.text type: {type(response.text)}")
-            logger.info(f"Debug - response.text length: {len(response.text)}")
-            
-            # Check if we have a Cloudflare gzip issue
-            content_length = response.headers.get('content-length', '0')
-            content_encoding = response.headers.get('content-encoding', '')
-            
-            if (not response_text and 
-                content_encoding == 'gzip' and 
-                int(content_length) > 0 and 
-                len(response.content) == 0):
-                
-                logger.warning("Cloudflare gzip issue detected: Content-Length > 0 but no content received")
-                logger.warning("This indicates a Cloudflare compression problem - trying alternative approach")
-                
-                # Try to make a new request without gzip encoding
-                headers_no_gzip = headers.copy()
-                headers_no_gzip["Accept-Encoding"] = "identity"  # Disable compression
-                
-                try:
-                    logger.info("Retrying request without gzip compression")
-                    response = session.get(
-                        portal,
-                        params=params,
-                        cookies=self._cookies(),
-                        headers=headers_no_gzip,
-                        proxies=proxies,
-                        timeout=30,
-                    )
-                    response_text = response.text
-                    logger.info(f"Retry without gzip - got {len(response_text)} chars")
-                except Exception as retry_e:
-                    logger.error(f"Retry without gzip failed: {retry_e}")
-                    # If retry fails, continue to POST fallback
-                    raise MacPortalError("Cloudflare gzip compression issue - retry failed")
-            
-            elif not response_text and response.content and content_encoding == 'gzip':
-                try:
-                    import gzip
-                    logger.info("Attempting manual gzip decompression for Cloudflare issue")
-                    decompressed = gzip.decompress(response.content)
-                    response_text = decompressed.decode('utf-8')
-                    logger.info(f"Manual decompression result: {response_text[:500]!r}")
-                except Exception as e:
-                    logger.error(f"Manual gzip decompression failed: {e}")
-                    raise
-            
-            # Parse JSON from response text
-            if response_text:
-                import json
-                data = json.loads(response_text)
-            else:
-                data = response.json()
-            
-            channels = data["js"]["data"]
+            channels = response.json()["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
                 return channels
@@ -770,12 +694,8 @@ class MacPortalClient:
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
             
-            # Try cloudscraper first for better Cloudflare compatibility
-            if CLOUDSCRAPER_AVAILABLE:
-                logger.info("Using cloudscraper session for POST request (Cloudflare compatibility)")
-                session = _get_session(use_cloudscraper=True)
-            else:
-                session = _get_session()
+            # Use regular session like MacReplayXC (cloudscraper only for portal discovery)
+            session = _get_session()
             
             response = session.post(
                 portal,
@@ -786,78 +706,7 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
-            
-            # Enhanced debugging for problematic portals
-            logger.info(f"Portal POST response - Status: {response.status_code}")
-            logger.info(f"Portal POST response - Headers: {dict(response.headers)}")
-            logger.info(f"Portal POST response - Content-Type: {response.headers.get('content-type', 'Not specified')}")
-            logger.info(f"Portal POST response - Content-Length: {response.headers.get('content-length', 'Not specified')}")
-            logger.info(f"Portal POST response - Content-Encoding: {response.headers.get('content-encoding', 'Not specified')}")
-            logger.info(f"Portal POST response - Raw content length: {len(response.content)} bytes")
-            logger.info(f"Portal POST response - Text length: {len(response.text)} chars")
-            logger.info(f"Portal POST response - First 500 chars: {response.text[:500]!r}")
-            
-            # Handle Cloudflare gzip compression issues
-            response_text = response.text
-            
-            # Debug the actual response content (POST)
-            logger.info(f"Debug POST - response.content type: {type(response.content)}")
-            logger.info(f"Debug POST - response.content length: {len(response.content)}")
-            logger.info(f"Debug POST - response.content raw bytes: {response.content!r}")
-            logger.info(f"Debug POST - response.text type: {type(response.text)}")
-            logger.info(f"Debug POST - response.text length: {len(response.text)}")
-            
-            # Check if we have a Cloudflare gzip issue
-            content_length = response.headers.get('content-length', '0')
-            content_encoding = response.headers.get('content-encoding', '')
-            
-            if (not response_text and 
-                content_encoding == 'gzip' and 
-                int(content_length) > 0 and 
-                len(response.content) == 0):
-                
-                logger.warning("Cloudflare gzip issue detected (POST): Content-Length > 0 but no content received")
-                logger.warning("This indicates a Cloudflare compression problem - trying alternative approach")
-                
-                # Try to make a new request without gzip encoding
-                headers_no_gzip = headers.copy()
-                headers_no_gzip["Accept-Encoding"] = "identity"  # Disable compression
-                
-                try:
-                    logger.info("Retrying POST request without gzip compression")
-                    response = session.post(
-                        portal,
-                        data=params,
-                        cookies=self._cookies(),
-                        headers=headers_no_gzip,
-                        proxies=proxies,
-                        timeout=30,
-                    )
-                    response_text = response.text
-                    logger.info(f"POST retry without gzip - got {len(response_text)} chars")
-                except Exception as retry_e:
-                    logger.error(f"POST retry without gzip failed: {retry_e}")
-                    raise MacPortalError("Cloudflare gzip compression issue - POST retry failed")
-            
-            elif not response_text and response.content and content_encoding == 'gzip':
-                try:
-                    import gzip
-                    logger.info("Attempting manual gzip decompression for Cloudflare issue (POST)")
-                    decompressed = gzip.decompress(response.content)
-                    response_text = decompressed.decode('utf-8')
-                    logger.info(f"Manual decompression result (POST): {response_text[:500]!r}")
-                except Exception as e:
-                    logger.error(f"Manual gzip decompression failed (POST): {e}")
-                    raise
-            
-            # Parse JSON from response text
-            if response_text:
-                import json
-                data = json.loads(response_text)
-            else:
-                data = response.json()
-            
-            channels = data["js"]["data"]
+            channels = response.json()["js"]["data"]
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
                 return channels
@@ -868,13 +717,42 @@ class MacPortalClient:
             logger.error(f"Request error getting channels for MAC {self.mac}: {e}")
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
-            # Enhanced error logging
+        
+        # Try without proxy as final fallback (like MacReplayXC)
+        if proxies:
+            logger.debug("Retrying without proxy...")
             try:
-                logger.error(f"POST error details - Exception: {type(e).__name__}: {str(e)}")
-                logger.error(f"POST error details - Response status: {response.status_code if 'response' in locals() else 'No response'}")
-                logger.error(f"POST error details - Response text: {response.text[:500] if 'response' in locals() else 'No response'}")
-            except:
-                pass
+                # Try GET without proxy
+                session = _get_session()
+                response = session.get(
+                    portal,
+                    params=params,
+                    cookies=self._cookies(),
+                    headers=headers,
+                    timeout=30,
+                )
+                channels = response.json()["js"]["data"]
+                if channels:
+                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} (no proxy)")
+                    return channels
+            except Exception as e:
+                logger.debug(f"GET without proxy failed: {e}")
+            
+            try:
+                # Try POST without proxy
+                response = session.post(
+                    portal,
+                    data=params,
+                    cookies=self._cookies(),
+                    headers=headers,
+                    timeout=30,
+                )
+                channels = response.json()["js"]["data"]
+                if channels:
+                    logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST (no proxy)")
+                    return channels
+            except Exception as e:
+                logger.debug(f"POST without proxy failed: {e}")
         
         raise MacPortalError(f"Failed to get channels for MAC {self.mac} from portal")
 
