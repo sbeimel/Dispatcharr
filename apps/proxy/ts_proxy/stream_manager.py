@@ -371,8 +371,26 @@ class StreamManager:
                         logger.info(f"Successfully switched MAC for channel {self.channel_id}; continuing streaming")
                         continue
                     
-                    # MAC failover did not succeed or is not applicable -> fall back to profile/stream failover
-                    logger.info(f"MAC failover not applicable or failed, trying stream failover for channel: {self.channel_id}")
+                    # MAC failover did not succeed or is not applicable -> try profile failover first
+                    logger.info(f"MAC failover not applicable or failed, trying profile failover for channel: {self.channel_id}")
+
+                    # Try profile failover within the same stream
+                    profile_switched = False
+                    try:
+                        profile_switched = self._try_profile_failover()
+                    except Exception:
+                        logger.error("Error while attempting profile-level failover on channel %s", self.channel_id, exc_info=True)
+                        profile_switched = False
+                    
+                    if profile_switched:
+                        # Successfully switched profile, reset retry count and continue
+                        self.retry_count = 0
+                        stream_switch_attempts += 1
+                        logger.info(f"Successfully switched profile for channel {self.channel_id}; continuing streaming")
+                        continue
+                    
+                    # Profile failover did not succeed -> fall back to stream failover
+                    logger.info(f"Profile failover failed, trying stream failover for channel: {self.channel_id}")
 
                     # Try to switch to next stream
                     switch_result = self._try_next_stream()
@@ -485,6 +503,46 @@ class StreamManager:
                 pass
 
             logger.info(f"Stream manager stopped for channel {self.channel_id}")
+
+    def _try_profile_failover(self) -> bool:
+        """
+        Try profile failover within the same stream.
+        Returns True if successfully switched to a different profile.
+        """
+        try:
+            from .failover_utils import FailoverManager
+            
+            # Use the failover system to try profile failover within current stream
+            failover_url, failover_profile_id, error_reason = FailoverManager(self.channel_id).get_stream_with_failover(self.current_stream_id)
+            
+            if failover_url and failover_url != self.url:
+                logger.info(f"Profile failover found alternative URL for channel {self.channel_id}: {failover_url}")
+                
+                # Update to the failover URL
+                switch_result = self.update_url(failover_url, self.current_stream_id, failover_profile_id)
+                if switch_result:
+                    # Update stream metadata
+                    if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                        from .redis_keys import RedisKeys
+                        from .constants import ChannelMetadataField
+                        metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                        self.buffer.redis_client.hset(metadata_key, mapping={
+                            ChannelMetadataField.URL: failover_url,
+                            ChannelMetadataField.M3U_PROFILE: str(failover_profile_id) if failover_profile_id else "",
+                            ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
+                            ChannelMetadataField.STREAM_SWITCH_REASON: "profile_failover"
+                        })
+                    return True
+                else:
+                    logger.warning(f"Failed to update URL during profile failover for channel {self.channel_id}")
+                    return False
+            else:
+                logger.info(f"Profile failover could not find alternative URL for channel {self.channel_id}: {error_reason}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error during profile failover for channel {self.channel_id}: {e}")
+            return False
 
     def _establish_transcode_connection(self):
         """Establish a connection using transcoding"""
@@ -1180,17 +1238,11 @@ class StreamManager:
                         connection_start_time = getattr(self, 'connection_start_time', 0)
                         stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
 
-                        if stable_time >= 30:  # Stream was stable, try reconnect first
-                            if not self.needs_reconnect:
-                                logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_reconnect = True
-                                self.last_health_action_time = now
-                        else:
-                            # Stream wasn't stable, suggest stream switch
-                            if not self.needs_stream_switch:
-                                logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_stream_switch = True
-                                self.last_health_action_time = now
+                        # Always try reconnect first, let the normal retry flow handle profile/stream failover
+                        if not self.needs_reconnect:
+                            logger.info(f"Setting reconnect flag for unhealthy stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
+                            self.needs_reconnect = True
+                            self.last_health_action_time = now
 
                         consecutive_unhealthy_checks = 0 # Reset after setting flag
 
