@@ -1040,9 +1040,9 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     retval = f"M3U account: {account_id}, Batch processed: {len(streams_to_create)} created, {len(streams_to_update)} updated."
 
     # Aggressive garbage collection
-    # del streams_to_create, streams_to_update, stream_hashes, existing_streams
-    # from core.utils import cleanup_memory
-    # cleanup_memory(log_usage=True, force_collection=True)
+    del streams_to_create, streams_to_update, stream_hashes, existing_streams
+    from core.utils import cleanup_memory
+    cleanup_memory(log_usage=True, force_collection=True)
 
     # Clean up database connections for threading
     connections.close_all()
@@ -2955,7 +2955,8 @@ def refresh_single_m3u_account(account_id):
     if 'batches' in locals():
         del batches
 
-    # Memory cleanup removed
+    from core.utils import cleanup_memory
+    cleanup_memory(log_usage=True, force_collection=True)
 
     # Clean up cache file since we've fully processed it
     if os.path.exists(cache_path):
@@ -3126,6 +3127,12 @@ def _refresh_mac_account_with_groups(account_id):
                 mac_obj.save()
                 continue
         
+        # Memory cleanup after processing large channel lists (can be 20k+ channels)
+        if total_channels > 1000:
+            logger.info(f"MAC account processed {total_channels} channels, running memory cleanup")
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
         if success_count > 0:
             return {
                 "success": True,
@@ -3255,6 +3262,11 @@ def _refresh_mac_account_direct(account_id):
                 mac_obj.save()
                 continue
         
+        # Memory cleanup after MAC status check (especially with many MACs)
+        if len(list(macs)) > 5:
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
         if success_count > 0:
             return {
                 "success": True,
@@ -3272,7 +3284,6 @@ def _refresh_mac_account_direct(account_id):
         return {"error": str(e)}
 
 
-@shared_task
 @shared_task
 def refresh_mac_account(account_id):
     """Refresh MAC account channels and status using MAC Portal Client.
@@ -3370,6 +3381,11 @@ def check_mac_expiry(account_id=None):
         except Exception as e:
             logger.error(f"Error checking MAC expiry for account {account.id}: {e}")
     
+    # Memory cleanup after checking multiple accounts/MACs
+    if len(results) > 10:
+        from core.utils import cleanup_memory
+        cleanup_memory(log_usage=True, force_collection=True)
+    
     return {"checked": len(results), "results": results}
 
 
@@ -3411,6 +3427,12 @@ def cleanup_expired_macs():
                         logger.error(f"Error updating mac_address for account {account_id}: {e}")
         
         logger.info(f"Successfully cleaned up {expired_count} expired MAC addresses")
+        
+        # Memory cleanup after bulk MAC operations
+        if expired_count > 0:
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
         return {"cleaned": expired_count}
         
     except Exception as e:

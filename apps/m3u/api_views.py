@@ -504,6 +504,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         """
         Clear all channels and streams imported from this M3U account.
         This removes duplicate imports and allows for a clean re-import.
+        Memory cleanup is performed after bulk deletion to free resources.
         """
         account = self.get_object()
         
@@ -543,6 +544,16 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 account.status = M3UAccount.Status.IDLE
                 account.last_message = f"Channels cleared successfully. Removed {streams_count} streams and {orphaned_count} channels."
                 account.save(update_fields=['status', 'last_message'])
+            
+            # Memory cleanup after bulk deletion (especially important for large accounts 20k+ streams)
+            # This is safe to call here because:
+            # 1. The transaction is already committed
+            # 2. We only clear Django ORM query cache and run garbage collection
+            # 3. No active sessions or import data are affected
+            if streams_count > 1000:
+                logger.info(f"Running memory cleanup after clearing {streams_count} streams")
+                from core.utils import cleanup_memory
+                cleanup_memory(log_usage=True, force_collection=True)
             
             return Response(
                 {

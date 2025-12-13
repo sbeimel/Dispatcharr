@@ -24,7 +24,7 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 from .models import EPGSource, EPGData, ProgramData
-from core.utils import acquire_task_lock, release_task_lock, send_websocket_update, log_system_event
+from core.utils import acquire_task_lock, release_task_lock, send_websocket_update, cleanup_memory, log_system_event
 
 logger = logging.getLogger(__name__)
 
@@ -968,7 +968,7 @@ def parse_channels_only(source):
                             logger.info(f"[parse_channels_only] Memory after bulk_create: {process.memory_info().rss / 1024 / 1024:.2f} MB")
                         del epgs_to_create  # Explicit deletion
                         epgs_to_create = []
-                        # Memory cleanup removed
+                        cleanup_memory(log_usage=should_log_memory, force_collection=True)
                         if process:
                             logger.info(f"[parse_channels_only] Memory after gc.collect(): {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
@@ -980,13 +980,14 @@ def parse_channels_only(source):
                         if process:
                             logger.info(f"[parse_channels_only] Memory after bulk_update: {process.memory_info().rss / 1024 / 1024:.2f} MB")
                         epgs_to_update = []
-                        # Force garbage collection - memory cleanup removed
+                        # Force garbage collection
+                        cleanup_memory(log_usage=should_log_memory, force_collection=True)
 
                     # Periodically clear the existing_epgs cache to prevent memory buildup
                     if processed_channels % 1000 == 0:
                         logger.info(f"[parse_channels_only] Clearing existing_epgs cache at {processed_channels} channels")
                         existing_epgs.clear()
-                        # Memory cleanup removed
+                        cleanup_memory(log_usage=should_log_memory, force_collection=True)
                         if process:
                             logger.info(f"[parse_channels_only] Memory after clearing cache: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
@@ -1110,7 +1111,7 @@ def parse_channels_only(source):
             existing_epgs = None
             epgs_to_create = None
             epgs_to_update = None
-            # Memory cleanup removed
+            cleanup_memory(log_usage=should_log_memory, force_collection=True)
         except Exception as e:
             logger.warning(f"Cleanup error: {e}")
 
@@ -1375,7 +1376,8 @@ def parse_programs_for_tvg_id(epg_id):
         programs_to_create = None
 
         epg_source = None
-        # Add comprehensive cleanup before releasing lock - memory cleanup removed
+        # Add comprehensive cleanup before releasing lock
+        cleanup_memory(log_usage=should_log_memory, force_collection=True)
          # Memory tracking after processing
         if process:
             try:
@@ -1701,7 +1703,8 @@ def parse_programs_for_source(epg_source, tvg_id=None):
         tvg_id_to_epg_id = None
         gc.collect()
 
-        # Add comprehensive memory cleanup at the end - memory cleanup removed
+        # Add comprehensive memory cleanup at the end
+        cleanup_memory(log_usage=should_log_memory, force_collection=True)
         if process:
             final_memory = process.memory_info().rss / 1024 / 1024
             logger.info(f"[parse_programs_for_source] Final memory usage: {final_memory:.2f} MB difference: {final_memory - initial_memory:.2f} MB")

@@ -563,7 +563,8 @@ def match_epg_channels():
 
         # Memory cleanup
         gc.collect()
-        # Memory cleanup removed
+        from core.utils import cleanup_memory
+        cleanup_memory(log_usage=True, force_collection=True)
 
 
 @shared_task
@@ -713,7 +714,8 @@ def match_selected_channels_epg(channel_ids):
 
         # Memory cleanup
         gc.collect()
-        # Memory cleanup removed
+        from core.utils import cleanup_memory
+        cleanup_memory(log_usage=True, force_collection=True)
 
 
 @shared_task
