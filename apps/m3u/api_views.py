@@ -507,6 +507,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         Memory cleanup is performed after bulk deletion to free resources.
         """
         account = self.get_object()
+        logger.info(f"Clear channels request started for account {account.id} ({account.name})")
         
         try:
             from django.db import transaction
@@ -550,11 +551,16 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             # 1. The transaction is already committed
             # 2. We only clear Django ORM query cache and run garbage collection
             # 3. No active sessions or import data are affected
-            if streams_count > 1000:
+            # Memory cleanup after bulk deletion (higher threshold for better performance)
+            if streams_count > 2500:
                 logger.info(f"Running memory cleanup after clearing {streams_count} streams")
                 from core.utils import cleanup_memory
                 cleanup_memory(log_usage=True, force_collection=True)
+                logger.info(f"Memory cleanup completed after clearing {streams_count} streams")
+            else:
+                logger.info(f"Memory cleanup skipped (streams_count: {streams_count}, threshold: 2500)")
             
+            logger.info(f"Clear channels completed successfully for account {account.id}")
             return Response(
                 {
                     "message": "Channels cleared successfully",

@@ -34,7 +34,7 @@ from .utils import normalize_stream_url
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 1500  # Optimized batch size for threading
+BATCH_SIZE = 2500  # Increased for better performance with more memory
 m3u_dir = os.path.join(settings.MEDIA_ROOT, "cached_m3u")
 
 
@@ -324,9 +324,14 @@ def fetch_m3u_lines(account, use_cache=False):
                     error_msg = f"Network error while fetching M3U file from URL: {account.server_url} - {str(e)}"
 
                 logger.error(error_msg)
-                account.status = M3UAccount.Status.ERROR
-                account.last_message = error_msg
-                account.save(update_fields=["status", "last_message"])
+                # Safe save - account may have been deleted during fetch
+                try:
+                    account.refresh_from_db()
+                    account.status = M3UAccount.Status.ERROR
+                    account.last_message = error_msg
+                    account.save(update_fields=["status", "last_message"])
+                except (M3UAccount.DoesNotExist, Exception) as save_error:
+                    logger.warning(f"Could not update account status: {save_error}")
                 send_m3u_update(
                     account.id,
                     "downloading",
@@ -339,9 +344,14 @@ def fetch_m3u_lines(account, use_cache=False):
                 # Handle any other unexpected errors
                 error_msg = f"Unexpected error while fetching M3U file from URL: {account.server_url} - {str(e)}"
                 logger.error(error_msg)
-                account.status = M3UAccount.Status.ERROR
-                account.last_message = error_msg
-                account.save(update_fields=["status", "last_message"])
+                # Safe save - account may have been deleted during fetch
+                try:
+                    account.refresh_from_db()
+                    account.status = M3UAccount.Status.ERROR
+                    account.last_message = error_msg
+                    account.save(update_fields=["status", "last_message"])
+                except (M3UAccount.DoesNotExist, Exception) as save_error:
+                    logger.warning(f"Could not update account status: {save_error}")
                 send_m3u_update(
                     account.id,
                     "downloading",
@@ -2615,9 +2625,15 @@ def refresh_single_m3u_account(account_id):
                 )
         except Exception as e:
             logger.error(f"Exception in refresh_m3u_groups: {str(e)}", exc_info=True)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = f"Error refreshing M3U groups: {str(e)}"
-            account.save(update_fields=["status", "last_message"])
+            # Safe save - account may have been deleted during refresh
+            try:
+                # Refresh account from DB to ensure it still exists
+                account.refresh_from_db()
+                account.status = M3UAccount.Status.ERROR
+                account.last_message = f"Error refreshing M3U groups: {str(e)}"
+                account.save(update_fields=["status", "last_message"])
+            except (M3UAccount.DoesNotExist, Exception) as save_error:
+                logger.warning(f"Could not update account {account_id} status: {save_error}")
             send_m3u_update(
                 account_id,
                 "parsing",
@@ -3128,7 +3144,7 @@ def _refresh_mac_account_with_groups(account_id):
                 continue
         
         # Memory cleanup after processing large channel lists (can be 20k+ channels)
-        if total_channels > 1000:
+        if total_channels > 2500:
             logger.info(f"MAC account processed {total_channels} channels, running memory cleanup")
             from core.utils import cleanup_memory
             cleanup_memory(log_usage=True, force_collection=True)
@@ -3263,7 +3279,7 @@ def _refresh_mac_account_direct(account_id):
                 continue
         
         # Memory cleanup after MAC status check (especially with many MACs)
-        if len(list(macs)) > 5:
+        if len(list(macs)) > 10:
             from core.utils import cleanup_memory
             cleanup_memory(log_usage=True, force_collection=True)
         
@@ -3382,7 +3398,7 @@ def check_mac_expiry(account_id=None):
             logger.error(f"Error checking MAC expiry for account {account.id}: {e}")
     
     # Memory cleanup after checking multiple accounts/MACs
-    if len(results) > 10:
+    if len(results) > 20:
         from core.utils import cleanup_memory
         cleanup_memory(log_usage=True, force_collection=True)
     

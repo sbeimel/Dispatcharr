@@ -35,14 +35,14 @@ services:
     cap_add:
       - SYS_NICE
     
-    # Memory and CPU limits
+    # Memory and CPU limits (increased for better performance)
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 3G
           cpus: '2.0'
         reservations:
-          memory: 1G
+          memory: 1.5G
           cpus: '1.0'
     
     # Network optimizations
@@ -77,6 +77,8 @@ services:
       nice -n 0 celery -A dispatcharr worker -l info 
       --concurrency=6 
       --prefetch-multiplier=1
+      --max-memory-per-child=1000000
+      --max-tasks-per-child=100
       -Q m3u_refresh,mac_check,stream_failover,fast
       -O fair
       --without-gossip
@@ -86,10 +88,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 6G
           cpus: '4.0'
         reservations:
-          memory: 2G
+          memory: 3G
           cpus: '2.0'
 
   # Standard Celery Worker for other tasks
@@ -117,6 +119,8 @@ services:
       nice -n 5 celery -A dispatcharr worker -l info 
       --concurrency=2 
       --prefetch-multiplier=4
+      --max-memory-per-child=800000
+      --max-tasks-per-child=80
       -Q celery,epg_refresh,cleanup,maintenance,slow
       -n standard_worker@%h
       "
@@ -213,7 +217,7 @@ services:
     container_name: dispatcharr_redis
     command: >
       redis-server 
-      --maxmemory 512mb 
+      --maxmemory 1gb 
       --maxmemory-policy allkeys-lru 
       --save ""
       --appendonly no
@@ -224,10 +228,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 768M
+          memory: 1.5G
           cpus: '1.0'
         reservations:
-          memory: 256M
+          memory: 512M
           cpus: '0.5'
 
   # Connection Pooler for PostgreSQL

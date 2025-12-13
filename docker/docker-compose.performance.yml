@@ -1,0 +1,67 @@
+services:
+  dispatcharr:
+    image: ghcr.io/dispatcharr/dispatcharr:latest
+    container_name: dispatcharr_performance
+    ports:
+      - 9191:9191
+    volumes:
+      - dispatcharr_data:/data
+      - tmpfs:/tmp:rw,noexec,nosuid,size=1g  # Increased tmpfs for better performance
+    environment:
+      - DISPATCHARR_ENV=aio
+      - REDIS_HOST=localhost
+      - CELERY_BROKER_URL=redis://localhost:6379/0
+      - DISPATCHARR_LOG_LEVEL=info
+      
+      # Performance Optimizations for Large MAC Portals (50k+ Channels)
+      - CELERY_MAX_MEMORY_PER_CHILD=2000000    # 2GB for very large portals
+      - CELERY_MAX_TASKS_PER_CHILD=200         # More tasks before restart
+      - REDIS_MAXMEMORY=2gb                     # More Redis memory
+      - POSTGRES_SHARED_BUFFERS=512MB          # More DB cache
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=2GB      # More DB cache
+      
+      # uWSGI Performance Tuning
+      - UWSGI_PROCESSES=6                       # More processes
+      - UWSGI_THREADS=4                         # More threads per process
+      - UWSGI_BUFFER_SIZE=131072                # 128KB buffer
+      - UWSGI_MAX_REQUESTS=2000                 # More requests before restart
+      - UWSGI_HARAKIRI=600                      # 10min timeout for large operations
+      
+      # Process Priority (uncomment cap_add below if using negative values)
+      - UWSGI_NICE_LEVEL=-5                     # High priority for streaming
+      - CELERY_NICE_LEVEL=5                     # Low priority for background
+    
+    # Enable high priority scheduling
+    cap_add:
+      - SYS_NICE
+    
+    # Increased memory and CPU limits for performance
+    deploy:
+      resources:
+        limits:
+          memory: 8G      # Increased for large portals
+          cpus: '6.0'     # More CPU cores
+        reservations:
+          memory: 4G      # Higher reservation
+          cpus: '3.0'
+    
+    # Network optimizations for streaming
+    sysctls:
+      - net.ipv4.tcp_keepalive_time=600
+      - net.ipv4.tcp_keepalive_intvl=60
+      - net.ipv4.tcp_keepalive_probes=3
+      - net.core.rmem_max=134217728      # 128MB receive buffer
+      - net.core.wmem_max=134217728      # 128MB send buffer
+      - net.ipv4.tcp_rmem=4096 87380 134217728
+      - net.ipv4.tcp_wmem=4096 65536 134217728
+    
+    # Health check for monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9191/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  dispatcharr_data:
