@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\urllib3\response.py
+# hypothesis_version: 6.148.7
+
+[b'\n', b'\r\n', b';', 100, 200, 204, 301, 302, 303, 304, 307, 308, 8192, ',', 'HEAD', 'HTTP/?', 'Read timed out.', '_decompress', 'br', 'buffer is empty', 'chunked', 'closed', 'content-encoding', 'content-length', 'decompress', 'deflate', 'fileno', 'flush', 'fp', 'gzip', 'isclosed', 'location', 'n should be > 0', 'read', 'transfer-encoding', 'utf-8', 'x-gzip', 'zstd']

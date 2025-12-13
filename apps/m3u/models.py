@@ -6,6 +6,17 @@ from apps.channels.models import StreamProfile
 from django_celery_beat.models import PeriodicTask
 from core.models import CoreSettings, UserAgent
 
+# Import MAC Portal Models
+from apps.m3u.mac_portal_models import (
+    MACPortalGlobalSettings,
+    FailoverSettings,
+    VODResumePoint,
+    MACHealthRecord,
+    FailoverEvent,
+    VODWatchedStatus,
+    MACCooldown,
+)
+
 CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
 
@@ -110,6 +121,10 @@ class M3UAccount(models.Model):
         blank=True,
         null=True,
         help_text="Proxy server for MAC portal connections (e.g., http://proxy:8080)",
+    )
+    enable_vod_scanning = models.BooleanField(
+        default=False,
+        help_text="Scan and import VOD content (movies/series) for MAC/STB Portal accounts",
     )
 
     def __str__(self):

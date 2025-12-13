@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\urllib3\util\request.py
+# hypothesis_version: 6.148.7
+
+[',', ',br', ',zstd', '@@@SKIP_HEADER@@@', 'CONNECT', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'TRACE', 'accept-encoding', 'authorization', 'cache-control', 'connection', 'gzip,deflate', 'host', 'keep-alive', 'no-cache', 'proxy-authorization', 'read', 'seek', 'tell', 'user-agent', 'utf-8']
