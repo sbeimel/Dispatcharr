@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\hookspec.py
+# hypothesis_version: 6.148.7
+
+['CallInfo[Any]', 'CallInfo[None]', 'Class', 'CollectReport', 'Collector', 'Config', 'ExceptionRepr', 'ExitCode', 'FixtureDef[Any]', 'Function', 'Item', 'LEGACY_PATH', 'Metafunc', 'Module', 'Optional[Collector]', 'Optional[Item]', 'Parser', 'PytestPluginManager', 'Session', 'SubRequest', 'TerminalReporter', 'TestReport', '_PluggyPlugin', 'pdb.Pdb', 'pytest']

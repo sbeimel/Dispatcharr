@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\reports.py
+# hypothesis_version: 6.148.7
+
+[100, '$report_type', '%s.%s.%s', '-', '::', 'BaseReport', 'CallInfo[None]', 'Captured log', 'Captured stderr', 'Captured stdout', 'CollectReport', 'ReprEntry', 'ReprEntryNative', 'TestReport', '_R', '__dict__', 'auto', 'call', 'chain', 'collect', 'data', 'executable', 'failed', 'id', 'lines', 'longrepr', 'node', 'passed', 'report_name: %s', 'reprcrash', 'reprentries', 'reprfileloc', 'reprfuncargs', 'reprlocals', 'reprtraceback', 'result', 'sections', 'skipped', 'style', 'sysplatform', 'tbstyle', 'toterminal', 'type', 'version_info']

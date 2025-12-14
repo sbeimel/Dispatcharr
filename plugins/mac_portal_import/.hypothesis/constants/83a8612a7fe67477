@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\requests\_internal_utils.py
+# hypothesis_version: 6.148.7
+
+[b'^[^:\\s][^:\\r\\n]*$', b'^\\S[^\\r\\n]*$|^$', '^[^:\\s][^:\\r\\n]*$', '^\\S[^\\r\\n]*$|^$', 'ascii']

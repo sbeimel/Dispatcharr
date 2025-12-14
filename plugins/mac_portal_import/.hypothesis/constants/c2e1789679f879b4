@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\unittest.py
+# hypothesis_version: 6.148.7
+
+['Unexpected success', 'UnitTestCase', '_SysExcInfoType', '__test__', '__unittest', '__unittest_skip__', '_excinfo', '_rawexcinfo', '_request', 'doClassCleanups', 'runTest', 'setUpClass', 'setup_method', 'tearDown', 'tearDownClass', 'teardown_method', 'unittest', 'unittest.TestCase', 'usepdb']

@@ -943,6 +943,29 @@ export default class API {
     }
   }
 
+  static async clearChannels(id) {
+    try {
+      const response = await request(`${host}/api/m3u/accounts/${id}/clear-channels/`, {
+        method: 'POST',
+      });
+
+      // Update the playlist status in the store
+      usePlaylistsStore.getState().fetchPlaylists();
+      
+      // Show success notification
+      notifications.show({
+        title: 'Success',
+        message: `Channels cleared successfully. Removed ${response.streams_deleted} streams and ${response.channels_deleted} channels.`,
+        color: 'green',
+        autoClose: 5000,
+      });
+
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to clear channels for playlist ${id}`, e);
+    }
+  }
+
   static async updatePlaylist(values, isToggle = false) {
     const { id, ...payload } = values;
 
@@ -1317,6 +1340,64 @@ export default class API {
       );
     } catch (e) {
       errorNotification(`Failed to update profile for account ${accountId}`, e);
+    }
+  }
+
+  // MAC Management API Methods
+  static async deleteExpiredMacs(accountId) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/delete-expired-macs/`,
+        {
+          method: 'POST',
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to delete expired MACs for account ${accountId}`, e);
+    }
+  }
+
+  static async deleteAccountMac(accountId, macId) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/macs/${macId}/`,
+        {
+          method: 'DELETE',
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to delete MAC for account ${accountId}`, e);
+    }
+  }
+
+  static async reorderAccountMacs(accountId, macOrder) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/reorder-macs/`,
+        {
+          method: 'POST',
+          body: { order: macOrder },
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to reorder MACs for account ${accountId}`, e);
+    }
+  }
+
+  static async refreshMacStatus(accountId) {
+    try {
+      const response = await request(
+        `${host}/api/m3u/accounts/${accountId}/refresh-mac-status/`,
+        {
+          method: 'POST',
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to refresh MAC status for account ${accountId}`, e);
     }
   }
 
@@ -2020,6 +2101,62 @@ export default class API {
       return resp;
     } catch (e) {
       errorNotification('Failed to run comskip', e);
+      throw e;
+    }
+  }
+
+  // MAC Management API Methods
+  static async deleteExpiredMacs(accountId) {
+    try {
+      const response = await request(`${host}/api/m3u/accounts/${accountId}/delete-expired-macs/`, {
+        method: 'POST',
+      });
+
+      // Update the playlist in the store
+      if (response.account) {
+        usePlaylistsStore.getState().updatePlaylist(response.account);
+      }
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to delete expired MACs', e);
+      throw e;
+    }
+  }
+
+  static async deleteAccountMac(accountId, macId) {
+    try {
+      const response = await request(`${host}/api/m3u/accounts/${accountId}/macs/${macId}/`, {
+        method: 'DELETE',
+      });
+
+      // Update the playlist in the store
+      if (response.account) {
+        usePlaylistsStore.getState().updatePlaylist(response.account);
+      }
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to delete MAC address', e);
+      throw e;
+    }
+  }
+
+  static async reorderAccountMacs(accountId, macIds) {
+    try {
+      const response = await request(`${host}/api/m3u/accounts/${accountId}/reorder-macs/`, {
+        method: 'POST',
+        body: { mac_ids: macIds },
+      });
+
+      // Update the playlist in the store
+      if (response.account) {
+        usePlaylistsStore.getState().updatePlaylist(response.account);
+      }
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to reorder MAC addresses', e);
       throw e;
     }
   }

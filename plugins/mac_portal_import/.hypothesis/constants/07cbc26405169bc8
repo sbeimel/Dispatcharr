@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\charset_normalizer\__init__.py
+# hypothesis_version: 6.148.7
+
+['CharsetMatch', 'CharsetMatches', 'VERSION', '__version__', 'charset_normalizer', 'detect', 'from_bytes', 'from_fp', 'from_path', 'is_binary', 'set_logging_handler']
