@@ -72,23 +72,30 @@ class HTTPStreamReader:
             logger.info(f"HTTP reader connected successfully, streaming data...")
 
             # Stream chunks to pipe
+            # Keep local reference to avoid race condition when stop() clears self.response
+            response = self.response
             chunk_count = 0
-            for chunk in self.response.iter_content(chunk_size=self.chunk_size):
-                if not self.running:
-                    break
-
-                if chunk:
-                    try:
-                        # Write binary data to pipe
-                        os.write(self.pipe_write, chunk)
-                        chunk_count += 1
-
-                        # Log progress periodically
-                        if chunk_count % 1000 == 0:
-                            logger.debug(f"HTTP reader streamed {chunk_count} chunks")
-                    except OSError as e:
-                        logger.error(f"Pipe write error: {e}")
+            try:
+                for chunk in response.iter_content(chunk_size=self.chunk_size):
+                    if not self.running:
                         break
+
+                    if chunk:
+                        try:
+                            # Write binary data to pipe
+                            os.write(self.pipe_write, chunk)
+                            chunk_count += 1
+
+                            # Log progress periodically
+                            if chunk_count % 1000 == 0:
+                                logger.debug(f"HTTP reader streamed {chunk_count} chunks")
+                        except OSError as e:
+                            logger.error(f"Pipe write error: {e}")
+                            break
+            except AttributeError:
+                # Response was closed during iteration - this is expected during shutdown
+                if self.running:
+                    logger.warning("Response closed unexpectedly during streaming")
 
             logger.info("HTTP stream ended")
 
