@@ -10,9 +10,10 @@ FROM node:20 AS frontend-builder
 WORKDIR /app/frontend
 COPY ./frontend /app/frontend
 # remove any node_modules that may have been copied from the host (x86)
-RUN rm -rf node_modules || true; \
-    npm install --no-audit --progress=false; \
-    npm run build; \
+RUN rm -rf node_modules package-lock.json || true && \
+    npm install --no-audit --progress=false 2>&1 && \
+    npm run build 2>&1 && \
+    ls -la dist/ && \
     rm -rf node_modules .cache
 
 # --- Redeclare build arguments for the next stage ---

@@ -31,7 +31,7 @@ import {
   IconThumbDown,
   IconCircleCheck,
   IconRefresh,
-  IconBroom,
+  IconClearAll,
 } from '@tabler/icons-react';
 import API from '../../api';
 
@@ -160,7 +160,7 @@ const PatternManagement = () => {
         <Group>
           <Button
             variant="outline"
-            leftSection={<IconBroom size={16} />}
+            leftSection={<IconClearAll size={16} />}
             onClick={cleanupPatterns}
           >
             Cleanup Low Confidence
