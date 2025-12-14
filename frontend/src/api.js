@@ -2647,4 +2647,79 @@ export default class API {
       errorNotification('Failed to retrieve system events', e);
     }
   }
+
+  // MAC Portal API Methods
+  static async getMACPortalSettings() {
+    try {
+      const response = await request(`${host}/api/mac-portal/settings/`);
+      return response;
+    } catch (e) {
+      console.error('Failed to retrieve MAC Portal settings:', e);
+      // Return default settings if API fails
+      return {
+        default_timeout: 30,
+        max_retries: 3,
+        retry_delay: 5,
+        cooldown_period: 60,
+        mac_rotation_enabled: true,
+        auto_failover_enabled: true,
+        health_check_interval: 300,
+      };
+    }
+  }
+
+  static async updateMACPortalSettings(settings) {
+    try {
+      const response = await request(`${host}/api/mac-portal/settings/`, {
+        method: 'PUT',
+        body: settings,
+      });
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update MAC Portal settings', e);
+    }
+  }
+
+  static async resetMACPortalSettings() {
+    try {
+      const response = await request(`${host}/api/mac-portal/settings/reset/`, {
+        method: 'POST',
+      });
+      return response;
+    } catch (e) {
+      errorNotification('Failed to reset MAC Portal settings', e);
+    }
+  }
+
+  // Predictive Failover API Methods
+  static get(url) {
+    return request(`${host}${url}`);
+  }
+
+  static post(url, data) {
+    return request(`${host}${url}`, {
+      method: 'POST',
+      body: data,
+    });
+  }
+
+  static put(url, data) {
+    return request(`${host}${url}`, {
+      method: 'PUT',
+      body: data,
+    });
+  }
+
+  static patch(url, data) {
+    return request(`${host}${url}`, {
+      method: 'PATCH',
+      body: data,
+    });
+  }
+
+  static delete(url) {
+    return request(`${host}${url}`, {
+      method: 'DELETE',
+    });
+  }
 }
