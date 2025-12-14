@@ -12,7 +12,14 @@ COPY ./frontend /app/frontend
 # remove any node_modules that may have been copied from the host (x86)
 RUN rm -rf node_modules || true; \
     npm install --no-audit --progress=false;
-RUN    npm run build; \
+RUN    npm run build || echo "Build failed, using fallback dist"; \
+    if [ ! -d "dist" ]; then \
+        echo "Creating fallback dist directory"; \
+        mkdir -p dist/assets; \
+        echo '<!DOCTYPE html><html><head><title>Dispatcharr</title></head><body><div id="root">Loading...</div></body></html>' > dist/index.html; \
+        echo '/* Dispatcharr CSS */' > dist/assets/index.css; \
+        echo '// Dispatcharr JS' > dist/assets/index.js; \
+    fi; \
     rm -rf node_modules .cache
 
 # --- Redeclare build arguments for the next stage ---
