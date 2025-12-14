@@ -5,7 +5,7 @@
  * Requirements: 52.1, 52.2, 52.3, 52.4
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Stack,
   Paper,
