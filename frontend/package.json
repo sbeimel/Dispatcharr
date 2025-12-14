@@ -31,8 +31,8 @@
     "lucide-react": "^0.511.0",
     "@tabler/icons-react": "^3.24.0",
     "mpegts.js": "^1.8.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "react-draggable": "^4.4.6",
     "react-pro-sidebar": "^1.1.0",
     "react-router-dom": "^7.3.0",
@@ -46,14 +46,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
-    "@swc/core": "npm:@swc/wasm@1.13.20",
-    "@swc/wasm": "^1.13.20",
+    "@swc/core": "^1.13.20",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.8.0",
-    "@testing-library/react": "^16.3.0",
+    "@testing-library/react": "^14.3.1",
     "@testing-library/user-event": "^14.6.1",
-    "@types/react": "^19.1.0",
-    "@types/react-dom": "^19.1.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react-swc": "^4.1.0",
     "eslint": "^9.21.0",
     "eslint-plugin-react-hooks": "^5.1.0",
@@ -61,12 +60,11 @@
     "globals": "^15.15.0",
     "jsdom": "^27.0.0",
     "prettier": "^3.5.3",
-    "vite": "^6.2.0",
+    "vite": "^5.4.10",
     "vitest": "^3.2.4"
   },
   "resolutions": {
-    "vite": "7.1.7",
-    "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   }
 }
