@@ -1120,7 +1120,7 @@ def parse_channels_only(source):
                 final_memory = process.memory_info().rss / 1024 / 1024
                 logger.debug(f"[parse_channels_only] Final memory usage: {final_memory:.2f} MB")
                 process = None
-        except Exception:
+        except:
             pass
 
 
@@ -1363,13 +1363,13 @@ def parse_programs_for_tvg_id(epg_id):
         # Reset internal caches and pools that lxml might be keeping
         try:
             etree.clear_error_log()
-        except AttributeError:
+        except:
             pass
         # Explicit cleanup of all potentially large objects
         if source_file:
             try:
                 source_file.close()
-            except (IOError, OSError):
+            except:
                 pass
         source_file = None
         program_parser = None
@@ -1691,7 +1691,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
         if source_file:
             try:
                 source_file.close()
-            except (IOError, OSError):
+            except:
                 pass
             source_file = None
 

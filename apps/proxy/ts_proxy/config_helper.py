@@ -64,7 +64,7 @@ class ConfigHelper:
     @staticmethod
     def max_retries():
         """Get maximum retry attempts"""
-        return ConfigHelper.get('MAX_RETRIES', 3)
+        return ConfigHelper.get('MAX_RETRIES', 1)
 
     @staticmethod
     def max_stream_switches():
@@ -79,7 +79,7 @@ class ConfigHelper:
     @staticmethod
     def url_switch_timeout():
         """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
-        return ConfigHelper.get('URL_SWITCH_TIMEOUT', 20)  # Default to 20 seconds
+        return ConfigHelper.get('URL_SWITCH_TIMEOUT', 4)
 
     @staticmethod
     def failover_grace_period():

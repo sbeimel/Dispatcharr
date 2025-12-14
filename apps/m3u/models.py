@@ -1,30 +1,48 @@
 from django.db import models
 from django.core.exceptions import ValidationError
+from core.models import UserAgent
 import re
 from django.dispatch import receiver
 from apps.channels.models import StreamProfile
 from django_celery_beat.models import PeriodicTask
 from core.models import CoreSettings, UserAgent
-
-# Import MAC Portal Models
-from apps.m3u.mac_portal_models import (
-    MACPortalGlobalSettings,
-    FailoverSettings,
-    VODResumePoint,
-    MACHealthRecord,
-    FailoverEvent,
-    VODWatchedStatus,
-    MACCooldown,
-)
+from django.utils import timezone
 
 CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
 
+def parse_mac_list(raw: str):
+    """Parse a user-entered MAC list string into a normalized, ordered list.
+
+    Supports comma/semicolon/newline separated values and normalizes common formats.
+    """
+    if not raw:
+        return []
+
+    candidates = re.split(r"[\s,;]+", raw.strip())
+    result = []
+
+    for mac in candidates:
+        if not mac:
+            continue
+        # remove separators
+        clean = re.sub(r"[^0-9A-Fa-f]", "", mac)
+        if len(clean) != 12:
+            # keep original if user really wants a weird MAC, but still store something
+            normalized = mac.strip()
+        else:
+            clean = clean.upper()
+            normalized = ":".join(clean[i : i + 2] for i in range(0, 12, 2))
+        if normalized not in result:
+            result.append(normalized)
+    return result
+
+
 class M3UAccount(models.Model):
     class Types(models.TextChoices):
-        STANDARD = "Standard", "Standard"
+        STADNARD = "STD", "Standard"
         XC = "XC", "Xtream Codes"
-        MAC = "MAC", "MAC/STB Portal"
+        MAC = "MAC", "MAC / STB-Portal"
 
     class Status(models.TextChoices):
         IDLE = "idle", "Idle"
@@ -94,9 +112,15 @@ class M3UAccount(models.Model):
         blank=True,
         related_name="m3u_accounts",
     )
-    account_type = models.CharField(choices=Types.choices, default=Types.STANDARD, max_length=20)
+    account_type = models.CharField(choices=Types.choices, default=Types.STADNARD)
     username = models.CharField(max_length=255, null=True, blank=True)
     password = models.CharField(max_length=255, null=True, blank=True)
+    mac_address = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="One or more MAC addresses (comma/semicolon/whitespace separated) for MAC/STB accounts",
+    )
     custom_properties = models.JSONField(default=dict, blank=True, null=True)
     refresh_interval = models.IntegerField(default=0)
     refresh_task = models.ForeignKey(
@@ -109,22 +133,6 @@ class M3UAccount(models.Model):
     priority = models.PositiveIntegerField(
         default=0,
         help_text="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content.",
-    )
-    mac_address = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="MAC address(es) for STB/MAC portal accounts. Multiple MACs can be separated by spaces or commas.",
-    )
-    proxy = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True,
-        help_text="Proxy server for MAC portal connections (e.g., http://proxy:8080)",
-    )
-    enable_vod_scanning = models.BooleanField(
-        default=False,
-        help_text="Scan and import VOD content (movies/series) for MAC/STB Portal accounts",
     )
 
     def __str__(self):
@@ -162,6 +170,65 @@ class M3UAccount(models.Model):
 
         return user_agent
 
+    # ------- multi-MAC helpers (MAC accounts only) -------
+
+    def _ensure_macs_from_mac_address(self):
+        """Sync M3UAccountMac entries from the raw mac_address field (order = priority)."""
+        from .models import M3UAccountMac  # local import to avoid circular
+
+        if self.account_type != self.Types.MAC:
+            return
+
+        normalized_list = parse_mac_list(self.mac_address or "")
+        existing = {m.address: m for m in self.macs.all()}
+
+        seen_addresses = set()
+        priority = 0
+        for addr in normalized_list:
+            seen_addresses.add(addr)
+            obj = existing.get(addr)
+            if obj:
+                if obj.priority != priority:
+                    obj.priority = priority
+                    obj.save(update_fields=["priority"])
+            else:
+                M3UAccountMac.objects.create(
+                    account=self,
+                    address=addr,
+                    priority=priority,
+                )
+            priority += 1
+
+        # delete entries that are no longer in the raw field
+        to_delete = [m.id for a, m in existing.items() if a not in seen_addresses]
+        if to_delete:
+            M3UAccountMac.objects.filter(id__in=to_delete).delete()
+
+    def get_mac_list(self):
+        """Return normalized MAC addresses in priority order (for display)."""
+        if self.account_type != self.Types.MAC:
+            return []
+        # ensure DB entries are in sync
+        self._ensure_macs_from_mac_address()
+        return [m.address for m in self.macs.order_by("priority", "id")]
+
+    def get_candidate_macs_for_streaming(self):
+        """Return ordered list of M3UAccountMac objects that are usable for streaming."""
+        if self.account_type != self.Types.MAC:
+            return []
+        self._ensure_macs_from_mac_address()
+        now = timezone.now()
+        candidates = []
+        for mac in self.macs.order_by("priority", "id"):
+            if mac.status == M3UAccountMac.Status.EXPIRED:
+                continue
+            if mac.status == M3UAccountMac.Status.ERROR:
+                continue
+            if mac.expires_at and mac.expires_at <= now:
+                continue
+            candidates.append(mac)
+        return candidates
+
     def save(self, *args, **kwargs):
         # Prevent auto_now behavior by handling updated_at manually
         if "update_fields" in kwargs and "updated_at" not in kwargs["update_fields"]:
@@ -169,137 +236,65 @@ class M3UAccount(models.Model):
             kwargs.setdefault("update_fields", [])
             if "updated_at" in kwargs["update_fields"]:
                 kwargs["update_fields"].remove("updated_at")
-        
-        # Check if this is a MAC account and we need to process MAC addresses
-        is_new = self.pk is None
-        old_mac_address = None
-        if not is_new:
-            try:
-                old_instance = M3UAccount.objects.get(pk=self.pk)
-                old_mac_address = old_instance.mac_address
-            except M3UAccount.DoesNotExist:
-                pass
-        
         super().save(*args, **kwargs)
-        
-        # Process MAC addresses for MAC accounts
-        if self.account_type == self.Types.MAC and self.mac_address:
-            # Only process if MAC addresses changed or this is a new account
-            if is_new or old_mac_address != self.mac_address:
-                self._process_mac_addresses()
-    
-    def _process_mac_addresses(self):
-        """Parse mac_address field and create/update M3UAccountMac objects."""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        logger.info(f"_process_mac_addresses called for account {self.id} ({self.name})")
-        
-        if not self.mac_address:
-            logger.warning(f"No mac_address field for account {self.id}")
-            return
-        
-        logger.info(f"Processing MAC addresses: {self.mac_address}")
-        
-        # Parse MAC addresses from the field (space, comma, or newline separated)
-        import re
-        mac_addresses = []
-        
-        # Split by various separators and clean up
-        raw_macs = re.split(r'[,\s\n\r]+', self.mac_address.strip())
-        logger.info(f"Raw MACs after split: {raw_macs}")
-        
-        for mac in raw_macs:
-            mac = mac.strip()
-            if mac:
-                # Normalize MAC address format
-                normalized_mac = M3UAccountMac.normalize_mac_address(mac)
-                is_valid = M3UAccountMac.is_valid_mac_format(normalized_mac)
-                logger.info(f"MAC '{mac}' -> normalized '{normalized_mac}' -> valid: {is_valid}")
-                if is_valid:
-                    mac_addresses.append(normalized_mac)
-        
-        if not mac_addresses:
-            logger.warning(f"No valid MAC addresses found for account {self.id}")
-            return
-        
-        logger.info(f"Valid MAC addresses to process: {mac_addresses}")
-        
-        # Get existing MAC objects
-        existing_macs = {mac.address: mac for mac in self.macs.all()}
-        logger.info(f"Existing MAC objects: {list(existing_macs.keys())}")
-        
-        # Create or update MAC objects
-        for i, mac_address in enumerate(mac_addresses):
-            if mac_address in existing_macs:
-                # Update priority if needed
-                mac_obj = existing_macs[mac_address]
-                if mac_obj.priority != i:
-                    mac_obj.priority = i
-                    mac_obj.save(update_fields=['priority'])
-                logger.info(f"MAC {mac_address} already exists (priority {i})")
-            else:
-                # Use get_or_create to avoid duplicate key errors
-                try:
-                    mac_obj, created = M3UAccountMac.objects.get_or_create(
-                        account=self,
-                        address=mac_address,
-                        defaults={
-                            'priority': i,
-                            'status': M3UAccountMac.Status.UNKNOWN
-                        }
-                    )
-                    if created:
-                        logger.info(f"Created new MAC object: {mac_address} (priority {i})")
-                    else:
-                        logger.info(f"MAC {mac_address} already existed in DB")
-                        if mac_obj.priority != i:
-                            mac_obj.priority = i
-                            mac_obj.save(update_fields=['priority'])
-                except Exception as e:
-                    logger.error(f"Error creating MAC object {mac_address}: {e}")
-        
-        # Remove MAC objects that are no longer in the list
-        current_addresses = set(mac_addresses)
-        for mac_obj in existing_macs.values():
-            if mac_obj.address not in current_addresses:
-                mac_obj.delete()
-                logger.info(f"Deleted MAC object: {mac_obj.address}")
-        
-        # Update the mac_address field to reflect the normalized addresses
-        self.mac_address = ' '.join(mac_addresses)
-        if self.mac_address != getattr(self, '_original_mac_address', ''):
-            M3UAccount.objects.filter(pk=self.pk).update(mac_address=self.mac_address)
-        
-        # Verify MAC objects were created
-        final_count = self.macs.count()
-        logger.info(f"Final MAC object count for account {self.id}: {final_count}")
 
-    def get_candidate_macs_for_streaming(self):
-        """Return ordered list of M3UAccountMac objects that are usable for streaming."""
-        if self.account_type != self.Types.MAC:
-            return []
-        
-        # Ensure MAC objects are created from mac_address field
-        self._process_mac_addresses()
-        
-        from django.utils import timezone
-        now = timezone.now()
-        candidates = []
-        
-        for mac in self.macs.order_by("priority", "id"):
-            # Skip EXPIRED MACs
-            if mac.status == M3UAccountMac.Status.EXPIRED:
-                continue
-            # Skip ERROR MACs
-            if mac.status == M3UAccountMac.Status.ERROR:
-                continue
-            # Skip MACs with past expiry dates
-            if mac.expires_at and mac.expires_at <= now:
-                continue
-            candidates.append(mac)
-        
-        return candidates
+    # def get_channel_groups(self):
+    #     return ChannelGroup.objects.filter(m3u_account__m3u_account=self)
+
+    # def is_channel_group_enabled(self, channel_group):
+    #     """Check if the specified ChannelGroup is enabled for this M3UAccount."""
+    #     return self.channel_group.filter(channel_group=channel_group, enabled=True).exists()
+
+    # def get_enabled_streams(self):
+    #     """Return all streams linked to this account with enabled ChannelGroups."""
+    #     return self.streams.filter(channel_group__in=ChannelGroup.objects.filter(m3u_account__enabled=True))
+
+
+class M3UAccountMac(models.Model):
+    class Status(models.TextChoices):
+        UNKNOWN = "unknown", "Unknown"          # never checked
+        VALID = "valid", "Valid"
+        EXPIRED = "expired", "Expired"
+        ERROR = "error", "Error"               # other error (portal down, max connections, etc.)
+
+    account = models.ForeignKey(
+        M3UAccount,
+        on_delete=models.CASCADE,
+        related_name="macs",
+        help_text="Parent MAC / STB-Portal account",
+    )
+    address = models.CharField(max_length=17, help_text="Normalized MAC address (AA:BB:CC:DD:EE:FF)")
+    priority = models.PositiveIntegerField(
+        default=0,
+        help_text="Order in which MACs are tried for streaming (0 = highest priority)",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.UNKNOWN,
+        help_text="Validation status based on last portal check",
+    )
+    expires_at = models.DateTimeField(null=True, blank=True, help_text="Parsed expiry timestamp if available")
+    expires_text = models.CharField(max_length=255, null=True, blank=True, help_text="Raw expiry text from portal (for UI display)")
+    last_checked = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["priority", "id"]
+        unique_together = ("account", "address")
+
+    def __str__(self):
+        return f"{self.address} ({self.account.name})"
+
+    @property
+    def is_valid_for_streaming(self):
+        if self.status == self.Status.EXPIRED:
+            return False
+        if self.status == self.Status.ERROR:
+            return False
+        if self.expires_at and self.expires_at <= timezone.now():
+            return False
+        return True
 
 
 class M3UFilter(models.Model):
@@ -495,6 +490,12 @@ class M3UAccountProfile(models.Model):
 def create_profile_for_m3u_account(sender, instance, created, **kwargs):
     """Automatically create an M3UAccountProfile when M3UAccount is created."""
     if created:
+        from .models import M3UAccountMac  # ensure model is ready
+
+        # initial sync of MACs from raw field (if any)
+        if instance.account_type == M3UAccount.Types.MAC:
+            instance._ensure_macs_from_mac_address()
+
         M3UAccountProfile.objects.create(
             m3u_account=instance,
             name=f"{instance.name} Default",
@@ -512,105 +513,3 @@ def create_profile_for_m3u_account(sender, instance, created, **kwargs):
 
         profile.max_streams = instance.max_streams
         profile.save()
-
-
-class M3UAccountMac(models.Model):
-    """Represents individual MAC addresses for MAC/STB portal accounts."""
-    
-    class Status(models.TextChoices):
-        UNKNOWN = "unknown", "Unknown"
-        VALID = "valid", "Valid"
-        EXPIRED = "expired", "Expired"
-        ERROR = "error", "Error"
-    
-    account = models.ForeignKey(
-        M3UAccount,
-        on_delete=models.CASCADE,
-        related_name="macs",
-        help_text="The M3U account this MAC belongs to",
-    )
-    address = models.CharField(
-        max_length=17,
-        help_text="MAC address in format AA:BB:CC:DD:EE:FF",
-    )
-    priority = models.PositiveIntegerField(
-        default=0,
-        help_text="Priority order for failover (0 = highest priority)",
-    )
-    status = models.CharField(
-        max_length=20,
-        choices=Status.choices,
-        default=Status.UNKNOWN,
-        help_text="Current validation status of this MAC address",
-    )
-    expires_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="When this MAC address expires (if known)",
-    )
-    expires_text = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text="Raw expiry text from portal for display",
-    )
-    last_checked = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="When this MAC was last validated",
-    )
-    last_error = models.TextField(
-        null=True,
-        blank=True,
-        help_text="Last error message if validation failed",
-    )
-    
-    class Meta:
-        ordering = ["priority", "id"]
-        unique_together = [("account", "address")]
-        verbose_name = "MAC Address"
-        verbose_name_plural = "MAC Addresses"
-    
-    def __str__(self):
-        return f"{self.address} ({self.get_status_display()})"
-    
-    def clean(self):
-        """Validate MAC address format."""
-        if self.address:
-            # Normalize MAC address format
-            self.address = self.normalize_mac_address(self.address)
-            
-            # Validate format
-            if not self.is_valid_mac_format(self.address):
-                raise ValidationError(f"Invalid MAC address format: {self.address}")
-    
-    @staticmethod
-    def normalize_mac_address(mac):
-        """Normalize MAC address to standard format (XX:XX:XX:XX:XX:XX)."""
-        if not mac:
-            return mac
-        
-        # Remove all separators and convert to uppercase
-        clean_mac = re.sub(r'[:-]', '', mac.strip().upper())
-        
-        # Validate length
-        if len(clean_mac) != 12:
-            return mac  # Return original if invalid length
-        
-        # Add colons every 2 characters
-        return ':'.join(clean_mac[i:i+2] for i in range(0, 12, 2))
-    
-    @staticmethod
-    def is_valid_mac_format(mac):
-        """Validate MAC address format."""
-        if not mac:
-            return False
-        
-        # Check standard format XX:XX:XX:XX:XX:XX
-        pattern = r'^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-        return bool(re.match(pattern, mac))
-    
-    def save(self, *args, **kwargs):
-        """Override save to normalize MAC address."""
-        self.full_clean()  # This will call clean() method
-        super().save(*args, **kwargs)

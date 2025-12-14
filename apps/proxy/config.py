@@ -8,11 +8,11 @@ class BaseConfig:
     CLIENT_POLL_INTERVAL = 0.1
     MAX_RETRIES = 2
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
-    CONNECTION_TIMEOUT = 4  # seconds to wait for initial connection
+    CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
-    BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams (original patch value)
-    BUFFER_SPEED = 1.0 # What speed to consider the stream buffering, 1.0x matches original patch
+    BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
+    BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
 
     # Cache for proxy settings (class-level, shared across all instances)
     _proxy_settings_cache = None
@@ -105,7 +105,7 @@ class TSConfig(BaseConfig):
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
-    URL_SWITCH_TIMEOUT = 20   # Max time allowed for a stream switch operation
+    URL_SWITCH_TIMEOUT = 4   # Max time allowed for a stream switch operation
 
 
 
@@ -150,6 +150,5 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
-
 
 

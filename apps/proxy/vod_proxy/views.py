@@ -856,7 +856,7 @@ class VODStatsView(View):
                                         'tmdb_id': content_obj.tmdb_id,
                                         'imdb_id': content_obj.imdb_id
                                     }
-                            except Exception:
+                            except:
                                 pass
 
                             # Get M3U profile information
@@ -955,7 +955,7 @@ class VODStatsView(View):
                                     duration = current_time - connected_time
                                     connection_info['duration'] = int(duration)
                                     duration_calculated = True
-                                except (ValueError, TypeError):
+                                except:
                                     pass
 
                             # Fallback: use last_activity if connected_at is not available
@@ -971,7 +971,7 @@ class VODStatsView(View):
                                             duration = current_time - client_start_time
                                             connection_info['duration'] = int(duration)
                                             duration_calculated = True
-                                except (ValueError, TypeError, IndexError):
+                                except:
                                     pass
 
                             # Final fallback

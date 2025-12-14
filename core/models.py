@@ -163,7 +163,6 @@ DVR_COMSKIP_CUSTOM_PATH_KEY = slugify("DVR Comskip Custom Path")
 DVR_PRE_OFFSET_MINUTES_KEY = slugify("DVR Pre-Offset Minutes")
 DVR_POST_OFFSET_MINUTES_KEY = slugify("DVR Post-Offset Minutes")
 SYSTEM_TIME_ZONE_KEY = slugify("System Time Zone")
-PREDICTIVE_FAILOVER_SETTINGS_KEY = slugify("Predictive Failover Settings")
 
 
 class CoreSettings(models.Model):
@@ -174,8 +173,8 @@ class CoreSettings(models.Model):
     name = models.CharField(
         max_length=255,
     )
-    value = models.TextField(
-        help_text="Setting value. Can store JSON for complex settings.",
+    value = models.CharField(
+        max_length=255,
     )
 
     def __str__(self):
@@ -376,119 +375,6 @@ class CoreSettings(models.Model):
             return rules
         except Exception:
             return rules
-
-    @classmethod
-    def get_predictive_failover_settings(cls):
-        """
-        Retrieve predictive failover settings as dict.
-        Returns default configuration if not found or invalid.
-        """
-        import json
-        try:
-            settings_json = cls.objects.get(key=PREDICTIVE_FAILOVER_SETTINGS_KEY).value
-            return json.loads(settings_json)
-        except (cls.DoesNotExist, json.JSONDecodeError):
-            # Return defaults if not found or invalid JSON
-            return cls._get_default_predictive_failover_settings()
-
-    @classmethod
-    def set_predictive_failover_settings(cls, settings_dict: dict) -> bool:
-        """
-        Save predictive failover settings.
-        
-        Args:
-            settings_dict: Dictionary with predictive failover configuration
-            
-        Returns:
-            True if saved successfully, False otherwise
-        """
-        import json
-        try:
-            settings_json = json.dumps(settings_dict)
-            obj, created = cls.objects.update_or_create(
-                key=PREDICTIVE_FAILOVER_SETTINGS_KEY,
-                defaults={
-                    "name": "Predictive Failover Settings",
-                    "value": settings_json,
-                }
-            )
-            return True
-        except Exception:
-            return False
-
-    @classmethod
-    def _get_default_predictive_failover_settings(cls) -> dict:
-        """
-        Return default predictive failover settings.
-        Master switch is OFF by default to preserve existing behavior.
-        """
-        return {
-            # Main Settings - Master switch OFF by default
-            "enabled": False,
-            "warmup_threshold": 60,
-            "failover_threshold": 85,
-            "metrics_interval": 3,
-            "cooldown_period": 30,
-            # Learning Settings
-            "pattern_learning_enabled": True,
-            "pattern_confidence_threshold": 60,
-            "time_pattern_enabled": True,
-            "correlation_analysis_enabled": True,
-            "auto_tune_enabled": False,
-            "learning_rate": "normal",
-            # Metric Weights
-            "response_time_warning": 200,
-            "response_time_critical": 400,
-            "response_time_warning_weight": 15,
-            "response_time_critical_weight": 20,
-            "buffer_underrun_weight": 30,
-            "bitrate_variance_threshold": 25,
-            "bitrate_variance_weight": 15,
-            "trend_detection_enabled": True,
-            "connection_reset_weight": 20,
-            "trend_weight": 10,
-            "bitrate_drop_weight": 25,
-            # Pattern Matching Weights
-            "pattern_max_weight": 40,
-            "pattern_confidence_factor": 0.4,
-            "time_window_weight": 15,
-            "correlation_weight": 20,
-            # Optional Modules
-            "quality_monitoring_enabled": False,
-            "peak_time_awareness_enabled": False,
-            "graceful_degradation_enabled": False,
-            "provider_ranking_enabled": True,
-            # Peak Time Settings
-            "peak_time_start": "19:00",
-            "peak_time_end": "23:00",
-            "peak_days": [4, 5, 6],
-            "peak_threshold_factor": 0.9,
-            # MAC Portal Specific
-            "mac_token_expiry_warning_weight": 40,
-            "mac_token_expiry_critical_weight": 60,
-            "mac_portal_slow_weight": 15,
-            "mac_portal_very_slow_weight": 30,
-            # QoS Settings
-            "video_freeze_weight": 35,
-            "black_frame_weight": 25,
-            "low_bitrate_weight": 20,
-            # Resource Management
-            "max_memory_per_stream_kb": 500,
-            "high_load_metrics_interval": 5,
-            "very_high_load_metrics_interval": 10,
-        }
-
-    @classmethod
-    def reset_predictive_failover_settings(cls) -> dict:
-        """
-        Reset predictive failover settings to defaults.
-        
-        Returns:
-            Default settings dictionary
-        """
-        defaults = cls._get_default_predictive_failover_settings()
-        cls.set_predictive_failover_settings(defaults)
-        return defaults
 
 
 class SystemEvent(models.Model):

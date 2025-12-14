@@ -31,7 +31,7 @@ class MyWebSocketConsumer(AsyncWebsocketConsumer):
             # If an error occurs during connection, attempt to close
             try:
                 await self.close(code=1011)  # Internal server error
-            except Exception:
+            except:
                 pass
 
     async def disconnect(self, close_code):

@@ -48,8 +48,8 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
                 cidrs = val.split(",")
                 for cidr in cidrs:
                     try:
-                        ipaddress.ip_network(cidr, strict=False)
-                    except (ValueError, TypeError):
+                        ipaddress.ip_network(cidr)
+                    except:
                         errors = True
                         if key not in invalid:
                             invalid[key] = []

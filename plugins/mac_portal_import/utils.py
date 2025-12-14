@@ -278,18 +278,12 @@ class StreamLinkGenerator:
         if not cmd:
             return None
         
-        # FFmpeg-Prefix entfernen (case-insensitive)
-        cmd_lower = cmd.lower()
-        if 'ffmpeg' in cmd_lower:
-            # Format: "ffmpeg http://..." or "FFMPEG http://..."
-            # Find the position of 'ffmpeg' case-insensitively
-            ffmpeg_pos = cmd_lower.find('ffmpeg')
-            if ffmpeg_pos != -1:
-                # Skip 'ffmpeg' and any following whitespace
-                url_start = ffmpeg_pos + len('ffmpeg')
-                url_part = cmd[url_start:].strip()
-                if url_part:
-                    return url_part
+        # FFmpeg-Prefix entfernen
+        if 'ffmpeg' in cmd.lower():
+            # Format: "ffmpeg http://..."
+            parts = cmd.split('ffmpeg ')
+            if len(parts) > 1:
+                return parts[-1].strip()
         
         # Direkte URL
         if cmd.strip().startswith('http'):

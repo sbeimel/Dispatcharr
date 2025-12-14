@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\capture.py
-# hypothesis_version: 6.148.7
-
-[', ', '--capture', '-s', '<UNSET>', 'CaptureFixture[Any]', 'CaptureResult', 'Captured stderr', 'Captured stdout', 'DontReadFromInput', 'UTF-8', '_CaptureMethod', '_old', 'b', 'buffer', 'call', 'capture', 'capturemanager', 'done', 'err', 'fd', 'fixture %s', 'general', 'global', 'initialized', 'method', 'no', 'out', 'pypy_version_info', 'raw', 'rb', 'replace', 'resume', 'setup', 'snap', 'start', 'started', 'stderr', 'stdin', 'stdout', 'stopped', 'store', 'store_const', 'suspend', 'suspended', 'sys', 'teardown', 'tee-sys', 'utf-8', 'w', 'was already stopped', 'wb', 'win32', 'writeorg']

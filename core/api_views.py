@@ -130,7 +130,7 @@ class CoreSettingsViewSet(viewsets.ModelViewSet):
                             break
 
                         in_network[key].append(cidr)
-                    except (ValueError, TypeError):
+                    except:
                         invalid.append(cidr)
 
             if len(invalid) > 0:

@@ -15,7 +15,6 @@ import {
   LogOut,
   User,
   FileImage,
-  FlaskConical,
 } from 'lucide-react';
 import {
   Avatar,
@@ -123,11 +122,6 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
             label: 'Logo Manager',
             icon: <FileImage size={20} />,
             path: '/logos',
-          },
-          {
-            label: 'Failover Test',
-            icon: <FlaskConical size={20} />,
-            path: '/failover-test',
           },
           {
             label: 'Settings',
