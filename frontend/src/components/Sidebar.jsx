@@ -16,6 +16,8 @@ import {
   User,
   FileImage,
   FlaskConical,
+  Router,
+  BrainCircuit,
 } from 'lucide-react';
 import {
   Avatar,
@@ -128,6 +130,16 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
             label: 'Failover Test',
             icon: <FlaskConical size={20} />,
             path: '/failover-test',
+          },
+          {
+            label: 'MAC Portal',
+            icon: <Router size={20} />,
+            path: '/mac-portal',
+          },
+          {
+            label: 'Predictive Failover',
+            icon: <BrainCircuit size={20} />,
+            path: '/predictive-failover',
           },
           {
             label: 'Settings',
