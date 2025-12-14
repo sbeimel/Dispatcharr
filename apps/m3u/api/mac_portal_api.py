@@ -741,3 +741,45 @@ def get_mac_portal_urls():
     router.register(r'mac-portal/logs', DebugLogsViewSet, basename='mac-portal-logs')
     
     return router.urls
+
+
+def get_mac_management_urls():
+    """Get URL patterns for MAC Management API."""
+    from rest_framework.routers import DefaultRouter
+    
+    router = DefaultRouter()
+    
+    # Register nested viewsets for account-specific MAC operations
+    # These will create URLs like: /api/m3u-accounts/{account_id}/macs/health/
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/macs/health',
+        MACHealthViewSet,
+        basename='mac-health'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/macs/batch',
+        MACBatchOperationsViewSet,
+        basename='mac-batch'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/macs/import-export',
+        MACImportExportViewSet,
+        basename='mac-import-export'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/connection-test',
+        ConnectionTestViewSet,
+        basename='connection-test'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/failover-stats',
+        FailoverStatisticsViewSet,
+        basename='failover-stats'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/vod-series',
+        VODSeriesAPIViewSet,
+        basename='vod-series'
+    )
+    
+    return router.urls
