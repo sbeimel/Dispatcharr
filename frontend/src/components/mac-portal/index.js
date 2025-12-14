@@ -45,5 +45,8 @@ export { default as StreamValidationStatus } from './StreamValidationStatus';
 // OB2_2025 Components
 export { default as OB2_2025Toggle } from './OB2_2025Toggle';
 
+// Overview Component
+export { default as MACPortalOverview } from './MACPortalOverview';
+
 // Hooks
 export { useMACPortalWebSocket } from './hooks';

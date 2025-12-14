@@ -29,6 +29,8 @@
     "formik": "^2.4.6",
     "hls.js": "^1.5.20",
     "lucide-react": "^0.511.0",
+    "@tabler/icons-react": "^3.24.0",
+    "@hello-pangea/dnd": "^17.0.0",
     "mpegts.js": "^1.8.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

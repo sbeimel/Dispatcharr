@@ -10,43 +10,34 @@ import React, { useState, useEffect } from 'react';
 import {
   Box,
   Card,
-  CardContent,
-  Typography,
+  Text,
+  Title,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Paper,
-  IconButton,
-  Chip,
+  ActionIcon,
+  Badge,
   Button,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
+  Modal,
   Slider,
   Alert,
-  Snackbar,
   Tooltip,
   Switch,
-  FormControlLabel,
-} from '@mui/material';
+  Group,
+  Stack,
+} from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import {
-  Delete as DeleteIcon,
-  ThumbDown as ThumbDownIcon,
-  CheckCircle as CheckCircleIcon,
-  Refresh as RefreshIcon,
-  CleaningServices as CleanupIcon,
-} from '@mui/icons-material';
+  IconTrash,
+  IconThumbDown,
+  IconCircleCheck,
+  IconRefresh,
+  IconBroom,
+} from '@tabler/icons-react';
 import API from '../../api';
 
 const PatternManagement = () => {
   const [patterns, setPatterns] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [success, setSuccess] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState({ open: false, pattern: null });
   const [confidenceDialog, setConfidenceDialog] = useState({ open: false, pattern: null, value: 50 });
 
@@ -60,7 +51,7 @@ const PatternManagement = () => {
       const response = await API.get('/api/predictive-failover/patterns/');
       setPatterns(response.data);
     } catch (err) {
-      setError('Failed to load patterns');
+      notifications.show({ title: 'Error', message: 'Failed to load patterns', color: 'red' });
       console.error(err);
     } finally {
       setLoading(false);
@@ -70,10 +61,10 @@ const PatternManagement = () => {
   const markFalsePositive = async (pattern) => {
     try {
       await API.post(`/api/predictive-failover/patterns/${pattern.id}/mark_false_positive/`);
-      setSuccess('Pattern marked as false positive');
+      notifications.show({ title: 'Success', message: 'Pattern marked as false positive', color: 'green' });
       loadPatterns();
     } catch (err) {
-      setError('Failed to mark pattern');
+      notifications.show({ title: 'Error', message: 'Failed to mark pattern', color: 'red' });
       console.error(err);
     }
   };
@@ -81,10 +72,10 @@ const PatternManagement = () => {
   const markConfirmed = async (pattern) => {
     try {
       await API.post(`/api/predictive-failover/patterns/${pattern.id}/mark_confirmed/`);
-      setSuccess('Pattern marked as confirmed');
+      notifications.show({ title: 'Success', message: 'Pattern marked as confirmed', color: 'green' });
       loadPatterns();
     } catch (err) {
-      setError('Failed to confirm pattern');
+      notifications.show({ title: 'Error', message: 'Failed to confirm pattern', color: 'red' });
       console.error(err);
     }
   };
@@ -92,10 +83,10 @@ const PatternManagement = () => {
   const toggleStatus = async (pattern) => {
     try {
       await API.post(`/api/predictive-failover/patterns/${pattern.id}/toggle_status/`);
-      setSuccess('Pattern status toggled');
+      notifications.show({ title: 'Success', message: 'Pattern status toggled', color: 'green' });
       loadPatterns();
     } catch (err) {
-      setError('Failed to toggle pattern status');
+      notifications.show({ title: 'Error', message: 'Failed to toggle pattern status', color: 'red' });
       console.error(err);
     }
   };
@@ -104,11 +95,11 @@ const PatternManagement = () => {
     if (!deleteDialog.pattern) return;
     try {
       await API.delete(`/api/predictive-failover/patterns/${deleteDialog.pattern.id}/`);
-      setSuccess('Pattern deleted');
+      notifications.show({ title: 'Success', message: 'Pattern deleted', color: 'green' });
       setDeleteDialog({ open: false, pattern: null });
       loadPatterns();
     } catch (err) {
-      setError('Failed to delete pattern');
+      notifications.show({ title: 'Error', message: 'Failed to delete pattern', color: 'red' });
       console.error(err);
     }
   };
@@ -119,11 +110,11 @@ const PatternManagement = () => {
       await API.patch(`/api/predictive-failover/patterns/${confidenceDialog.pattern.id}/`, {
         confidence: confidenceDialog.value
       });
-      setSuccess('Confidence updated');
+      notifications.show({ title: 'Success', message: 'Confidence updated', color: 'green' });
       setConfidenceDialog({ open: false, pattern: null, value: 50 });
       loadPatterns();
     } catch (err) {
-      setError('Failed to update confidence');
+      notifications.show({ title: 'Error', message: 'Failed to update confidence', color: 'red' });
       console.error(err);
     }
   };
@@ -131,21 +122,21 @@ const PatternManagement = () => {
   const cleanupPatterns = async () => {
     try {
       const response = await API.post('/api/predictive-failover/patterns/cleanup/', { threshold: 30 });
-      setSuccess(`Cleaned up ${response.data.deleted} low-confidence patterns`);
+      notifications.show({ title: 'Success', message: `Cleaned up ${response.data.deleted} low-confidence patterns`, color: 'green' });
       loadPatterns();
     } catch (err) {
-      setError('Failed to cleanup patterns');
+      notifications.show({ title: 'Error', message: 'Failed to cleanup patterns', color: 'red' });
       console.error(err);
     }
   };
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'active': return 'success';
-      case 'confirmed': return 'info';
-      case 'disabled': return 'default';
-      case 'false_positive': return 'error';
-      default: return 'default';
+      case 'active': return 'green';
+      case 'confirmed': return 'blue';
+      case 'disabled': return 'gray';
+      case 'false_positive': return 'red';
+      default: return 'gray';
     }
   };
 
@@ -163,153 +154,155 @@ const PatternManagement = () => {
   };
 
   return (
-    <Box sx={{ p: 2 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-        <Typography variant="h5">Failure Patterns</Typography>
-        <Box>
+    <Box p="md">
+      <Group justify="space-between" mb="md">
+        <Title order={4}>Failure Patterns</Title>
+        <Group>
           <Button
-            startIcon={<CleanupIcon />}
+            variant="outline"
+            leftSection={<IconBroom size={16} />}
             onClick={cleanupPatterns}
-            sx={{ mr: 1 }}
           >
             Cleanup Low Confidence
           </Button>
-          <IconButton onClick={loadPatterns}>
-            <RefreshIcon />
-          </IconButton>
-        </Box>
-      </Box>
+          <ActionIcon variant="subtle" onClick={loadPatterns}>
+            <IconRefresh size={18} />
+          </ActionIcon>
+        </Group>
+      </Group>
 
-      <TableContainer component={Paper}>
-        <Table>
-          <TableHead>
-            <TableRow>
-              <TableCell>Name</TableCell>
-              <TableCell>Type</TableCell>
-              <TableCell>Confidence</TableCell>
-              <TableCell>Hits</TableCell>
-              <TableCell>Success Rate</TableCell>
-              <TableCell>Status</TableCell>
-              <TableCell>Actions</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
+      <Paper withBorder>
+        <Table striped highlightOnHover>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Name</Table.Th>
+              <Table.Th>Type</Table.Th>
+              <Table.Th>Confidence</Table.Th>
+              <Table.Th>Hits</Table.Th>
+              <Table.Th>Success Rate</Table.Th>
+              <Table.Th>Status</Table.Th>
+              <Table.Th>Actions</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
             {patterns.map((pattern) => (
-              <TableRow key={pattern.id}>
-                <TableCell>{pattern.name}</TableCell>
-                <TableCell>
-                  <Chip label={getTypeLabel(pattern.pattern_type)} size="small" variant="outlined" />
-                </TableCell>
-                <TableCell>
+              <Table.Tr key={pattern.id}>
+                <Table.Td>{pattern.name}</Table.Td>
+                <Table.Td>
+                  <Badge variant="outline" size="sm">{getTypeLabel(pattern.pattern_type)}</Badge>
+                </Table.Td>
+                <Table.Td>
                   <Button
-                    size="small"
+                    variant="subtle"
+                    size="xs"
                     onClick={() => setConfidenceDialog({ open: true, pattern, value: pattern.confidence })}
                   >
                     {pattern.confidence}%
                   </Button>
-                </TableCell>
-                <TableCell>{pattern.hit_count}</TableCell>
-                <TableCell>{pattern.success_rate?.toFixed(1) || 0}%</TableCell>
-                <TableCell>
-                  <Chip
-                    label={pattern.status}
-                    color={getStatusColor(pattern.status)}
-                    size="small"
-                  />
-                </TableCell>
-                <TableCell>
-                  <Tooltip title="Toggle Active/Disabled">
-                    <IconButton
-                      size="small"
-                      onClick={() => toggleStatus(pattern)}
-                      disabled={pattern.status === 'false_positive'}
-                    >
+                </Table.Td>
+                <Table.Td>{pattern.hit_count}</Table.Td>
+                <Table.Td>{pattern.success_rate?.toFixed(1) || 0}%</Table.Td>
+                <Table.Td>
+                  <Badge color={getStatusColor(pattern.status)} size="sm">
+                    {pattern.status}
+                  </Badge>
+                </Table.Td>
+                <Table.Td>
+                  <Group gap={4}>
+                    <Tooltip label="Toggle Active/Disabled">
                       <Switch
+                        size="xs"
                         checked={pattern.status === 'active' || pattern.status === 'confirmed'}
-                        size="small"
+                        onChange={() => toggleStatus(pattern)}
+                        disabled={pattern.status === 'false_positive'}
                       />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Mark as False Positive">
-                    <IconButton
-                      size="small"
-                      onClick={() => markFalsePositive(pattern)}
-                      color="warning"
-                    >
-                      <ThumbDownIcon />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Mark as Confirmed">
-                    <IconButton
-                      size="small"
-                      onClick={() => markConfirmed(pattern)}
-                      color="success"
-                    >
-                      <CheckCircleIcon />
-                    </IconButton>
-                  </Tooltip>
-                  <Tooltip title="Delete">
-                    <IconButton
-                      size="small"
-                      onClick={() => setDeleteDialog({ open: true, pattern })}
-                      color="error"
-                    >
-                      <DeleteIcon />
-                    </IconButton>
-                  </Tooltip>
-                </TableCell>
-              </TableRow>
+                    </Tooltip>
+                    <Tooltip label="Mark as False Positive">
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="yellow"
+                        onClick={() => markFalsePositive(pattern)}
+                      >
+                        <IconThumbDown size={14} />
+                      </ActionIcon>
+                    </Tooltip>
+                    <Tooltip label="Mark as Confirmed">
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="green"
+                        onClick={() => markConfirmed(pattern)}
+                      >
+                        <IconCircleCheck size={14} />
+                      </ActionIcon>
+                    </Tooltip>
+                    <Tooltip label="Delete">
+                      <ActionIcon
+                        size="sm"
+                        variant="subtle"
+                        color="red"
+                        onClick={() => setDeleteDialog({ open: true, pattern })}
+                      >
+                        <IconTrash size={14} />
+                      </ActionIcon>
+                    </Tooltip>
+                  </Group>
+                </Table.Td>
+              </Table.Tr>
             ))}
             {patterns.length === 0 && (
-              <TableRow>
-                <TableCell colSpan={7} align="center">
-                  No patterns found
-                </TableCell>
-              </TableRow>
+              <Table.Tr>
+                <Table.Td colSpan={7}>
+                  <Text ta="center" c="dimmed">No patterns found</Text>
+                </Table.Td>
+              </Table.Tr>
             )}
-          </TableBody>
+          </Table.Tbody>
         </Table>
-      </TableContainer>
+      </Paper>
 
       {/* Delete Confirmation Dialog */}
-      <Dialog open={deleteDialog.open} onClose={() => setDeleteDialog({ open: false, pattern: null })}>
-        <DialogTitle>Delete Pattern</DialogTitle>
-        <DialogContent>
+      <Modal
+        opened={deleteDialog.open}
+        onClose={() => setDeleteDialog({ open: false, pattern: null })}
+        title="Delete Pattern"
+      >
+        <Text mb="md">
           Are you sure you want to delete pattern "{deleteDialog.pattern?.name}"?
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteDialog({ open: false, pattern: null })}>Cancel</Button>
-          <Button onClick={deletePattern} color="error">Delete</Button>
-        </DialogActions>
-      </Dialog>
+        </Text>
+        <Group justify="flex-end">
+          <Button variant="outline" onClick={() => setDeleteDialog({ open: false, pattern: null })}>
+            Cancel
+          </Button>
+          <Button color="red" onClick={deletePattern}>
+            Delete
+          </Button>
+        </Group>
+      </Modal>
 
       {/* Confidence Adjustment Dialog */}
-      <Dialog open={confidenceDialog.open} onClose={() => setConfidenceDialog({ open: false, pattern: null, value: 50 })}>
-        <DialogTitle>Adjust Confidence</DialogTitle>
-        <DialogContent sx={{ minWidth: 300, pt: 2 }}>
-          <Typography gutterBottom>
-            Confidence: {confidenceDialog.value}%
-          </Typography>
+      <Modal
+        opened={confidenceDialog.open}
+        onClose={() => setConfidenceDialog({ open: false, pattern: null, value: 50 })}
+        title="Adjust Confidence"
+      >
+        <Stack>
+          <Text size="sm">Confidence: {confidenceDialog.value}%</Text>
           <Slider
             value={confidenceDialog.value}
-            onChange={(e, v) => setConfidenceDialog(prev => ({ ...prev, value: v }))}
+            onChange={(v) => setConfidenceDialog(prev => ({ ...prev, value: v }))}
             min={0}
             max={100}
           />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfidenceDialog({ open: false, pattern: null, value: 50 })}>Cancel</Button>
-          <Button onClick={updateConfidence} variant="contained">Save</Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Notifications */}
-      <Snackbar open={!!success} autoHideDuration={3000} onClose={() => setSuccess(null)}>
-        <Alert severity="success">{success}</Alert>
-      </Snackbar>
-      <Snackbar open={!!error} autoHideDuration={5000} onClose={() => setError(null)}>
-        <Alert severity="error">{error}</Alert>
-      </Snackbar>
+          <Group justify="flex-end" mt="md">
+            <Button variant="outline" onClick={() => setConfidenceDialog({ open: false, pattern: null, value: 50 })}>
+              Cancel
+            </Button>
+            <Button onClick={updateConfidence}>Save</Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Box>
   );
 };

@@ -13,38 +13,37 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Card,
-  CardContent,
-  Typography,
+  Text,
+  Title,
   Grid,
-  Chip,
-  LinearProgress,
-  IconButton,
+  Badge,
+  Progress,
+  ActionIcon,
   Tooltip,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Paper,
   Collapse,
   Alert,
   Button,
-  CircularProgress,
-  Badge,
-} from '@mui/material';
+  Loader,
+  Group,
+  Stack,
+  SimpleGrid,
+  ThemeIcon,
+} from '@mantine/core';
+import { notifications } from '@mantine/notifications';
 import {
-  Refresh as RefreshIcon,
-  ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon,
-  CheckCircle as OnlineIcon,
-  Cancel as OfflineIcon,
-  Warning as WarningIcon,
-  AccessTime as TimeIcon,
-  Speed as SpeedIcon,
-  Tv as StreamIcon,
-  HealthAndSafety as HealthIcon,
-} from '@mui/icons-material';
+  IconRefresh,
+  IconChevronDown,
+  IconChevronUp,
+  IconCircleCheck,
+  IconCircleX,
+  IconAlertTriangle,
+  IconClock,
+  IconActivity,
+  IconDeviceTv,
+  IconHeartbeat,
+} from '@tabler/icons-react';
 
 // API Base URL
 const API_BASE = '/api/mac-portal';
@@ -54,23 +53,20 @@ const API_BASE = '/api/mac-portal';
  */
 const StatusBadge = ({ status }) => {
   const statusConfig = {
-    active: { color: 'success', label: 'Available' },
-    in_use: { color: 'info', label: 'In Use' },
-    cooldown: { color: 'warning', label: 'Cooldown' },
-    expired: { color: 'error', label: 'Expired' },
-    blocked: { color: 'error', label: 'Blocked' },
-    unknown: { color: 'default', label: 'Unknown' },
+    active: { color: 'green', label: 'Available' },
+    in_use: { color: 'blue', label: 'In Use' },
+    cooldown: { color: 'yellow', label: 'Cooldown' },
+    expired: { color: 'red', label: 'Expired' },
+    blocked: { color: 'red', label: 'Blocked' },
+    unknown: { color: 'gray', label: 'Unknown' },
   };
 
   const config = statusConfig[status] || statusConfig.unknown;
 
   return (
-    <Chip
-      size="small"
-      label={config.label}
-      color={config.color}
-      variant="outlined"
-    />
+    <Badge size="sm" color={config.color} variant="outline">
+      {config.label}
+    </Badge>
   );
 };
 
@@ -79,23 +75,24 @@ const StatusBadge = ({ status }) => {
  */
 const HealthScore = ({ score }) => {
   const getColor = (s) => {
-    if (s >= 80) return 'success';
-    if (s >= 50) return 'warning';
-    return 'error';
+    if (s >= 80) return 'green';
+    if (s >= 50) return 'yellow';
+    return 'red';
   };
 
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-      <LinearProgress
-        variant="determinate"
+    <Group gap="xs">
+      <Progress
         value={score}
         color={getColor(score)}
-        sx={{ width: 60, height: 8, borderRadius: 4 }}
+        size="sm"
+        w={60}
+        radius="xl"
       />
-      <Typography variant="body2" color="text.secondary">
+      <Text size="sm" c="dimmed">
         {score}%
-      </Typography>
-    </Box>
+      </Text>
+    </Group>
   );
 };
 
@@ -104,13 +101,13 @@ const HealthScore = ({ score }) => {
  */
 const ExpiryCountdown = ({ days }) => {
   if (days === null || days === undefined) {
-    return <Typography variant="body2" color="text.secondary">-</Typography>;
+    return <Text size="sm" c="dimmed">-</Text>;
   }
 
   const getColor = () => {
-    if (days <= 0) return 'error';
-    if (days <= 7) return 'warning';
-    return 'success';
+    if (days <= 0) return 'red';
+    if (days <= 7) return 'yellow';
+    return 'green';
   };
 
   const getText = () => {
@@ -120,13 +117,9 @@ const ExpiryCountdown = ({ days }) => {
   };
 
   return (
-    <Chip
-      size="small"
-      label={getText()}
-      color={getColor()}
-      variant="outlined"
-      icon={<TimeIcon />}
-    />
+    <Badge size="sm" color={getColor()} variant="outline" leftSection={<IconClock size={12} />}>
+      {getText()}
+    </Badge>
   );
 };
 
@@ -139,108 +132,95 @@ const PortalCard = ({ portal, onRefresh }) => {
   const isOnline = portal.status === 'online';
 
   return (
-    <Card sx={{ mb: 2 }}>
-      <CardContent>
-        {/* Header */}
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            {isOnline ? (
-              <OnlineIcon color="success" />
-            ) : (
-              <OfflineIcon color="error" />
-            )}
-            <Typography variant="h6">{portal.name}</Typography>
-            <Chip
-              size="small"
-              label={portal.type || 'Unknown'}
-              variant="outlined"
-            />
-          </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Badge badgeContent={portal.available_count} color="success">
-              <Chip
-                label={`${portal.mac_count} MACs`}
-                size="small"
-              />
-            </Badge>
-            <IconButton size="small" onClick={() => setExpanded(!expanded)}>
-              {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-            </IconButton>
-          </Box>
-        </Box>
+    <Card shadow="sm" p="md" mb="md" withBorder>
+      {/* Header */}
+      <Group justify="space-between" mb="sm">
+        <Group gap="sm">
+          <ThemeIcon color={isOnline ? 'green' : 'red'} variant="light" size="sm">
+            {isOnline ? <IconCircleCheck size={16} /> : <IconCircleX size={16} />}
+          </ThemeIcon>
+          <Title order={5}>{portal.name}</Title>
+          <Badge size="sm" variant="outline">
+            {portal.type || 'Unknown'}
+          </Badge>
+        </Group>
+        <Group gap="xs">
+          <Badge color="green" variant="light">
+            {portal.available_count} / {portal.mac_count} MACs
+          </Badge>
+          <ActionIcon variant="subtle" onClick={() => setExpanded(!expanded)}>
+            {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
+          </ActionIcon>
+        </Group>
+      </Group>
 
-        {/* URL */}
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          {portal.url}
-        </Typography>
+      {/* URL */}
+      <Text size="sm" c="dimmed" mb="sm">
+        {portal.url}
+      </Text>
 
-        {/* MAC Liste (expandierbar) */}
-        <Collapse in={expanded}>
-          <TableContainer component={Paper} variant="outlined" sx={{ mt: 2 }}>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>MAC Address</TableCell>
-                  <TableCell>Status</TableCell>
-                  <TableCell>Health</TableCell>
-                  <TableCell>Expiry</TableCell>
-                  <TableCell>Streams</TableCell>
-                  <TableCell>Activity</TableCell>
-                  <TableCell>Watchdog</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {portal.macs.map((mac) => (
-                  <TableRow key={mac.id}>
-                    <TableCell>
-                      <Typography variant="body2" fontFamily="monospace">
-                        {mac.mac_address}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={mac.status} />
-                    </TableCell>
-                    <TableCell>
-                      <HealthScore score={mac.health_score} />
-                    </TableCell>
-                    <TableCell>
-                      <ExpiryCountdown days={mac.days_until_expiry} />
-                    </TableCell>
-                    <TableCell>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                        <StreamIcon fontSize="small" color="action" />
-                        <Typography variant="body2">
-                          {mac.current_streams}/{mac.max_connections}
-                        </Typography>
-                      </Box>
-                    </TableCell>
-                    <TableCell>
-                      {mac.activity_level !== null ? (
-                        <Chip
-                          size="small"
-                          label={`Level ${mac.activity_level}`}
-                          variant="outlined"
-                        />
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">-</Typography>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {mac.watchdog_timeout !== null ? (
-                        <Typography variant="body2">
-                          {mac.watchdog_timeout}s
-                        </Typography>
-                      ) : (
-                        <Typography variant="body2" color="text.secondary">-</Typography>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Collapse>
-      </CardContent>
+      {/* MAC Liste (expandierbar) */}
+      <Collapse in={expanded}>
+        <Paper withBorder mt="sm">
+          <Table striped highlightOnHover>
+            <Table.Thead>
+              <Table.Tr>
+                <Table.Th>MAC Address</Table.Th>
+                <Table.Th>Status</Table.Th>
+                <Table.Th>Health</Table.Th>
+                <Table.Th>Expiry</Table.Th>
+                <Table.Th>Streams</Table.Th>
+                <Table.Th>Activity</Table.Th>
+                <Table.Th>Watchdog</Table.Th>
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {portal.macs.map((mac) => (
+                <Table.Tr key={mac.id}>
+                  <Table.Td>
+                    <Text size="sm" ff="monospace">
+                      {mac.mac_address}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>
+                    <StatusBadge status={mac.status} />
+                  </Table.Td>
+                  <Table.Td>
+                    <HealthScore score={mac.health_score} />
+                  </Table.Td>
+                  <Table.Td>
+                    <ExpiryCountdown days={mac.days_until_expiry} />
+                  </Table.Td>
+                  <Table.Td>
+                    <Group gap={4}>
+                      <IconDeviceTv size={14} />
+                      <Text size="sm">
+                        {mac.current_streams}/{mac.max_connections}
+                      </Text>
+                    </Group>
+                  </Table.Td>
+                  <Table.Td>
+                    {mac.activity_level !== null ? (
+                      <Badge size="sm" variant="outline">
+                        Level {mac.activity_level}
+                      </Badge>
+                    ) : (
+                      <Text size="sm" c="dimmed">-</Text>
+                    )}
+                  </Table.Td>
+                  <Table.Td>
+                    {mac.watchdog_timeout !== null ? (
+                      <Text size="sm">{mac.watchdog_timeout}s</Text>
+                    ) : (
+                      <Text size="sm" c="dimmed">-</Text>
+                    )}
+                  </Table.Td>
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Paper>
+      </Collapse>
     </Card>
   );
 };
@@ -248,28 +228,26 @@ const PortalCard = ({ portal, onRefresh }) => {
 /**
  * Statistik Card Komponente
  */
-const StatCard = ({ title, value, icon, color = 'primary', subtitle }) => (
-  <Card>
-    <CardContent>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <Box>
-          <Typography variant="body2" color="text.secondary">
-            {title}
-          </Typography>
-          <Typography variant="h4" color={`${color}.main`}>
-            {value}
-          </Typography>
-          {subtitle && (
-            <Typography variant="caption" color="text.secondary">
-              {subtitle}
-            </Typography>
-          )}
-        </Box>
-        <Box sx={{ color: `${color}.main` }}>
-          {icon}
-        </Box>
-      </Box>
-    </CardContent>
+const StatCard = ({ title, value, icon, color = 'blue', subtitle }) => (
+  <Card shadow="sm" p="md" withBorder>
+    <Group justify="space-between" align="flex-start">
+      <Stack gap={4}>
+        <Text size="sm" c="dimmed">
+          {title}
+        </Text>
+        <Title order={2} c={color}>
+          {value}
+        </Title>
+        {subtitle && (
+          <Text size="xs" c="dimmed">
+            {subtitle}
+          </Text>
+        )}
+      </Stack>
+      <ThemeIcon color={color} variant="light" size="lg">
+        {icon}
+      </ThemeIcon>
+    </Group>
   </Card>
 );
 
@@ -328,15 +306,15 @@ const MACPortalOverview = () => {
 
   if (loading && !data) {
     return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
-        <CircularProgress />
+      <Box p="xl" ta="center">
+        <Loader />
       </Box>
     );
   }
 
   if (error) {
     return (
-      <Alert severity="error" sx={{ m: 2 }}>
+      <Alert color="red" m="md">
         Error loading MAC portal overview: {error}
       </Alert>
     );
@@ -345,99 +323,73 @@ const MACPortalOverview = () => {
   const stats = data?.statistics || {};
   const portals = data?.portals || [];
 
+  const healthColor = stats.avg_health_score >= 80 ? 'green' : stats.avg_health_score >= 50 ? 'yellow' : 'red';
+
   return (
-    <Box sx={{ p: 3 }}>
+    <Box p="md">
       {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h5">MAC Portal Overview</Typography>
+      <Group justify="space-between" mb="md">
+        <Title order={3}>MAC Portal Overview</Title>
         <Button
-          variant="outlined"
-          startIcon={refreshing ? <CircularProgress size={20} /> : <RefreshIcon />}
+          variant="outline"
+          leftSection={refreshing ? <Loader size={16} /> : <IconRefresh size={16} />}
           onClick={handleRefresh}
           disabled={refreshing}
         >
           {refreshing ? 'Refreshing...' : 'Refresh Status'}
         </Button>
-      </Box>
+      </Group>
 
       {/* Statistiken */}
-      <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Total Portals"
-            value={stats.total_portals || 0}
-            icon={<SpeedIcon fontSize="large" />}
-            color="primary"
-            subtitle={`${stats.online_portals || 0} online`}
-          />
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Total MACs"
-            value={stats.total_macs || 0}
-            icon={<StreamIcon fontSize="large" />}
-            color="info"
-            subtitle={`${stats.available_macs || 0} available`}
-          />
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Avg Health Score"
-            value={`${stats.avg_health_score || 0}%`}
-            icon={<HealthIcon fontSize="large" />}
-            color={stats.avg_health_score >= 80 ? 'success' : stats.avg_health_score >= 50 ? 'warning' : 'error'}
-          />
-        </Grid>
-        <Grid item xs={12} sm={6} md={3}>
-          <StatCard
-            title="Failovers (24h)"
-            value={stats.total_failovers_24h || 0}
-            icon={<WarningIcon fontSize="large" />}
-            color="warning"
-            subtitle={`${stats.expiring_soon || 0} expiring soon`}
-          />
-        </Grid>
-      </Grid>
+      <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} mb="md">
+        <StatCard
+          title="Total Portals"
+          value={stats.total_portals || 0}
+          icon={<IconActivity size={20} />}
+          color="blue"
+          subtitle={`${stats.online_portals || 0} online`}
+        />
+        <StatCard
+          title="Total MACs"
+          value={stats.total_macs || 0}
+          icon={<IconDeviceTv size={20} />}
+          color="cyan"
+          subtitle={`${stats.available_macs || 0} available`}
+        />
+        <StatCard
+          title="Avg Health Score"
+          value={`${stats.avg_health_score || 0}%`}
+          icon={<IconHeartbeat size={20} />}
+          color={healthColor}
+        />
+        <StatCard
+          title="Failovers (24h)"
+          value={stats.total_failovers_24h || 0}
+          icon={<IconAlertTriangle size={20} />}
+          color="yellow"
+          subtitle={`${stats.expiring_soon || 0} expiring soon`}
+        />
+      </SimpleGrid>
 
       {/* Status Übersicht */}
-      <Grid container spacing={1} sx={{ mb: 3 }}>
-        <Grid item>
-          <Chip
-            icon={<OnlineIcon />}
-            label={`${stats.available_macs || 0} Available`}
-            color="success"
-            variant="outlined"
-          />
-        </Grid>
-        <Grid item>
-          <Chip
-            icon={<StreamIcon />}
-            label={`${stats.in_use_macs || 0} In Use`}
-            color="info"
-            variant="outlined"
-          />
-        </Grid>
-        <Grid item>
-          <Chip
-            icon={<TimeIcon />}
-            label={`${stats.cooldown_macs || 0} Cooldown`}
-            color="warning"
-            variant="outlined"
-          />
-        </Grid>
-        <Grid item>
-          <Chip
-            icon={<OfflineIcon />}
-            label={`${stats.expired_macs || 0} Expired`}
-            color="error"
-            variant="outlined"
-          />
-        </Grid>
-      </Grid>
+      <Group gap="xs" mb="md">
+        <Badge leftSection={<IconCircleCheck size={12} />} color="green" variant="outline">
+          {stats.available_macs || 0} Available
+        </Badge>
+        <Badge leftSection={<IconDeviceTv size={12} />} color="blue" variant="outline">
+          {stats.in_use_macs || 0} In Use
+        </Badge>
+        <Badge leftSection={<IconClock size={12} />} color="yellow" variant="outline">
+          {stats.cooldown_macs || 0} Cooldown
+        </Badge>
+        <Badge leftSection={<IconCircleX size={12} />} color="red" variant="outline">
+          {stats.expired_macs || 0} Expired
+        </Badge>
+      </Group>
 
       {/* Portal Liste */}
       {portals.length === 0 ? (
-        <Alert severity="info">
+        <Alert color="blue">
           No MAC portals configured. Add a MAC/STB portal account to see the overview.
         </Alert>
       ) : (

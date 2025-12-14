@@ -1,11 +1,7 @@
 /**
  * Provider Health Dashboard Component
  * 
- * Displays health scores for providers and MAC addresses:
- * - Portal overview with health scores
- * - MAC address list per portal
- * - Warnings for low health scores
- * - Recommendations for MAC replacement
+ * Displays health scores for providers and MAC addresses.
  * 
  * Requirements: 16.4, 16.5, 16.6, 16.7
  */
@@ -14,39 +10,34 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Card,
-  CardContent,
-  Typography,
+  Text,
+  Title,
   Grid,
-  LinearProgress,
-  Chip,
+  Progress,
+  Badge,
   Table,
-  TableBody,
-  TableCell,
-  TableContainer,
-  TableHead,
-  TableRow,
   Paper,
   Alert,
-  AlertTitle,
-  IconButton,
+  ActionIcon,
   Tooltip,
   Collapse,
   List,
-  ListItem,
-  ListItemText,
-  ListItemIcon,
   Divider,
-} from '@mui/material';
+  Group,
+  Stack,
+  ThemeIcon,
+  Loader,
+} from '@mantine/core';
 import {
-  ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon,
-  Warning as WarningIcon,
-  CheckCircle as CheckCircleIcon,
-  Error as ErrorIcon,
-  TrendingUp as TrendingUpIcon,
-  TrendingDown as TrendingDownIcon,
-  Refresh as RefreshIcon,
-} from '@mui/icons-material';
+  IconChevronDown,
+  IconChevronUp,
+  IconAlertTriangle,
+  IconCircleCheck,
+  IconCircleX,
+  IconTrendingUp,
+  IconTrendingDown,
+  IconRefresh,
+} from '@tabler/icons-react';
 import API from '../../api';
 
 const ProviderHealthDashboard = () => {
@@ -80,264 +71,179 @@ const ProviderHealthDashboard = () => {
   }, [fetchHealthData]);
 
   const getHealthColor = (score) => {
-    if (score >= 80) return 'success';
-    if (score >= 50) return 'warning';
-    return 'error';
+    if (score >= 80) return 'green';
+    if (score >= 50) return 'yellow';
+    return 'red';
   };
 
   const getHealthIcon = (score) => {
-    if (score >= 80) return <CheckCircleIcon color="success" />;
-    if (score >= 50) return <WarningIcon color="warning" />;
-    return <ErrorIcon color="error" />;
+    if (score >= 80) return <IconCircleCheck size={16} color="green" />;
+    if (score >= 50) return <IconAlertTriangle size={16} color="orange" />;
+    return <IconCircleX size={16} color="red" />;
   };
 
   const toggleProvider = (accountId) => {
-    setExpandedProviders(prev => ({
-      ...prev,
-      [accountId]: !prev[accountId]
-    }));
+    setExpandedProviders(prev => ({ ...prev, [accountId]: !prev[accountId] }));
   };
 
-  const formatResponseTime = (ms) => {
-    if (!ms) return '-';
-    return `${Math.round(ms)}ms`;
-  };
-
-  const formatUptime = (percent) => {
-    if (percent === undefined || percent === null) return '-';
-    return `${percent.toFixed(1)}%`;
-  };
+  const formatResponseTime = (ms) => ms ? `${Math.round(ms)}ms` : '-';
+  const formatUptime = (percent) => (percent !== undefined && percent !== null) ? `${percent.toFixed(1)}%` : '-';
 
   if (loading && Object.keys(healthData).length === 0) {
-    return (
-      <Box sx={{ p: 3 }}>
-        <LinearProgress />
-        <Typography sx={{ mt: 2 }}>Lade Health-Daten...</Typography>
-      </Box>
-    );
+    return <Box ta="center" py="xl"><Loader /><Text mt="md">Lade Health-Daten...</Text></Box>;
   }
 
   return (
-    <Box sx={{ p: 2 }}>
-      {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 3 }}>
-        <Typography variant="h5">Provider Health Dashboard</Typography>
-        <IconButton onClick={fetchHealthData} disabled={loading}>
-          <RefreshIcon />
-        </IconButton>
-      </Box>
+    <Box p="md">
+      <Group justify="space-between" mb="md">
+        <Title order={4}>Provider Health Dashboard</Title>
+        <ActionIcon variant="subtle" onClick={fetchHealthData} disabled={loading}>
+          <IconRefresh size={18} />
+        </ActionIcon>
+      </Group>
 
-      {error && (
-        <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
-      )}
+      {error && <Alert color="red" mb="md">{error}</Alert>}
 
-      {/* Problem MACs Warning */}
       {problemMacs.length > 0 && (
-        <Alert severity="warning" sx={{ mb: 3 }}>
-          <AlertTitle>Problematische MAC-Adressen</AlertTitle>
-          <Typography variant="body2">
-            {problemMacs.length} MAC-Adresse(n) mit niedrigem Health Score gefunden.
-            Erwägen Sie einen Austausch dieser MACs.
-          </Typography>
-          <List dense>
+        <Alert color="yellow" title="Problematische MAC-Adressen" mb="md">
+          <Text size="sm">{problemMacs.length} MAC-Adresse(n) mit niedrigem Health Score gefunden.</Text>
+          <List size="sm" mt="xs">
             {problemMacs.slice(0, 3).map((mac, idx) => (
-              <ListItem key={idx}>
-                <ListItemIcon>
-                  <ErrorIcon color="error" fontSize="small" />
-                </ListItemIcon>
-                <ListItemText
-                  primary={`${mac.mac_address?.substring(0, 12)}...`}
-                  secondary={`Score: ${mac.health_score}, Fehler: ${mac.failure_count}`}
-                />
-              </ListItem>
+              <List.Item key={idx} icon={<IconCircleX size={14} color="red" />}>
+                {mac.mac_address?.substring(0, 12)}... - Score: {mac.health_score}, Fehler: {mac.failure_count}
+              </List.Item>
             ))}
           </List>
         </Alert>
       )}
 
-      <Grid container spacing={3}>
-        {/* Provider Cards */}
-        <Grid item xs={12} md={8}>
-          <Typography variant="h6" gutterBottom>Provider Übersicht</Typography>
+      <Grid>
+        <Grid.Col span={{ base: 12, md: 8 }}>
+          <Title order={5} mb="sm">Provider Übersicht</Title>
           {Object.entries(healthData).map(([accountId, provider]) => (
-            <Card key={accountId} sx={{ mb: 2 }}>
-              <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    {getHealthIcon(provider.health_score?.score || 0)}
-                    <Box>
-                      <Typography variant="h6">
-                        {provider.account_name || `Provider ${accountId}`}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Account ID: {accountId}
-                      </Typography>
-                    </Box>
+            <Card key={accountId} shadow="sm" p="md" mb="md" withBorder>
+              <Group justify="space-between">
+                <Group>
+                  {getHealthIcon(provider.health_score?.score || 0)}
+                  <Box>
+                    <Text fw={500}>{provider.account_name || `Provider ${accountId}`}</Text>
+                    <Text size="xs" c="dimmed">Account ID: {accountId}</Text>
                   </Box>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Chip
-                      label={`Score: ${provider.health_score?.score || 0}`}
-                      color={getHealthColor(provider.health_score?.score || 0)}
-                    />
-                    <IconButton onClick={() => toggleProvider(accountId)}>
-                      {expandedProviders[accountId] ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-                    </IconButton>
-                  </Box>
-                </Box>
+                </Group>
+                <Group>
+                  <Badge color={getHealthColor(provider.health_score?.score || 0)}>
+                    Score: {provider.health_score?.score || 0}
+                  </Badge>
+                  <ActionIcon variant="subtle" onClick={() => toggleProvider(accountId)}>
+                    {expandedProviders[accountId] ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
+                  </ActionIcon>
+                </Group>
+              </Group>
 
-                {/* Provider Stats */}
-                <Box sx={{ mt: 2 }}>
-                  <Grid container spacing={2}>
-                    <Grid item xs={4}>
-                      <Typography variant="body2" color="text.secondary">Uptime</Typography>
-                      <Typography variant="body1">
-                        {formatUptime(provider.health_score?.uptime_percent)}
-                      </Typography>
-                    </Grid>
-                    <Grid item xs={4}>
-                      <Typography variant="body2" color="text.secondary">Fehler</Typography>
-                      <Typography variant="body1">
-                        {provider.health_score?.failure_count || 0}
-                      </Typography>
-                    </Grid>
-                    <Grid item xs={4}>
-                      <Typography variant="body2" color="text.secondary">Ø Response</Typography>
-                      <Typography variant="body1">
-                        {formatResponseTime(provider.health_score?.avg_response_time_ms)}
-                      </Typography>
-                    </Grid>
-                  </Grid>
-                </Box>
+              <Grid mt="md">
+                <Grid.Col span={4}>
+                  <Text size="xs" c="dimmed">Uptime</Text>
+                  <Text size="sm">{formatUptime(provider.health_score?.uptime_percent)}</Text>
+                </Grid.Col>
+                <Grid.Col span={4}>
+                  <Text size="xs" c="dimmed">Fehler</Text>
+                  <Text size="sm">{provider.health_score?.failure_count || 0}</Text>
+                </Grid.Col>
+                <Grid.Col span={4}>
+                  <Text size="xs" c="dimmed">Ø Response</Text>
+                  <Text size="sm">{formatResponseTime(provider.health_score?.avg_response_time_ms)}</Text>
+                </Grid.Col>
+              </Grid>
 
-                {/* MAC Addresses */}
-                <Collapse in={expandedProviders[accountId]}>
-                  <Divider sx={{ my: 2 }} />
-                  <Typography variant="subtitle2" gutterBottom>
-                    MAC-Adressen ({Object.keys(provider.mac_health_scores || {}).length})
-                  </Typography>
-                  <TableContainer component={Paper} variant="outlined">
-                    <Table size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>MAC-Adresse</TableCell>
-                          <TableCell align="right">Score</TableCell>
-                          <TableCell align="right">Uptime</TableCell>
-                          <TableCell align="right">Fehler</TableCell>
-                          <TableCell align="right">Ø Response</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {Object.entries(provider.mac_health_scores || {}).map(([mac, score]) => (
-                          <TableRow key={mac}>
-                            <TableCell>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                {getHealthIcon(score.score)}
-                                <Typography variant="body2">
-                                  {mac.substring(0, 12)}...
-                                </Typography>
-                              </Box>
-                            </TableCell>
-                            <TableCell align="right">
-                              <Chip
-                                label={score.score}
-                                size="small"
-                                color={getHealthColor(score.score)}
-                              />
-                            </TableCell>
-                            <TableCell align="right">{formatUptime(score.uptime_percent)}</TableCell>
-                            <TableCell align="right">{score.failure_count}</TableCell>
-                            <TableCell align="right">
-                              {formatResponseTime(score.avg_response_time_ms)}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </Collapse>
-              </CardContent>
+              <Collapse in={expandedProviders[accountId]}>
+                <Divider my="md" />
+                <Text size="sm" fw={500} mb="xs">
+                  MAC-Adressen ({Object.keys(provider.mac_health_scores || {}).length})
+                </Text>
+                <Paper withBorder>
+                  <Table striped highlightOnHover>
+                    <Table.Thead>
+                      <Table.Tr>
+                        <Table.Th>MAC-Adresse</Table.Th>
+                        <Table.Th>Score</Table.Th>
+                        <Table.Th>Uptime</Table.Th>
+                        <Table.Th>Fehler</Table.Th>
+                        <Table.Th>Ø Response</Table.Th>
+                      </Table.Tr>
+                    </Table.Thead>
+                    <Table.Tbody>
+                      {Object.entries(provider.mac_health_scores || {}).map(([mac, score]) => (
+                        <Table.Tr key={mac}>
+                          <Table.Td>
+                            <Group gap="xs">
+                              {getHealthIcon(score.score)}
+                              <Text size="sm">{mac.substring(0, 12)}...</Text>
+                            </Group>
+                          </Table.Td>
+                          <Table.Td><Badge size="sm" color={getHealthColor(score.score)}>{score.score}</Badge></Table.Td>
+                          <Table.Td><Text size="sm">{formatUptime(score.uptime_percent)}</Text></Table.Td>
+                          <Table.Td><Text size="sm">{score.failure_count}</Text></Table.Td>
+                          <Table.Td><Text size="sm">{formatResponseTime(score.avg_response_time_ms)}</Text></Table.Td>
+                        </Table.Tr>
+                      ))}
+                    </Table.Tbody>
+                  </Table>
+                </Paper>
+              </Collapse>
             </Card>
           ))}
 
           {Object.keys(healthData).length === 0 && !loading && (
-            <Alert severity="info">
-              Keine Provider-Daten verfügbar. Health-Daten werden gesammelt sobald Streams aktiv sind.
-            </Alert>
+            <Alert color="blue">Keine Provider-Daten verfügbar.</Alert>
           )}
-        </Grid>
+        </Grid.Col>
 
-        {/* Top Performers Sidebar */}
-        <Grid item xs={12} md={4}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                <TrendingUpIcon sx={{ mr: 1, verticalAlign: 'middle' }} />
-                Top Performer
-              </Typography>
-              {topPerformers.length > 0 ? (
-                <List dense>
-                  {topPerformers.map((performer, idx) => (
-                    <ListItem key={idx}>
-                      <ListItemIcon>
-                        <Chip
-                          label={`#${idx + 1}`}
-                          size="small"
-                          color={idx === 0 ? 'success' : 'default'}
-                        />
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={performer.mac_address?.substring(0, 12) + '...'}
-                        secondary={`Score: ${performer.health_score} | Uptime: ${formatUptime(performer.uptime_percent)}`}
-                      />
-                    </ListItem>
-                  ))}
-                </List>
-              ) : (
-                <Typography variant="body2" color="text.secondary">
-                  Noch keine Daten verfügbar
-                </Typography>
-              )}
-            </CardContent>
+        <Grid.Col span={{ base: 12, md: 4 }}>
+          <Card shadow="sm" p="md" withBorder>
+            <Group mb="sm">
+              <IconTrendingUp size={18} color="green" />
+              <Title order={5}>Top Performer</Title>
+            </Group>
+            {topPerformers.length > 0 ? (
+              <Stack gap="xs">
+                {topPerformers.map((performer, idx) => (
+                  <Group key={idx} justify="space-between">
+                    <Group gap="xs">
+                      <Badge size="sm" color={idx === 0 ? 'green' : 'gray'}>#{idx + 1}</Badge>
+                      <Text size="sm">{performer.mac_address?.substring(0, 12)}...</Text>
+                    </Group>
+                    <Text size="xs" c="dimmed">Score: {performer.health_score}</Text>
+                  </Group>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="sm" c="dimmed">Noch keine Daten verfügbar</Text>
+            )}
           </Card>
 
-          {/* Problem MACs Card */}
-          <Card sx={{ mt: 2 }}>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                <TrendingDownIcon sx={{ mr: 1, verticalAlign: 'middle' }} color="error" />
-                Problem MACs
-              </Typography>
-              {problemMacs.length > 0 ? (
-                <List dense>
-                  {problemMacs.map((mac, idx) => (
-                    <ListItem key={idx}>
-                      <ListItemIcon>
-                        <ErrorIcon color="error" />
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={mac.mac_address?.substring(0, 12) + '...'}
-                        secondary={
-                          <Box>
-                            <Typography variant="caption" display="block">
-                              Score: {mac.health_score}
-                            </Typography>
-                            <Typography variant="caption" color="error">
-                              Empfehlung: MAC ersetzen
-                            </Typography>
-                          </Box>
-                        }
-                      />
-                    </ListItem>
-                  ))}
-                </List>
-              ) : (
-                <Typography variant="body2" color="text.secondary">
-                  Keine problematischen MACs gefunden
-                </Typography>
-              )}
-            </CardContent>
+          <Card shadow="sm" p="md" mt="md" withBorder>
+            <Group mb="sm">
+              <IconTrendingDown size={18} color="red" />
+              <Title order={5}>Problem MACs</Title>
+            </Group>
+            {problemMacs.length > 0 ? (
+              <Stack gap="xs">
+                {problemMacs.map((mac, idx) => (
+                  <Box key={idx}>
+                    <Group gap="xs">
+                      <IconCircleX size={14} color="red" />
+                      <Text size="sm">{mac.mac_address?.substring(0, 12)}...</Text>
+                    </Group>
+                    <Text size="xs" c="dimmed">Score: {mac.health_score}</Text>
+                    <Text size="xs" c="red">Empfehlung: MAC ersetzen</Text>
+                  </Box>
+                ))}
+              </Stack>
+            ) : (
+              <Text size="sm" c="dimmed">Keine problematischen MACs gefunden</Text>
+            )}
           </Card>
-        </Grid>
+        </Grid.Col>
       </Grid>
     </Box>
   );
