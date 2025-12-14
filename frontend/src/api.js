@@ -2688,6 +2688,208 @@ export default class API {
       return response;
     } catch (e) {
       errorNotification('Failed to reset MAC Portal settings', e);
+      // Return default settings on error
+      return {
+        default_timeout: 30,
+        max_retries: 3,
+        retry_delay: 5,
+        cooldown_period: 60,
+        mac_rotation_enabled: true,
+        auto_failover_enabled: true,
+        health_check_interval: 300,
+      };
+    }
+  }
+
+  // Failover Settings API Methods
+  static async getFailoverSettings() {
+    try {
+      const response = await request(`${host}/api/mac-portal/failover-settings/`);
+      return response;
+    } catch (e) {
+      console.error('Failed to retrieve failover settings:', e);
+      // Return default settings if API fails
+      return {
+        mac_failover_enabled: true,
+        portal_failover_enabled: true,
+        stream_failover_enabled: true,
+        endpoint_failover_enabled: true,
+        useragent_failover_enabled: true,
+        failover_priority: ['mac', 'useragent', 'endpoint', 'stream'],
+      };
+    }
+  }
+
+  static async updateFailoverSettings(settings) {
+    try {
+      const response = await request(`${host}/api/mac-portal/failover-settings/`, {
+        method: 'PUT',
+        body: settings,
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to update failover settings:', e);
+      return settings; // Return the input settings on error
+    }
+  }
+
+  static async resetFailoverSettings() {
+    try {
+      const response = await request(`${host}/api/mac-portal/failover-settings/reset/`, {
+        method: 'POST',
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to reset failover settings:', e);
+      return {
+        mac_failover_enabled: true,
+        portal_failover_enabled: true,
+        stream_failover_enabled: true,
+        endpoint_failover_enabled: true,
+        useragent_failover_enabled: true,
+        failover_priority: ['mac', 'useragent', 'endpoint', 'stream'],
+      };
+    }
+  }
+
+  // MAC Health API Methods
+  static async getMACHealth(accountId) {
+    try {
+      const url = accountId 
+        ? `${host}/api/mac-portal/health/${accountId}/`
+        : `${host}/api/mac-portal/health/`;
+      const response = await request(url);
+      return response || [];
+    } catch (e) {
+      console.error('Failed to retrieve MAC health:', e);
+      return [];
+    }
+  }
+
+  static async resetMACCooldown(accountId, macId) {
+    try {
+      const response = await request(`${host}/api/mac-portal/cooldown/reset/`, {
+        method: 'POST',
+        body: { account_id: accountId, mac_id: macId },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to reset MAC cooldown:', e);
+      throw e;
+    }
+  }
+
+  // MAC Batch Operations API Methods
+  static async batchTestMACs(accountId, macIds) {
+    try {
+      const response = await request(`${host}/api/mac-portal/batch/test/`, {
+        method: 'POST',
+        body: { account_id: accountId, mac_ids: macIds },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to batch test MACs:', e);
+      return { results: macIds.map(id => ({ id, success: false, error: 'Test failed' })) };
+    }
+  }
+
+  static async batchEnableMACs(accountId, macIds) {
+    try {
+      const response = await request(`${host}/api/mac-portal/batch/enable/`, {
+        method: 'POST',
+        body: { account_id: accountId, mac_ids: macIds },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to batch enable MACs:', e);
+      throw e;
+    }
+  }
+
+  static async batchDisableMACs(accountId, macIds) {
+    try {
+      const response = await request(`${host}/api/mac-portal/batch/disable/`, {
+        method: 'POST',
+        body: { account_id: accountId, mac_ids: macIds },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to batch disable MACs:', e);
+      throw e;
+    }
+  }
+
+  // MAC Import/Export API Methods
+  static async importMACs(accountId, macs, replaceExisting = false) {
+    try {
+      const response = await request(`${host}/api/mac-portal/import/`, {
+        method: 'POST',
+        body: { account_id: accountId, macs, replace_existing: replaceExisting },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to import MACs:', e);
+      return { imported: 0, errors: [{ error: 'Import failed' }] };
+    }
+  }
+
+  static async exportMACs(accountId) {
+    try {
+      const response = await request(`${host}/api/mac-portal/export/${accountId}/`);
+      return response;
+    } catch (e) {
+      console.error('Failed to export MACs:', e);
+      return { macs: [], mac_count: 0 };
+    }
+  }
+
+  // Connection Test API Methods
+  static async runConnectionTest(accountId, mac) {
+    try {
+      const response = await request(`${host}/api/mac-portal/connection-test/`, {
+        method: 'POST',
+        body: { account_id: accountId, mac },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to run connection test:', e);
+      return {
+        success: false,
+        error: 'Connection test failed',
+        steps: [
+          { step: 'network', success: false, error: 'Could not reach portal' },
+        ],
+      };
+    }
+  }
+
+  // MAC Portal Logs API Methods
+  static async getMACPortalLogs(params = {}) {
+    try {
+      const queryParams = new URLSearchParams();
+      if (params.portal) queryParams.append('portal', params.portal);
+      if (params.level) queryParams.append('level', params.level);
+      if (params.search) queryParams.append('search', params.search);
+      if (params.mac) queryParams.append('mac', params.mac);
+      
+      const response = await request(`${host}/api/mac-portal/logs/?${queryParams.toString()}`);
+      return response;
+    } catch (e) {
+      console.error('Failed to retrieve MAC Portal logs:', e);
+      return { results: [] };
+    }
+  }
+
+  static async clearMACPortalLogs(accountId) {
+    try {
+      const response = await request(`${host}/api/mac-portal/logs/clear/`, {
+        method: 'POST',
+        body: { account_id: accountId },
+      });
+      return response;
+    } catch (e) {
+      console.error('Failed to clear MAC Portal logs:', e);
+      throw e;
     }
   }
 

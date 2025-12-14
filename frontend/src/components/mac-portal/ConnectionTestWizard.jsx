@@ -22,6 +22,7 @@ import {
   Collapse,
   ThemeIcon,
   List,
+  Select,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { 
@@ -50,14 +51,58 @@ const ConnectionTestWizard = ({ accountId, mac, onClose }) => {
   const [currentStep, setCurrentStep] = useState(-1);
   const [results, setResults] = useState({});
   const [expandedStep, setExpandedStep] = useState(null);
+  const [selectedPortal, setSelectedPortal] = useState(accountId || null);
+  const [selectedMac, setSelectedMac] = useState(mac || null);
+  const [portals, setPortals] = useState([]);
+  const [loading, setLoading] = useState(!accountId);
+
+  // Fetch portals if not provided
+  useEffect(() => {
+    if (!accountId) {
+      fetchPortals();
+    }
+  }, [accountId]);
+
+  const fetchPortals = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/mac-portal/overview/');
+      if (response.ok) {
+        const data = await response.json();
+        setPortals(data.portals || []);
+        if (data.portals?.length > 0) {
+          setSelectedPortal(data.portals[0].id);
+          if (data.portals[0].macs?.length > 0) {
+            setSelectedMac(data.portals[0].macs[0].mac_address);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch portals:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const runTest = async () => {
+    const testAccountId = accountId || selectedPortal;
+    const testMac = mac || selectedMac;
+    
+    if (!testAccountId || !testMac) {
+      notifications.show({
+        title: 'Error',
+        message: 'Please select a portal and MAC address',
+        color: 'red',
+      });
+      return;
+    }
+
     setTesting(true);
     setResults({});
     setCurrentStep(0);
 
     try {
-      const response = await API.runConnectionTest(accountId, mac);
+      const response = await API.runConnectionTest(testAccountId, testMac);
       
       // Process results step by step with delays for visual feedback
       for (let i = 0; i < TEST_STEPS.length; i++) {
@@ -147,19 +192,70 @@ const ConnectionTestWizard = ({ accountId, mac, onClose }) => {
   const allPassed = TEST_STEPS.every(step => results[step.key]?.success);
   const anyFailed = TEST_STEPS.some(step => results[step.key]?.success === false);
 
+  if (loading) {
+    return (
+      <Box pos="relative" h={200}>
+        <LoadingOverlay visible={true} />
+      </Box>
+    );
+  }
+
+  const currentMac = mac || selectedMac;
+  const availableMacs = !accountId && portals.length > 0 
+    ? portals.find(p => p.id === selectedPortal)?.macs || []
+    : [];
+
   return (
     <Stack gap="md">
       <Group justify="space-between">
         <div>
           <Title order={3}>Connection Test</Title>
-          <Text size="sm" c="dimmed">
-            Testing connection for MAC: <Code>{mac}</Code>
-          </Text>
+          {currentMac ? (
+            <Text size="sm" c="dimmed">
+              Testing connection for MAC: <Code>{currentMac}</Code>
+            </Text>
+          ) : (
+            <Text size="sm" c="dimmed">
+              Select a portal and MAC address to test
+            </Text>
+          )}
         </div>
-        <Button onClick={runTest} loading={testing} disabled={testing}>
+        <Button onClick={runTest} loading={testing} disabled={testing || !currentMac}>
           {Object.keys(results).length > 0 ? 'Run Again' : 'Start Test'}
         </Button>
       </Group>
+
+      {!accountId && portals.length > 0 && (
+        <Paper withBorder p="md">
+          <Stack gap="sm">
+            <Select
+              label="Portal"
+              placeholder="Select portal"
+              value={selectedPortal?.toString()}
+              onChange={(val) => {
+                setSelectedPortal(val ? parseInt(val) : null);
+                setSelectedMac(null);
+              }}
+              data={portals.map(p => ({ value: p.id.toString(), label: p.name }))}
+            />
+            {availableMacs.length > 0 && (
+              <Select
+                label="MAC Address"
+                placeholder="Select MAC"
+                value={selectedMac}
+                onChange={setSelectedMac}
+                data={availableMacs.map(m => ({ value: m.mac_address, label: m.mac_address }))}
+              />
+            )}
+          </Stack>
+        </Paper>
+      )}
+
+      {!accountId && portals.length === 0 && (
+        <Alert color="blue">
+          No MAC portals configured. Add a MAC/STB portal account first.
+        </Alert>
+      )}
 
       <Paper withBorder p="md">
         <Stepper 

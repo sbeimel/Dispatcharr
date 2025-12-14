@@ -5,7 +5,7 @@
  * Requirements: 50.1, 50.2, 50.3, 50.4
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Paper,
@@ -21,6 +21,7 @@ import {
   Modal,
   Stack,
   LoadingOverlay,
+  Alert,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { 
@@ -34,17 +35,57 @@ import {
 } from '@tabler/icons-react';
 import API from '../../api';
 
-const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
+const MACBatchOperations = ({ accountId, macs = [], onRefresh }) => {
   const [selectedMacs, setSelectedMacs] = useState([]);
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState([]);
   const [showResults, setShowResults] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [localMacs, setLocalMacs] = useState(macs);
+
+  // Fetch MACs if not provided
+  useEffect(() => {
+    if (macs.length === 0 && !accountId) {
+      fetchAllMACs();
+    } else {
+      setLocalMacs(macs);
+    }
+  }, [macs, accountId]);
+
+  const fetchAllMACs = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/mac-portal/overview/');
+      if (response.ok) {
+        const data = await response.json();
+        const allMacs = [];
+        (data.portals || []).forEach(portal => {
+          (portal.macs || []).forEach(mac => {
+            allMacs.push({
+              id: mac.id,
+              address: mac.mac_address,
+              status: mac.status,
+              health_score: mac.health_score,
+              portal_id: portal.id,
+            });
+          });
+        });
+        setLocalMacs(allMacs);
+      }
+    } catch (error) {
+      console.error('Failed to fetch MACs:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const macsToUse = localMacs.length > 0 ? localMacs : macs;
 
   const toggleSelectAll = () => {
-    if (selectedMacs.length === macs.length) {
+    if (selectedMacs.length === macsToUse.length) {
       setSelectedMacs([]);
     } else {
-      setSelectedMacs(macs.map(m => m.id));
+      setSelectedMacs(macsToUse.map(m => m.id));
     }
   };
 
@@ -153,12 +194,28 @@ const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
     }
   };
 
+  if (loading) {
+    return (
+      <Box pos="relative" h={300}>
+        <LoadingOverlay visible={true} />
+      </Box>
+    );
+  }
+
+  if (macsToUse.length === 0) {
+    return (
+      <Alert color="blue" title="No MACs Available">
+        No MAC addresses found. Add a MAC/STB portal account first.
+      </Alert>
+    );
+  }
+
   return (
     <Box>
       <Group justify="space-between" mb="md">
         <Group gap="xs">
           <Text size="sm" c="dimmed">
-            {selectedMacs.length} of {macs.length} selected
+            {selectedMacs.length} of {macsToUse.length} selected
           </Text>
         </Group>
         <Group gap="xs">
@@ -211,8 +268,8 @@ const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
             <Table.Tr>
               <Table.Th w={40}>
                 <Checkbox
-                  checked={selectedMacs.length === macs.length && macs.length > 0}
-                  indeterminate={selectedMacs.length > 0 && selectedMacs.length < macs.length}
+                  checked={selectedMacs.length === macsToUse.length && macsToUse.length > 0}
+                  indeterminate={selectedMacs.length > 0 && selectedMacs.length < macsToUse.length}
                   onChange={toggleSelectAll}
                 />
               </Table.Th>
@@ -222,7 +279,7 @@ const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
-            {macs.map((mac) => (
+            {macsToUse.map((mac) => (
               <Table.Tr key={mac.id}>
                 <Table.Td>
                   <Checkbox
@@ -235,10 +292,10 @@ const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
                 </Table.Td>
                 <Table.Td>
                   <Badge 
-                    color={mac.status === 'valid' ? 'green' : mac.status === 'expired' ? 'red' : 'gray'}
+                    color={mac.status === 'valid' || mac.status === 'active' ? 'green' : mac.status === 'expired' ? 'red' : 'gray'}
                     size="sm"
                   >
-                    {mac.status}
+                    {mac.status || 'unknown'}
                   </Badge>
                 </Table.Td>
                 <Table.Td>
@@ -246,7 +303,7 @@ const MACBatchOperations = ({ accountId, macs, onRefresh }) => {
                     value={mac.health_score || 50} 
                     size="sm" 
                     w={60}
-                    color={mac.health_score >= 80 ? 'green' : mac.health_score >= 50 ? 'yellow' : 'red'}
+                    color={(mac.health_score || 50) >= 80 ? 'green' : (mac.health_score || 50) >= 50 ? 'yellow' : 'red'}
                   />
                 </Table.Td>
               </Table.Tr>

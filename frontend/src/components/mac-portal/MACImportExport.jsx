@@ -5,7 +5,7 @@
  * Requirements: 51.1, 51.2, 51.3, 51.4
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Modal,
@@ -22,12 +22,14 @@ import {
   ActionIcon,
   Tooltip,
   Alert,
+  Select,
+  LoadingOverlay,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { IconUpload, IconDownload, IconCopy, IconCheck, IconAlertCircle } from '@tabler/icons-react';
 import API from '../../api';
 
-const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
+const MACImportExport = ({ accountId, opened = true, onClose, onImportComplete }) => {
   const [activeTab, setActiveTab] = useState('import');
   const [importText, setImportText] = useState('');
   const [replaceExisting, setReplaceExisting] = useState(false);
@@ -35,8 +37,47 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
   const [exporting, setExporting] = useState(false);
   const [exportData, setExportData] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const [portals, setPortals] = useState([]);
+  const [selectedPortal, setSelectedPortal] = useState(accountId || null);
+  const [loading, setLoading] = useState(!accountId);
+
+  // Fetch portals if not provided
+  useEffect(() => {
+    if (!accountId) {
+      fetchPortals();
+    }
+  }, [accountId]);
+
+  const fetchPortals = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/mac-portal/overview/');
+      if (response.ok) {
+        const data = await response.json();
+        setPortals(data.portals || []);
+        if (data.portals?.length > 0) {
+          setSelectedPortal(data.portals[0].id);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch portals:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const currentAccountId = accountId || selectedPortal;
 
   const handleImport = async () => {
+    if (!currentAccountId) {
+      notifications.show({
+        title: 'Warning',
+        message: 'Please select a portal first',
+        color: 'yellow',
+      });
+      return;
+    }
+
     if (!importText.trim()) {
       notifications.show({
         title: 'Warning',
@@ -54,7 +95,7 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
       const lines = importText.split(/[\n,]/).map(l => l.trim()).filter(l => l);
       const macs = lines.map(address => ({ address }));
 
-      const result = await API.importMACs(accountId, macs, replaceExisting);
+      const result = await API.importMACs(currentAccountId, macs, replaceExisting);
       setImportResult(result);
 
       notifications.show({
@@ -78,10 +119,19 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
   };
 
   const handleExport = async () => {
+    if (!currentAccountId) {
+      notifications.show({
+        title: 'Warning',
+        message: 'Please select a portal first',
+        color: 'yellow',
+      });
+      return;
+    }
+
     setExporting(true);
 
     try {
-      const data = await API.exportMACs(accountId);
+      const data = await API.exportMACs(currentAccountId);
       setExportData(data);
     } catch (error) {
       notifications.show({
@@ -110,11 +160,11 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
     let content, filename, type;
     if (format === 'txt') {
       content = getExportText();
-      filename = `macs_${accountId}.txt`;
+      filename = `macs_${currentAccountId}.txt`;
       type = 'text/plain';
     } else {
       content = getExportJSON();
-      filename = `macs_${accountId}.json`;
+      filename = `macs_${currentAccountId}.json`;
       type = 'application/json';
     }
 
@@ -127,13 +177,28 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
     URL.revokeObjectURL(url);
   };
 
-  return (
-    <Modal
-      opened={opened}
-      onClose={onClose}
-      title="Import / Export MAC Addresses"
-      size="lg"
-    >
+  // If used as standalone component (not in modal)
+  const content = (
+    <Box pos="relative">
+      <LoadingOverlay visible={loading} />
+      
+      {!accountId && portals.length > 0 && (
+        <Select
+          label="Select Portal"
+          placeholder="Choose a portal"
+          value={selectedPortal?.toString()}
+          onChange={(val) => setSelectedPortal(val ? parseInt(val) : null)}
+          data={portals.map(p => ({ value: p.id.toString(), label: p.name }))}
+          mb="md"
+        />
+      )}
+
+      {!accountId && portals.length === 0 && !loading && (
+        <Alert color="blue" mb="md">
+          No MAC portals configured. Add a MAC/STB portal account first.
+        </Alert>
+      )}
+
       <Tabs value={activeTab} onChange={setActiveTab}>
         <Tabs.List>
           <Tabs.Tab value="import" leftSection={<IconUpload size={14} />}>
@@ -257,8 +322,25 @@ const MACImportExport = ({ accountId, opened, onClose, onImportComplete }) => {
           </Stack>
         </Tabs.Panel>
       </Tabs>
-    </Modal>
+    </Box>
   );
+
+  // If opened prop is provided, wrap in Modal
+  if (typeof opened !== 'undefined' && onClose) {
+    return (
+      <Modal
+        opened={opened}
+        onClose={onClose}
+        title="Import / Export MAC Addresses"
+        size="lg"
+      >
+        {content}
+      </Modal>
+    );
+  }
+
+  // Otherwise render as standalone component
+  return content;
 };
 
 export default MACImportExport;

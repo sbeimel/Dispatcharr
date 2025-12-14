@@ -38,31 +38,52 @@ const MACHealthDashboard = ({ accountId }) => {
   });
 
   useEffect(() => {
-    if (accountId) {
-      fetchMACHealth();
-    }
+    fetchMACHealth();
   }, [accountId]);
 
   const fetchMACHealth = async () => {
     setLoading(true);
     try {
-      const data = await API.getMACHealth(accountId);
+      let data = [];
+      
+      if (accountId) {
+        // Fetch for specific account
+        data = await API.getMACHealth(accountId);
+      } else {
+        // Fetch all MACs from overview
+        const response = await fetch('/api/mac-portal/overview/');
+        if (response.ok) {
+          const overviewData = await response.json();
+          (overviewData.portals || []).forEach(portal => {
+            (portal.macs || []).forEach(mac => {
+              data.push({
+                id: mac.id,
+                address: mac.mac_address,
+                status: mac.status === 'active' ? 'valid' : mac.status,
+                health_score: mac.health_score || 50,
+                in_cooldown: mac.status === 'cooldown',
+                cooldown_remaining: 0,
+                expires_at: mac.expiry_date,
+              });
+            });
+          });
+        }
+      }
+      
+      data = data || [];
       setMacs(data);
       
       // Calculate stats
       const total = data.length;
-      const healthy = data.filter(m => m.status === 'valid' && !m.in_cooldown).length;
-      const inCooldown = data.filter(m => m.in_cooldown).length;
+      const healthy = data.filter(m => (m.status === 'valid' || m.status === 'active') && !m.in_cooldown).length;
+      const inCooldown = data.filter(m => m.in_cooldown || m.status === 'cooldown').length;
       const expired = data.filter(m => m.status === 'expired').length;
       
       setStats({ total, healthy, inCooldown, expired });
     } catch (error) {
       console.error('Failed to fetch MAC health:', error);
-      notifications.show({
-        title: 'Error',
-        message: 'Failed to load MAC health data',
-        color: 'red',
-      });
+      setMacs([]);
+      setStats({ total: 0, healthy: 0, inCooldown: 0, expired: 0 });
     } finally {
       setLoading(false);
     }
