@@ -26,7 +26,6 @@ from apps.m3u.utils import calculate_tuner_count
 import regex
 from core.utils import log_system_event
 import hashlib
-from django.contrib.auth import authenticate
 
 logger = logging.getLogger(__name__)
 
@@ -65,60 +64,8 @@ def get_basic_auth_user(request):
 
     return user
 
-
-def get_basic_auth_user(request):
-    """Authenticate request using HTTP Basic Auth against the Django user model.
-    
-    Returns:
-        User object if authentication successful, HttpResponse with 401 if failed
-    """
-    auth_header = request.META.get("HTTP_AUTHORIZATION")
-    if not auth_header or not auth_header.lower().startswith("basic "):
-        # No or invalid auth header -> ask for credentials
-        response = HttpResponse("Authentication required", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
-        return response
-    
-    try:
-        encoded = auth_header.split(" ", 1)[1].strip()
-    except IndexError:
-        response = HttpResponse("Invalid Authorization header", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
-        return response
-    
-    try:
-        decoded = base64.b64decode(encoded).decode('utf-8')
-    except (ValueError, UnicodeDecodeError):
-        response = HttpResponse("Invalid Authorization header", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
-        return response
-    
-    try:
-        username, password = decoded.split(":", 1)
-    except ValueError:
-        response = HttpResponse("Invalid Authorization header", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
-        return response
-    
-    user = authenticate(request, username=username, password=password)
-    if not user:
-        response = HttpResponse("Invalid username or password", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
-        return response
-    
-    return user
-
-
 def m3u_endpoint(request, profile_name=None, user=None):
     logger.debug("m3u_endpoint called: method=%s, profile=%s", request.method, profile_name)
-    
-    # Check Basic Authentication first
-    auth_result = get_basic_auth_user(request)
-    if isinstance(auth_result, HttpResponse):
-        # Authentication failed, return 401 response
-        return auth_result
-    authenticated_user = auth_result
-    
     if not network_access_allowed(request, "M3U_EPG"):
         # Log blocked M3U download
         from core.utils import log_system_event
@@ -146,13 +93,6 @@ def m3u_endpoint(request, profile_name=None, user=None):
 
 def epg_endpoint(request, profile_name=None, user=None):
     logger.debug("epg_endpoint called: method=%s, profile=%s", request.method, profile_name)
-    
-    # Check Basic Authentication first
-    auth_result = get_basic_auth_user(request)
-    if isinstance(auth_result, HttpResponse):
-        # Authentication failed, return 401 response
-        return auth_result
-    authenticated_user = auth_result
     if not network_access_allowed(request, "M3U_EPG"):
         # Log blocked EPG download
         from core.utils import log_system_event

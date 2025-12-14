@@ -295,7 +295,7 @@ def cleanup_memory(log_usage=False, force_collection=True):
         log_usage: Whether to log memory usage before and after cleanup
         force_collection: Whether to force garbage collection
     """
-    logger.debug("Starting memory cleanup django memory cleanup")
+    logger.trace("Starting memory cleanup django memory cleanup")
     # Skip logging if log level is not set to debug or more verbose (like trace)
     current_log_level = logger.getEffectiveLevel()
     if not current_log_level <= logging.DEBUG:
@@ -328,7 +328,7 @@ def cleanup_memory(log_usage=False, force_collection=True):
             logger.debug(f"Memory after cleanup: {after_mem:.2f} MB (change: {after_mem-before_mem:.2f} MB)")
         except (ImportError, Exception):
             pass
-    logger.debug("Memory cleanup complete for django")
+    logger.trace("Memory cleanup complete for django")
 
 def is_protected_path(file_path):
     """
