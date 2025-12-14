@@ -183,7 +183,7 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             'm3u_account': {
                 'id': relation.m3u_account.id,
                 'name': relation.m3u_account.name,
-                'account_type': relation.m3u_account.account_type
+                'account_type': relation.m3u_account.get_account_type_display()
             }
         }
         return Response(response_data)
@@ -387,7 +387,7 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                 'm3u_account': {
                     'id': relation.m3u_account.id,
                     'name': relation.m3u_account.name,
-                    'account_type': relation.m3u_account.account_type
+                    'account_type': relation.m3u_account.get_account_type_display()
                 },
                 'episodes_fetched': custom_props.get('episodes_fetched', False),
                 'detailed_fetched': custom_props.get('detailed_fetched', False)

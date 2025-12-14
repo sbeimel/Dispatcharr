@@ -88,22 +88,44 @@ class RedisKeys:
     def client_metadata(channel_id, client_id):
         """Key for client metadata hash"""
         return f"ts_proxy:channel:{channel_id}:clients:{client_id}"
+
+    # Failover System Keys
     @staticmethod
-    def m3u_profile_cooldown(profile_id):
-        """Key for cooldown marker of a specific M3U profile (to avoid retrying bad profiles)."""
-        return f"ts_proxy:m3u_profile:{profile_id}:cooldown"
+    def mac_cooldown(mac_id):
+        """Key for cooldown marker of a specific MAC address (to avoid retrying bad MACs)."""
+        return f"ts_proxy:mac:{mac_id}:cooldown"
 
     @staticmethod
-    def m3u_account_cooldown(account_id):
-        """Key for cooldown marker of a specific M3U account (prepared, disabled by default)."""
-        return f"ts_proxy:m3u_account:{account_id}:cooldown"
+    def profile_cooldown(profile_id):
+        """Key for cooldown marker of a specific M3U profile (to avoid retrying bad profiles)."""
+        return f"ts_proxy:profile:{profile_id}:cooldown"
+
+    @staticmethod
+    def stream_failover_state(channel_id):
+        """Key for storing current failover state of a channel."""
+        return f"ts_proxy:channel:{channel_id}:failover_state"
 
     @staticmethod
     def mac_busy(mac_id):
-        """Key indicating that a MAC address is currently in use by an active stream."""
+        """Key indicating MAC address is currently in use."""
         return f"ts_proxy:mac:{mac_id}:busy"
 
     @staticmethod
-    def mac_cooldown(mac_id):
-        """Key for cooldown marker of a specific M3UAccountMac (to avoid retrying bad MACs temporarily)."""
-        return f"ts_proxy:m3u_mac:{mac_id}:cooldown"
+    def profile_connections(profile_id):
+        """Key for tracking active connections per profile."""
+        return f"ts_proxy:profile:{profile_id}:connections"
+
+    @staticmethod
+    def failover_attempt_count(channel_id):
+        """Key for tracking failover attempt count to prevent infinite loops."""
+        return f"ts_proxy:channel:{channel_id}:failover_attempts"
+
+    @staticmethod
+    def stream_profile_mapping(stream_id):
+        """Key for mapping stream ID to active profile ID."""
+        return f"ts_proxy:stream_profile:{stream_id}"
+
+    @staticmethod
+    def profile_active_streams(profile_id):
+        """Key for set of active stream IDs using this profile."""
+        return f"ts_proxy:profile:{profile_id}:active_streams"

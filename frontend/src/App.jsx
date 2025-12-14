@@ -18,6 +18,7 @@ import PluginsPage from './pages/Plugins';
 import Users from './pages/Users';
 import LogosPage from './pages/Logos';
 import VODsPage from './pages/VODs';
+import { FailoverTestPage } from './components/failover-test';
 import useAuthStore from './store/auth';
 import useLogosStore from './store/logos';
 import FloatingVideo from './components/FloatingVideo';
@@ -112,15 +113,21 @@ const App = () => {
               height: 0,
             }}
             navbar={{
-              width: open ? drawerWidth : miniDrawerWidth,
+              width: isAuthenticated
+                ? open
+                  ? drawerWidth
+                  : miniDrawerWidth
+                : 0,
             }}
           >
-            <Sidebar
-              drawerWidth
-              miniDrawerWidth
-              collapsed={!open}
-              toggleDrawer={toggleDrawer}
-            />
+            {isAuthenticated && (
+              <Sidebar
+                drawerWidth={drawerWidth}
+                miniDrawerWidth={miniDrawerWidth}
+                collapsed={!open}
+                toggleDrawer={toggleDrawer}
+              />
+            )}
 
             <AppShell.Main>
               <Box
@@ -147,6 +154,7 @@ const App = () => {
                         <Route path="/settings" element={<Settings />} />
                         <Route path="/logos" element={<LogosPage />} />
                         <Route path="/vods" element={<VODsPage />} />
+                        <Route path="/failover-test" element={<FailoverTestPage />} />
                       </>
                     ) : (
                       <Route path="/login" element={<Login needsSuperuser />} />

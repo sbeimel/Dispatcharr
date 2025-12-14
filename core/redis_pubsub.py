@@ -142,7 +142,7 @@ class RedisPubSubManager:
         if self.pubsub:
             try:
                 self.pubsub.close()
-            except:
+            except Exception:
                 pass
         self.pubsub = None
 
@@ -159,7 +159,7 @@ class RedisPubSubManager:
             if self.pubsub:
                 try:
                     self.pubsub.close()
-                except:
+                except Exception:
                     pass
 
             # Create a new PubSub instance - critical: no timeout for subscribe operations

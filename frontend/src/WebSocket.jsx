@@ -572,7 +572,7 @@ export const WebsocketProvider = ({ children }) => {
               // If we have source/account info, check if EPG exists before processing
               if (parsedEvent.data.source || parsedEvent.data.account) {
                 const sourceId =
-                  parsedEvent.data.source_id || parsedEvent.data.account;
+                  parsedEvent.data.source || parsedEvent.data.account;
                 const epg = epgs[sourceId];
 
                 // Only update progress if the EPG still exists in the store

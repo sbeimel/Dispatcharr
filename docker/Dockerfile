@@ -33,7 +33,7 @@ COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder
 RUN rm -rf /app/frontend
 # Copy built frontend assets
-COPY --from=frontend-builder /app/frontend/build /app/frontend/dist
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 # Run Django collectstatic
 RUN python manage.py collectstatic --noinput
