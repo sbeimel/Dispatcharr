@@ -25,6 +25,9 @@ class HTTPStreamReader:
         self.pipe_read = None
         self.pipe_write = None
         self.running = False
+        # Predictive failover metrics
+        self.response_time_ms = None  # Time to first byte in milliseconds
+        self.connection_error = None  # Error message if connection failed
 
     def start(self):
         """Start the HTTP stream reader thread"""
@@ -41,6 +44,7 @@ class HTTPStreamReader:
 
     def _read_stream(self):
         """Thread worker that reads HTTP stream and writes to pipe"""
+        import time as time_module
         try:
             # Build headers
             headers = {}
@@ -57,6 +61,9 @@ class HTTPStreamReader:
             self.session.mount('http://', adapter)
             self.session.mount('https://', adapter)
 
+            # Track response time (time to first byte)
+            request_start_time = time_module.time()
+
             # Stream the URL
             self.response = self.session.get(
                 self.url,
@@ -65,43 +72,42 @@ class HTTPStreamReader:
                 timeout=(5, 30)  # 5s connect, 30s read
             )
 
+            # Calculate response time in milliseconds
+            self.response_time_ms = (time_module.time() - request_start_time) * 1000
+
             if self.response.status_code != 200:
+                self.connection_error = f"HTTP {self.response.status_code}"
                 logger.error(f"HTTP {self.response.status_code} from {self.url}")
                 return
 
-            logger.info(f"HTTP reader connected successfully, streaming data...")
+            logger.info(f"HTTP reader connected successfully (response time: {self.response_time_ms:.0f}ms), streaming data...")
 
             # Stream chunks to pipe
-            # Keep local reference to avoid race condition when stop() clears self.response
-            response = self.response
             chunk_count = 0
-            try:
-                for chunk in response.iter_content(chunk_size=self.chunk_size):
-                    if not self.running:
+            for chunk in self.response.iter_content(chunk_size=self.chunk_size):
+                if not self.running:
+                    break
+
+                if chunk:
+                    try:
+                        # Write binary data to pipe
+                        os.write(self.pipe_write, chunk)
+                        chunk_count += 1
+
+                        # Log progress periodically
+                        if chunk_count % 1000 == 0:
+                            logger.debug(f"HTTP reader streamed {chunk_count} chunks")
+                    except OSError as e:
+                        logger.error(f"Pipe write error: {e}")
                         break
-
-                    if chunk:
-                        try:
-                            # Write binary data to pipe
-                            os.write(self.pipe_write, chunk)
-                            chunk_count += 1
-
-                            # Log progress periodically
-                            if chunk_count % 1000 == 0:
-                                logger.debug(f"HTTP reader streamed {chunk_count} chunks")
-                        except OSError as e:
-                            logger.error(f"Pipe write error: {e}")
-                            break
-            except AttributeError:
-                # Response was closed during iteration - this is expected during shutdown
-                if self.running:
-                    logger.warning("Response closed unexpectedly during streaming")
 
             logger.info("HTTP stream ended")
 
         except requests.exceptions.RequestException as e:
+            self.connection_error = str(e)
             logger.error(f"HTTP reader request error: {e}")
         except Exception as e:
+            self.connection_error = str(e)
             logger.error(f"HTTP reader unexpected error: {e}", exc_info=True)
         finally:
             self.running = False
@@ -110,7 +116,7 @@ class HTTPStreamReader:
                 if self.pipe_write is not None:
                     os.close(self.pipe_write)
                     self.pipe_write = None
-            except:
+            except OSError:
                 pass
 
     def stop(self):
@@ -122,14 +128,14 @@ class HTTPStreamReader:
         if self.response:
             try:
                 self.response.close()
-            except:
+            except Exception:
                 pass
 
         # Close session
         if self.session:
             try:
                 self.session.close()
-            except:
+            except Exception:
                 pass
 
         # Close write end of pipe
@@ -137,7 +143,7 @@ class HTTPStreamReader:
             try:
                 os.close(self.pipe_write)
                 self.pipe_write = None
-            except:
+            except OSError:
                 pass
 
         # Wait for thread

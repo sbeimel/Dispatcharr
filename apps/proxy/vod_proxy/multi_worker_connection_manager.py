@@ -645,7 +645,7 @@ class MultiWorkerVODConnectionManager:
         try:
             # Use combination of hostname and PID for unique worker ID
             return f"{socket.gethostname()}-{os.getpid()}"
-        except:
+        except (OSError, AttributeError):
             import random
             return f"worker-{random.randint(1000, 9999)}"
 

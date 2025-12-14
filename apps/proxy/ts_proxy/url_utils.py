@@ -19,7 +19,7 @@ def get_stream_object(id: str):
     try:
         logger.info(f"Fetching channel ID {id}")
         return get_object_or_404(Channel, uuid=id)
-    except:
+    except (ValueError, Channel.DoesNotExist):
         # UUID check failed, assume stream hash
         logger.info(f"Fetching stream hash {id}")
         return get_object_or_404(Stream, stream_hash=id)

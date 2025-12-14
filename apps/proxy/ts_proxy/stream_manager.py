@@ -24,6 +24,13 @@ from .constants import ChannelState, EventType, StreamType, ChannelMetadataField
 from .config_helper import ConfigHelper
 from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
 
+# Predictive Failover imports (lazy loaded to avoid circular imports)
+try:
+    from .predictive.metrics_collector import get_metrics_collector, MetricType
+    PREDICTIVE_AVAILABLE = True
+except ImportError:
+    PREDICTIVE_AVAILABLE = False
+
 logger = get_logger()
 
 class StreamManager:
@@ -125,6 +132,12 @@ class StreamManager:
         # Add HTTP reader thread property
         self.http_reader = None
 
+        # Predictive Failover metrics tracking
+        self._metrics_collector = None
+        self._metrics_collecting = False
+        self._last_metrics_time = time.time()
+        self._metrics_bytes_since_last = 0
+
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
         session = requests.Session()
@@ -148,6 +161,148 @@ class StreamManager:
         session.mount('https://', adapter)
 
         return session
+
+    # =========================================================================
+    # Predictive Failover Metrics Collection Methods
+    # =========================================================================
+
+    def _start_metrics_collection(self):
+        """
+        Start collecting metrics for predictive failover.
+        
+        Requirement 1.1: Start metrics collection when stream becomes active
+        """
+        if not PREDICTIVE_AVAILABLE:
+            return
+        
+        try:
+            self._metrics_collector = get_metrics_collector()
+            if self._metrics_collector and self._metrics_collector.is_enabled():
+                stream_id = str(self.current_stream_id or self.channel_id)
+                if self._metrics_collector.start_collecting(stream_id, str(self.channel_id)):
+                    self._metrics_collecting = True
+                    self._last_metrics_time = time.time()
+                    self._metrics_bytes_since_last = 0
+                    logger.debug(f"Started predictive metrics collection for stream {stream_id}")
+        except Exception as e:
+            logger.debug(f"Failed to start metrics collection: {e}")
+
+    def _stop_metrics_collection(self):
+        """
+        Stop collecting metrics for predictive failover.
+        
+        Requirement 1.5: Stop collection and release resources when stream ends
+        """
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            stream_id = str(self.current_stream_id or self.channel_id)
+            self._metrics_collector.stop_collecting(stream_id)
+            self._metrics_collecting = False
+            logger.debug(f"Stopped predictive metrics collection for stream {stream_id}")
+        except Exception as e:
+            logger.debug(f"Failed to stop metrics collection: {e}")
+
+    def _record_response_time(self, response_time_ms: float):
+        """
+        Record response time metric for predictive failover.
+        
+        Requirement 1.3: Log warning when response time exceeds threshold
+        """
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            stream_id = str(self.current_stream_id or self.channel_id)
+            self._metrics_collector.record_metric(
+                stream_id, 
+                MetricType.RESPONSE_TIME, 
+                response_time_ms
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record response time metric: {e}")
+
+    def _record_connection_status(self, connected: bool, error_message: str = None):
+        """Record connection status change for predictive failover."""
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            stream_id = str(self.current_stream_id or self.channel_id)
+            self._metrics_collector.record_connection_status(
+                stream_id, 
+                connected, 
+                error_message
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record connection status: {e}")
+
+    def _record_buffer_underrun(self, buffer_level: float = 0):
+        """
+        Record buffer underrun event for predictive failover.
+        
+        Requirement 1.4: Store buffer underrun events with timestamp and stream ID
+        """
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            stream_id = str(self.current_stream_id or self.channel_id)
+            self._metrics_collector.record_buffer_underrun(stream_id, buffer_level)
+        except Exception as e:
+            logger.debug(f"Failed to record buffer underrun: {e}")
+
+    def _record_bytes_and_bitrate(self, bytes_received: int):
+        """
+        Record bytes received and calculate bitrate for predictive failover.
+        
+        Requirement 1.1: Collect bytes_received metric
+        """
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            self._metrics_bytes_since_last += bytes_received
+            
+            # Get metrics interval from config
+            config = self._metrics_collector.config
+            metrics_interval = config.metrics_interval if config else 3
+            
+            now = time.time()
+            elapsed = now - self._last_metrics_time
+            
+            # Record metrics at configured interval
+            if elapsed >= metrics_interval:
+                stream_id = str(self.current_stream_id or self.channel_id)
+                self._metrics_collector.calculate_and_record_bitrate(
+                    stream_id,
+                    self._metrics_bytes_since_last,
+                    elapsed
+                )
+                self._metrics_bytes_since_last = 0
+                self._last_metrics_time = now
+        except Exception as e:
+            logger.debug(f"Failed to record bytes/bitrate metric: {e}")
+
+    def _record_error(self, error_count: int = 1):
+        """Record error count for predictive failover."""
+        if not self._metrics_collecting or not self._metrics_collector:
+            return
+        
+        try:
+            stream_id = str(self.current_stream_id or self.channel_id)
+            self._metrics_collector.record_metric(
+                stream_id,
+                MetricType.ERROR_COUNT,
+                error_count
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record error metric: {e}")
+
+    # =========================================================================
+    # End Predictive Failover Methods
+    # =========================================================================
 
     def _wait_for_existing_processes_to_close(self, timeout=5.0):
         """Wait for existing processes/connections to fully close before establishing new ones"""
@@ -195,6 +350,9 @@ class StreamManager:
             # Start health monitor thread
             health_thread = threading.Thread(target=self._monitor_health, daemon=True)
             health_thread.start()
+
+            # Start predictive failover metrics collection (Requirement 1.1)
+            self._start_metrics_collection()
 
             logger.info(f"Starting stream for URL: {self.url} for channel {self.channel_id}")
 
@@ -417,6 +575,9 @@ class StreamManager:
         finally:
             # Enhanced cleanup in the finally block
             self.connected = False
+
+            # Stop predictive failover metrics collection (Requirement 1.5)
+            self._stop_metrics_collection()
 
             # Explicitly cancel all timers
             for timer in list(self._buffer_check_timers):
@@ -959,7 +1120,7 @@ class StreamManager:
             # Catch any other exceptions in the thread to prevent crashes
             try:
                 logger.error(f"Error in stderr reader thread for channel {self.channel_id}: {e}")
-            except:
+            except Exception:
                 pass
 
     def _log_stderr_content(self, content):
@@ -1205,6 +1366,15 @@ class StreamManager:
             # Store connection start time for stability tracking
             self.connection_start_time = time.time()
 
+            # Record response time for predictive failover (Requirement 1.1, 1.3)
+            # Wait briefly for the HTTP reader to get response time
+            gevent.sleep(0.1)
+            if self.http_reader and self.http_reader.response_time_ms is not None:
+                self._record_response_time(self.http_reader.response_time_ms)
+            
+            # Record successful connection status
+            self._record_connection_status(True)
+
             # Set channel state to waiting for clients
             self._set_waiting_for_clients()
 
@@ -1212,6 +1382,9 @@ class StreamManager:
 
         except Exception as e:
             logger.error(f"Error establishing HTTP connection for channel {self.channel_id}: {e}", exc_info=True)
+            # Record connection failure for predictive failover
+            self._record_connection_status(False, str(e))
+            self._record_error()
             self._close_socket()
             return False
 
@@ -1220,6 +1393,9 @@ class StreamManager:
         try:
             # Update local counter
             self.bytes_processed += chunk_size
+
+            # Record bytes for predictive failover metrics (Requirement 1.1)
+            self._record_bytes_and_bitrate(chunk_size)
 
             # Only update Redis periodically to reduce overhead
             now = time.time()
@@ -1454,6 +1630,8 @@ class StreamManager:
                     if self.healthy:
                         logger.warning(f"Stream unhealthy for channel {self.channel_id} - no data for {inactivity_duration:.1f}s")
                         self.healthy = False
+                        # Record buffer underrun for predictive failover (Requirement 1.4)
+                        self._record_buffer_underrun(0)
 
                     consecutive_unhealthy_checks += 1
                     

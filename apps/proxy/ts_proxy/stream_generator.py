@@ -147,7 +147,7 @@ class StreamGenerator:
                                 init_time_float = float(metadata[b'init_time'].decode('utf-8'))
                                 init_duration = time.time() - init_time_float
                                 init_time = f"{init_duration:.1f}s ago"
-                            except:
+                            except (ValueError, UnicodeDecodeError):
                                 pass
 
                         # Still initializing - send keepalive if needed

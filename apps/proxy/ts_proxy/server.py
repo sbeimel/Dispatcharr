@@ -1336,9 +1336,12 @@ class ProxyServer:
         try:
             channel = Channel.objects.get(uuid=channel_id)
             channel.release_stream()
-        except:
-            stream = Stream.objects.get(stream_hash=channel_id)
-            stream.release_stream()
+        except (ValueError, Channel.DoesNotExist):
+            try:
+                stream = Stream.objects.get(stream_hash=channel_id)
+                stream.release_stream()
+            except Stream.DoesNotExist:
+                logger.warning(f"Could not find channel or stream for ID: {channel_id}")
 
         if not self.redis_client:
             return 0

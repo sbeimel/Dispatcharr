@@ -10,6 +10,8 @@ from .api_views import (
     UserAgentViewSet,
     M3UAccountProfileViewSet,
 )
+from .api.mac_portal_api import get_mac_portal_urls, get_mac_management_urls
+from .api.failover_test_api import get_failover_test_urls
 
 app_name = "m3u"
 
@@ -40,5 +42,12 @@ urlpatterns = [
         name="m3u_refresh_account_info",
     ),
 ]
+
+# Add MAC Portal Import API endpoints (Task 8)
+urlpatterns += get_mac_portal_urls()
+urlpatterns += get_mac_management_urls()
+
+# Add Failover Test API endpoints
+urlpatterns += get_failover_test_urls()
 
 urlpatterns += router.urls

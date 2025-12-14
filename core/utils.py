@@ -110,7 +110,7 @@ class RedisClient:
                             try:
                                 client.config_set('maxmemory', '768mb')
                                 logger.warning("Applied emergency Redis memory increase to 768MB")
-                            except:
+                            except Exception:
                                 pass
                         else:
                             logger.error(f"Redis configuration error: {e}")

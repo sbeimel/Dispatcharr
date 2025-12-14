@@ -2998,7 +2998,7 @@ def send_m3u_update(account_id, action, progress, **kwargs):
                 data["status"] = account.status
             if "message" not in kwargs and account.last_message:
                 data["message"] = account.last_message
-    except:
+    except M3UAccount.DoesNotExist:
         pass  # If account can't be retrieved, continue without these fields
 
     # Add the additional key-value pairs from kwargs
@@ -3453,4 +3453,140 @@ def cleanup_expired_macs():
         
     except Exception as e:
         logger.error(f"Error during MAC cleanup: {e}")
+        return {"error": str(e)}
+
+
+
+@shared_task
+def recover_macs_from_cooldown():
+    """
+    Automatically recover MACs from cooldown when their cooldown period expires.
+    
+    Requirements: 56.4
+    
+    This task should be scheduled to run periodically (e.g., every 5 minutes)
+    to check for MACs that can be recovered from cooldown.
+    """
+    from .models import M3UAccount
+    from .mac_rotation_manager import MACRotationManager
+    
+    total_recovered = 0
+    accounts_processed = 0
+    
+    try:
+        # Get all MAC/STB portal accounts
+        mac_accounts = M3UAccount.objects.filter(
+            account_type__in=['mac', 'stb']
+        )
+        
+        for account in mac_accounts:
+            try:
+                manager = MACRotationManager(account.id)
+                recovered = manager.check_and_recover_macs()
+                total_recovered += recovered
+                accounts_processed += 1
+            except Exception as e:
+                logger.error(f"Error recovering MACs for account {account.id}: {e}")
+        
+        if total_recovered > 0:
+            logger.info(f"Auto-recovery: Recovered {total_recovered} MACs from cooldown across {accounts_processed} accounts")
+        
+        return {
+            "accounts_processed": accounts_processed,
+            "macs_recovered": total_recovered
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during MAC auto-recovery: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def cleanup_old_health_records():
+    """
+    Cleanup old MAC health records to prevent database bloat.
+    
+    Requirements: 49.1
+    
+    This task should be scheduled to run daily to remove health records
+    older than 7 days.
+    """
+    from .mac_portal_models import MACHealthRecord
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=7)
+        
+        deleted_count, _ = MACHealthRecord.objects.filter(
+            timestamp__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old MAC health records")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up health records: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def cleanup_old_failover_events():
+    """
+    Cleanup old failover events to prevent database bloat.
+    
+    Requirements: 61.1
+    
+    This task should be scheduled to run daily to remove failover events
+    older than 30 days.
+    """
+    from .mac_portal_models import FailoverEvent
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=30)
+        
+        deleted_count, _ = FailoverEvent.objects.filter(
+            timestamp__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old failover events")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up failover events: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def cleanup_old_cooldowns():
+    """
+    Cleanup old inactive cooldown records.
+    
+    Requirements: 46.3
+    
+    This task should be scheduled to run daily to remove inactive cooldown
+    records older than 7 days.
+    """
+    from .mac_portal_models import MACCooldown
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=7)
+        
+        deleted_count, _ = MACCooldown.objects.filter(
+            is_active=False,
+            expires_at__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old cooldown records")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up cooldown records: {e}")
         return {"error": str(e)}

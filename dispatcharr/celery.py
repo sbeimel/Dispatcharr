@@ -21,7 +21,7 @@ def get_effective_log_level():
                 file_level = f.read().strip().upper()
                 if file_level:
                     return file_level
-    except:
+    except (IOError, OSError):
         pass
 
     # 3. Fallback to default

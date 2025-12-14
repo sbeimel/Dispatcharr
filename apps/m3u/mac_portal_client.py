@@ -43,8 +43,8 @@ def _get_session(use_cloudscraper=False):
         if _session is not None:
             try:
                 _session.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing old session: {e}")
         
         # Use cloudscraper if available and requested (for Cloudflare bypass)
         if use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
@@ -74,8 +74,8 @@ def clear_session():
     if _session is not None:
         try:
             _session.close()
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Error closing session during clear: {e}")
         _session = None
         _session_created = 0
         logger.debug("Cleared requests session")
