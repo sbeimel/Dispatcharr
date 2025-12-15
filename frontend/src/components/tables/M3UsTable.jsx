@@ -476,7 +476,9 @@ const M3UTable = () => {
         size: 100,
         cell: ({ cell }) => {
           const value = cell.getValue();
-          return value === 'XC' ? 'XC' : 'M3U';
+          if (value === 'XC') return 'XC';
+          if (value === 'MAC' || value === 'mac') return 'MAC/STB';
+          return 'M3U';
         },
       },
       {

@@ -35,6 +35,7 @@ class PortalEngine(Enum):
     OB2_2025 = "ob2_2025"            # OB2_2025 Prüflogik
     ESTALKER = "estalker"            # EStalker Enigma2
     BOXPIRATE = "boxpirate"          # BoxPirate Dreambox
+    ALLINONE = "allinone"            # Best-of-All kombiniert
     UNIFIED = "unified"              # Unified (alle kombiniert)
     AUTO = "auto"                    # Automatische Erkennung
 
@@ -115,11 +116,13 @@ class BasePortalStrategy:
     ]
     
     def __init__(self, portal_url: str, identity: PortalIdentity, 
-                 user_agent: str = 'MAG250', timeout: int = 30):
+                 user_agent: str = 'MAG250', timeout: int = 30,
+                 proxy: Optional[str] = None):
         self.portal_url = portal_url.rstrip('/')
         self.identity = identity
         self.user_agent = self.USER_AGENTS.get(user_agent, user_agent)
         self.timeout = timeout
+        self.proxy = proxy
         self.session = self._create_session()
     
     def _create_session(self) -> requests.Session:
@@ -130,6 +133,12 @@ class BasePortalStrategy:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
+    
+    def _get_proxies(self) -> Optional[Dict[str, str]]:
+        """Get proxy configuration."""
+        if not self.proxy:
+            return None
+        return {"http": self.proxy, "https": self.proxy}
     
     def _get_base_headers(self) -> Dict[str, str]:
         """Basis-Headers für alle Requests."""
@@ -160,6 +169,365 @@ class BasePortalStrategy:
     def get_profile(self, token: str) -> Dict[str, Any]:
         """Hole Profil-Daten - muss überschrieben werden."""
         raise NotImplementedError
+    
+    def _make_request(self, params: Dict[str, Any], token: str, 
+                       method: str = "GET") -> Optional[Dict[str, Any]]:
+        """
+        Make a request to the portal with proper headers/cookies for this engine.
+        
+        Args:
+            params: Request parameters (type, action, etc.)
+            token: Authentication token
+            method: HTTP method (GET or POST)
+            
+        Returns:
+            JSON response or None
+        """
+        headers = self._get_base_headers()
+        headers["Authorization"] = f"Bearer {token}"
+        cookies = self._get_cookies()
+        proxies = self._get_proxies()
+        
+        params["JsHttpRequest"] = "1-xml"
+        
+        for endpoint in self.ENDPOINTS:
+            url = f"{self.portal_url}{endpoint}"
+            
+            try:
+                if method.upper() == "GET":
+                    response = self.session.get(
+                        url, params=params, headers=headers,
+                        cookies=cookies, proxies=proxies,
+                        timeout=self.timeout, verify=False
+                    )
+                else:
+                    response = self.session.post(
+                        url, data=params, headers=headers,
+                        cookies=cookies, proxies=proxies,
+                        timeout=self.timeout, verify=False
+                    )
+                
+                if response.status_code == 200:
+                    try:
+                        return response.json()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"{self.NAME}: Request failed for {endpoint}: {e}")
+        
+        return None
+
+    def create_link(self, cmd: str, token: str, content_type: str = "itv", 
+                    series: str = "0") -> Optional[str]:
+        """
+        Resolve a portal channel command into a final stream URL.
+        
+        Args:
+            cmd: Channel command (e.g., "ffmpeg http://...")
+            token: Authentication token
+            content_type: "itv" for live TV, "vod" for VOD
+            series: Episode number for series (default "0")
+            
+        Returns:
+            Resolved stream URL or None
+        """
+        params = {
+            "type": content_type,
+            "action": "create_link",
+            "cmd": cmd,
+            "series": series,
+            "forced_storage": "false",
+            "disable_ad": "false",
+            "download": "false",
+            "force_ch_link_check": "false",
+        }
+        
+        # Try GET first, then POST
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    if link and (link.startswith("http://") or link.startswith("https://")):
+                        logger.info(f"{self.NAME}: create_link successful via {method}")
+                        return link
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: create_link parse failed: {e}")
+        
+        return None
+
+    def get_all_channels(self, token: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get all live TV channels from portal.
+        
+        Args:
+            token: Authentication token
+            
+        Returns:
+            List of channel dicts or None
+        """
+        params = {
+            "type": "itv",
+            "action": "get_all_channels",
+            "force_ch_link_check": "",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    channels = data.get("js", {}).get("data", [])
+                    if channels:
+                        logger.info(f"{self.NAME}: Got {len(channels)} channels via {method}")
+                        return channels
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_all_channels parse failed: {e}")
+        
+        return None
+
+    def get_genres(self, token: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get live TV genres/categories from portal.
+        
+        Args:
+            token: Authentication token
+            
+        Returns:
+            List of genre dicts or None
+        """
+        params = {
+            "type": "itv",
+            "action": "get_genres",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    genres = data.get("js", [])
+                    if genres:
+                        logger.info(f"{self.NAME}: Got {len(genres)} genres via {method}")
+                        return genres
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_genres parse failed: {e}")
+        
+        return None
+
+    def get_vod_categories(self, token: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get VOD categories from portal.
+        
+        Args:
+            token: Authentication token
+            
+        Returns:
+            List of category dicts or None
+        """
+        params = {
+            "type": "vod",
+            "action": "get_categories",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    categories = data.get("js", [])
+                    if categories:
+                        logger.info(f"{self.NAME}: Got {len(categories)} VOD categories via {method}")
+                        return categories
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_vod_categories parse failed: {e}")
+        
+        return None
+
+    def get_vod_items(self, token: str, category_id: str = "*", 
+                      page: int = 1, sortby: str = "added") -> Optional[Dict[str, Any]]:
+        """
+        Get VOD items from portal.
+        
+        Args:
+            token: Authentication token
+            category_id: Category ID or "*" for all
+            page: Page number
+            sortby: Sort order (added, name, rating)
+            
+        Returns:
+            Dict with 'data' list and 'total_items' or None
+        """
+        params = {
+            "type": "vod",
+            "action": "get_ordered_list",
+            "category": category_id,
+            "p": str(page),
+            "sortby": sortby,
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    logger.info(f"{self.NAME}: Got {len(items)} VOD items via {method}")
+                    return {"data": items, "total_items": total}
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_vod_items parse failed: {e}")
+        
+        return None
+
+    def get_series_categories(self, token: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get Series categories from portal.
+        
+        Args:
+            token: Authentication token
+            
+        Returns:
+            List of category dicts or None
+        """
+        params = {
+            "type": "series",
+            "action": "get_categories",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    categories = data.get("js", [])
+                    if categories:
+                        logger.info(f"{self.NAME}: Got {len(categories)} Series categories via {method}")
+                        return categories
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_series_categories parse failed: {e}")
+        
+        return None
+
+    def get_series_items(self, token: str, category_id: str = "*",
+                         page: int = 1, sortby: str = "added") -> Optional[Dict[str, Any]]:
+        """
+        Get Series items from portal.
+        
+        Args:
+            token: Authentication token
+            category_id: Category ID or "*" for all
+            page: Page number
+            sortby: Sort order
+            
+        Returns:
+            Dict with 'data' list and 'total_items' or None
+        """
+        params = {
+            "type": "series",
+            "action": "get_ordered_list",
+            "category": category_id,
+            "p": str(page),
+            "sortby": sortby,
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    logger.info(f"{self.NAME}: Got {len(items)} Series items via {method}")
+                    return {"data": items, "total_items": total}
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_series_items parse failed: {e}")
+        
+        return None
+
+    def get_epg(self, token: str, period: int = 24) -> Optional[Dict[str, Any]]:
+        """
+        Get EPG data from portal.
+        
+        Args:
+            token: Authentication token
+            period: EPG period in hours
+            
+        Returns:
+            EPG data dict or None
+        """
+        params = {
+            "type": "itv",
+            "action": "get_epg_info",
+            "period": str(period),
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    epg = data.get("js", {}).get("data", {})
+                    if epg:
+                        logger.info(f"{self.NAME}: Got EPG data via {method}")
+                        return epg
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_epg parse failed: {e}")
+        
+        return None
+
+    def get_short_epg(self, token: str, channel_id: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Get short EPG for a specific channel.
+        
+        Args:
+            token: Authentication token
+            channel_id: Channel ID
+            
+        Returns:
+            List of EPG entries or None
+        """
+        params = {
+            "type": "itv",
+            "action": "get_short_epg",
+            "ch_id": channel_id,
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    epg = data.get("js", {}).get("data", [])
+                    if epg:
+                        logger.info(f"{self.NAME}: Got short EPG for channel {channel_id}")
+                        return epg
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_short_epg parse failed: {e}")
+        
+        return None
+
+    def get_account_info(self, token: str) -> Optional[Dict[str, Any]]:
+        """
+        Get account info (expiry, etc.) from portal.
+        
+        Args:
+            token: Authentication token
+            
+        Returns:
+            Account info dict or None
+        """
+        params = {
+            "type": "account_info",
+            "action": "get_main_info",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, token, method)
+            if data:
+                try:
+                    info = data.get("js", {})
+                    if info:
+                        logger.info(f"{self.NAME}: Got account info")
+                        return info
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_account_info parse failed: {e}")
+        
+        return None
 
 
 class MacReplayStrategy(BasePortalStrategy):
@@ -645,6 +1013,440 @@ class OB2_2025Strategy(BasePortalStrategy):
         return {}
 
 
+class AllinOneStrategy(BasePortalStrategy):
+    """
+    AllinOne Best-of-All Strategy - Kombiniert die besten Techniken aus allen Engines.
+    
+    Features:
+    - Alle Cookies: mac, stb_lang, timezone, adid (EStalker/OB2_2025)
+    - Vollständige Metriken: serial_number, device_id, device_id2, signature, hw_version_2, prehash
+    - api_signature: 263 (OB2_2025)
+    - Prehash-Support für "missing" Responses (EStalker)
+    - GET/POST Fallback für alle Operationen
+    - User-Agent Rotation bei Fehlern
+    - Referer Header für create_link (BoxPirate)
+    """
+    
+    NAME = "allinone"
+    DESCRIPTION = "AllinOne Best-of-All (Kombiniert alle Techniken)"
+    
+    # User-Agent Rotation Pool
+    USER_AGENT_POOL = [
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/533.3',
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG254 stbapp ver: 2 rev: 369 Safari/533.3',
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG322 stbapp ver: 4 rev: 2721 Safari/533.3',
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG424 stbapp ver: 5 rev: 3116 Safari/533.3',
+    ]
+    
+    # Extended Endpoints (alle bekannten Pfade)
+    ENDPOINTS = [
+        '/server/load.php',
+        '/portal.php',
+        '/stalker_portal/server/load.php',
+        '/c/server/load.php',
+        '/c/',
+        '/stalker_portal/c/',
+    ]
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._current_ua_index = 0
+        self._failed_attempts = 0
+    
+    def _get_cookies(self) -> Dict[str, str]:
+        """AllinOne Cookies - Alle wichtigen Cookies kombiniert."""
+        return {
+            "mac": self.identity.mac,
+            "stb_lang": self.identity.lang,
+            "timezone": self.identity.timezone,
+            "adid": self.identity.adid,  # EStalker/OB2_2025
+        }
+    
+    def _get_base_headers(self) -> Dict[str, str]:
+        """AllinOne Headers - Erweiterte Headers mit Rotation."""
+        parsed = urlparse(self.portal_url)
+        
+        # Rotiere User-Agent bei Fehlern
+        ua = self.USER_AGENT_POOL[self._current_ua_index % len(self.USER_AGENT_POOL)]
+        
+        # Bestimme STB-Modell aus User-Agent
+        if "MAG254" in ua:
+            model = "MAG254"
+        elif "MAG322" in ua:
+            model = "MAG322"
+        elif "MAG424" in ua:
+            model = "MAG424"
+        else:
+            model = "MAG250"
+        
+        return {
+            "Host": parsed.netloc,
+            "Accept": "*/*",
+            "User-Agent": ua,
+            "Accept-Encoding": "gzip, deflate",
+            "X-User-Agent": f"Model: {model}; Link: WiFi",
+            "Connection": "close",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+        }
+    
+    def _rotate_user_agent(self):
+        """Rotiere zum nächsten User-Agent."""
+        self._current_ua_index = (self._current_ua_index + 1) % len(self.USER_AGENT_POOL)
+        logger.debug(f"AllinOne: Rotated to User-Agent index {self._current_ua_index}")
+    
+    def perform_handshake(self) -> HandshakeResult:
+        """
+        AllinOne Handshake - Kombiniert alle Techniken.
+        
+        1. Standard Handshake versuchen
+        2. Bei "missing" Response: Prehash-Methode (EStalker)
+        3. Bei Fehler: User-Agent rotieren und erneut versuchen
+        """
+        max_ua_attempts = len(self.USER_AGENT_POOL)
+        
+        for ua_attempt in range(max_ua_attempts):
+            headers = self._get_base_headers()
+            cookies = self._get_cookies()
+            
+            for endpoint in self.ENDPOINTS:
+                url = f"{self.portal_url}{endpoint}"
+                params = {
+                    "type": "stb",
+                    "action": "handshake",
+                    "JsHttpRequest": "1-xml",
+                }
+                
+                try:
+                    # Versuche POST zuerst (wie EStalker)
+                    response = self.session.post(
+                        url,
+                        params=params,
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=self.timeout,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        js = data.get("js", {})
+                        
+                        # Prüfe auf "missing" Nachricht (EStalker Prehash-Methode)
+                        if "msg" in js and "missing" in js.get("msg", "").lower():
+                            logger.debug(f"AllinOne: Got 'missing' response, trying prehash method")
+                            result = self._prehash_handshake(url, headers, cookies)
+                            if result.success:
+                                return result
+                            continue
+                        
+                        token = js.get("token")
+                        if token:
+                            return HandshakeResult(
+                                success=True,
+                                token=token,
+                                token_random=js.get("random", ""),
+                                portal_type="stalker",
+                                engine_used=self.NAME,
+                            )
+                    
+                    # Fallback: GET (wie MacReplay)
+                    response = self.session.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                        cookies=cookies,
+                        timeout=self.timeout,
+                        verify=False
+                    )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        js = data.get("js", {})
+                        
+                        if "msg" in js and "missing" in js.get("msg", "").lower():
+                            result = self._prehash_handshake(url, headers, cookies)
+                            if result.success:
+                                return result
+                            continue
+                        
+                        token = js.get("token")
+                        if token:
+                            return HandshakeResult(
+                                success=True,
+                                token=token,
+                                token_random=js.get("random", ""),
+                                portal_type="stalker",
+                                engine_used=self.NAME,
+                            )
+                            
+                except Exception as e:
+                    logger.debug(f"AllinOne handshake failed for {endpoint}: {e}")
+                    continue
+            
+            # Rotiere User-Agent für nächsten Versuch
+            if ua_attempt < max_ua_attempts - 1:
+                self._rotate_user_agent()
+                logger.info(f"AllinOne: Rotating User-Agent, attempt {ua_attempt + 2}/{max_ua_attempts}")
+        
+        return HandshakeResult(success=False, error="All endpoints and User-Agents failed", engine_used=self.NAME)
+    
+    def _prehash_handshake(self, url: str, headers: Dict[str, str], 
+                           cookies: Dict[str, str]) -> HandshakeResult:
+        """
+        Prehash-Handshake Methode (aus EStalker).
+        
+        Generiert Fake-Token und Prehash für Portale die "missing" zurückgeben.
+        """
+        # Generiere Fake-Token
+        fake_token = ''.join(random.choices(
+            string.ascii_uppercase + string.digits, k=32
+        ))
+        prehash = hashlib.sha1(fake_token.encode()).hexdigest()
+        
+        headers = headers.copy()
+        headers["Authorization"] = f"Bearer {fake_token}"
+        
+        params = {
+            "type": "stb",
+            "action": "handshake",
+            "JsHttpRequest": "1-xml",
+            "mac": self.identity.mac,
+            "prehash": prehash,
+        }
+        
+        try:
+            response = self.session.post(
+                url,
+                params=params,
+                headers=headers,
+                cookies=cookies,
+                timeout=self.timeout,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                js = data.get("js", {})
+                token = js.get("token")
+                
+                if token:
+                    logger.info("AllinOne: Prehash handshake successful")
+                    return HandshakeResult(
+                        success=True,
+                        token=token,
+                        token_random=js.get("random", ""),
+                        portal_type="stalker",
+                        engine_used=self.NAME,
+                    )
+        except Exception as e:
+            logger.debug(f"AllinOne prehash handshake failed: {e}")
+        
+        return HandshakeResult(success=False, error="Prehash handshake failed", engine_used=self.NAME)
+    
+    def get_profile(self, token: str) -> Dict[str, Any]:
+        """
+        AllinOne Profil - Kombiniert alle Metriken.
+        
+        Verwendet:
+        - MAG254 Metriken (EStalker)
+        - api_signature 263 (OB2_2025)
+        - Signature (BoxPirate)
+        - Prehash (EStalker/OB2_2025)
+        """
+        headers = self._get_base_headers()
+        headers["Authorization"] = f"Bearer {token}"
+        cookies = self._get_cookies()
+        
+        dt = datetime.now()
+        timestamp = str(int(dt.timestamp()))
+        
+        # Vollständige Metriken (kombiniert aus allen Engines)
+        metrics = {
+            "type": "stb",
+            "model": "MAG254",
+            "mac": self.identity.mac,
+            "sn": self.identity.serial_number,
+            "uid": "",
+            "random": self.identity.token_random or ""
+        }
+        
+        # Vollständige Parameter (Best-of-All)
+        params = {
+            "type": "stb",
+            "action": "get_profile",
+            "JsHttpRequest": "1-xml",
+            "mac": self.identity.mac,
+            "hd": "1",
+            "ver": "ImageDescription: 0.2.18-r14-pub-250; ImageDate: Fri Jan 15 15:20:44 EET 2016; PORTAL version: 5.3.0; API Version: JS API version: 328; STB API version: 134; Player Engine version: 0x566",
+            "num_banks": "2",
+            "sn": self.identity.serial_number,
+            "stb_type": "MAG254",
+            "client_type": "STB",
+            "image_version": "218",
+            "video_out": "hdmi",
+            "device_id": self.identity.device_id,
+            "device_id2": self.identity.device_id2,
+            "signature": self.identity.signature,  # BoxPirate
+            "auth_second_step": "1",
+            "hw_version": "1.7-BD-00",
+            "hw_version_2": self.identity.hw_version_2,
+            "not_valid_token": "0",
+            "metrics": quote(json.dumps(metrics)),
+            "timestamp": timestamp,
+            "api_signature": "263",  # OB2_2025
+            "prehash": self.identity.prehash,  # EStalker/OB2_2025
+        }
+        
+        # Versuche POST zuerst, dann GET
+        for method in ["POST", "GET"]:
+            for endpoint in self.ENDPOINTS:
+                url = f"{self.portal_url}{endpoint}"
+                try:
+                    if method == "POST":
+                        response = self.session.post(
+                            url,
+                            params=params,
+                            headers=headers,
+                            cookies=cookies,
+                            timeout=self.timeout,
+                            verify=False
+                        )
+                    else:
+                        response = self.session.get(
+                            url,
+                            params=params,
+                            headers=headers,
+                            cookies=cookies,
+                            timeout=self.timeout,
+                            verify=False
+                        )
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("js"):
+                            logger.info(f"AllinOne: get_profile successful via {method}")
+                            return data
+                except Exception as e:
+                    logger.debug(f"AllinOne get_profile failed for {endpoint} via {method}: {e}")
+                    continue
+        
+        return {}
+    
+    def _make_request(self, params: Dict[str, Any], token: str, 
+                       method: str = "GET") -> Optional[Dict[str, Any]]:
+        """
+        AllinOne Request - Mit allen erweiterten Features.
+        
+        - Alle Cookies (inkl. adid)
+        - Erweiterte Headers (inkl. Referer)
+        - GET/POST Fallback
+        """
+        headers = self._get_base_headers()
+        headers["Authorization"] = f"Bearer {token}"
+        cookies = self._get_cookies()
+        proxies = self._get_proxies()
+        
+        params["JsHttpRequest"] = "1-xml"
+        
+        # Versuche beide Methoden
+        methods_to_try = [method.upper()]
+        if method.upper() == "GET":
+            methods_to_try.append("POST")
+        else:
+            methods_to_try.append("GET")
+        
+        for try_method in methods_to_try:
+            for endpoint in self.ENDPOINTS:
+                url = f"{self.portal_url}{endpoint}"
+                
+                try:
+                    if try_method == "GET":
+                        response = self.session.get(
+                            url, params=params, headers=headers,
+                            cookies=cookies, proxies=proxies,
+                            timeout=self.timeout, verify=False
+                        )
+                    else:
+                        response = self.session.post(
+                            url, data=params, headers=headers,
+                            cookies=cookies, proxies=proxies,
+                            timeout=self.timeout, verify=False
+                        )
+                    
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            if data:
+                                return data
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"AllinOne: Request failed for {endpoint} via {try_method}: {e}")
+        
+        return None
+    
+    def create_link(self, cmd: str, token: str, content_type: str = "itv", 
+                    series: str = "0") -> Optional[str]:
+        """
+        AllinOne create_link - Mit Referer Header (BoxPirate Style).
+        """
+        headers = self._get_base_headers()
+        headers["Authorization"] = f"Bearer {token}"
+        # Referer für create_link (BoxPirate)
+        parsed = urlparse(self.portal_url)
+        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/c/"
+        
+        cookies = self._get_cookies()
+        proxies = self._get_proxies()
+        
+        params = {
+            "type": content_type,
+            "action": "create_link",
+            "cmd": cmd,
+            "series": series,
+            "forced_storage": "false",
+            "disable_ad": "false",
+            "download": "false",
+            "force_ch_link_check": "false",
+            "JsHttpRequest": "1-xml",
+        }
+        
+        # Versuche GET und POST
+        for method in ["GET", "POST"]:
+            for endpoint in self.ENDPOINTS:
+                url = f"{self.portal_url}{endpoint}"
+                
+                try:
+                    if method == "GET":
+                        response = self.session.get(
+                            url, params=params, headers=headers,
+                            cookies=cookies, proxies=proxies,
+                            timeout=self.timeout, verify=False
+                        )
+                    else:
+                        response = self.session.post(
+                            url, data=params, headers=headers,
+                            cookies=cookies, proxies=proxies,
+                            timeout=self.timeout, verify=False
+                        )
+                    
+                    if response.status_code == 200:
+                        try:
+                            data = response.json()
+                            link = data.get("js", {}).get("cmd", "").split()[-1]
+                            if link and (link.startswith("http://") or link.startswith("https://")):
+                                logger.info(f"AllinOne: create_link successful via {method}")
+                                return link
+                        except Exception as e:
+                            logger.debug(f"AllinOne: create_link parse failed: {e}")
+                except Exception as e:
+                    logger.debug(f"AllinOne: create_link failed for {endpoint} via {method}: {e}")
+        
+        return None
+
+
 class UnifiedPortalEngine:
     """
     Unified Portal Engine - Kombiniert alle Strategien.
@@ -658,6 +1460,7 @@ class UnifiedPortalEngine:
         PortalEngine.ESTALKER: EStalkerStrategy,
         PortalEngine.BOXPIRATE: BoxPirateStrategy,
         PortalEngine.OB2_2025: OB2_2025Strategy,
+        PortalEngine.ALLINONE: AllinOneStrategy,
     }
     
     # Cache für erfolgreiche Strategien pro Portal
@@ -689,7 +1492,8 @@ class UnifiedPortalEngine:
             portal_url=self.portal_url,
             identity=self.identity,
             user_agent=self.user_agent,
-            timeout=self.timeout
+            timeout=self.timeout,
+            proxy=getattr(self, 'proxy', None)
         )
     
     def perform_handshake(self) -> HandshakeResult:
@@ -788,6 +1592,141 @@ class UnifiedPortalEngine:
         
         return result
     
+    def create_link(self, cmd: str, content_type: str = "itv") -> Optional[str]:
+        """
+        Resolve a portal channel command into a final stream URL.
+        Uses the configured/cached engine strategy.
+        
+        Args:
+            cmd: Channel command (e.g., "ffmpeg http://...")
+            content_type: "itv" for live TV, "vod" for VOD
+            
+        Returns:
+            Resolved stream URL or raises exception
+        """
+        # Ensure we have a valid token
+        if not self._last_result or not self._last_result.success:
+            result = self.perform_handshake()
+            if not result.success:
+                raise ValueError(f"Handshake failed: {result.error}")
+        
+        token = self._last_result.token
+        engine_used = self._last_result.engine_used
+        
+        # Determine which engine to use
+        if engine_used and engine_used in [e.value for e in PortalEngine]:
+            engine = PortalEngine(engine_used)
+        elif self.engine != PortalEngine.AUTO and self.engine != PortalEngine.UNIFIED:
+            engine = self.engine
+        else:
+            # Use cached strategy or default to MacReplay
+            cache_key = self._get_cache_key()
+            engine = self._strategy_cache.get(cache_key, PortalEngine.MACREPLAY)
+        
+        logger.info(f"UnifiedPortalEngine.create_link using engine: {engine.value}")
+        
+        try:
+            strategy = self._get_strategy(engine)
+            link = strategy.create_link(cmd, token, content_type)
+            
+            if link:
+                return link
+        except Exception as e:
+            logger.debug(f"create_link with {engine.value} failed: {e}")
+        
+        # Fallback: Try all strategies if specific one failed
+        if self.engine == PortalEngine.AUTO or self.engine == PortalEngine.UNIFIED:
+            for fallback_engine in self.STRATEGIES.keys():
+                if fallback_engine == engine:
+                    continue
+                try:
+                    strategy = self._get_strategy(fallback_engine)
+                    link = strategy.create_link(cmd, token, content_type)
+                    if link:
+                        logger.info(f"create_link fallback successful with {fallback_engine.value}")
+                        return link
+                except Exception as e:
+                    logger.debug(f"create_link fallback with {fallback_engine.value} failed: {e}")
+        
+        raise ValueError(f"Could not create link for cmd: {cmd}")
+
+    def _get_active_strategy_and_token(self):
+        """Get the active strategy and token, performing handshake if needed."""
+        if not self._last_result or not self._last_result.success:
+            result = self.perform_handshake()
+            if not result.success:
+                raise ValueError(f"Handshake failed: {result.error}")
+        
+        token = self._last_result.token
+        engine_used = self._last_result.engine_used
+        
+        if engine_used and engine_used in [e.value for e in PortalEngine]:
+            engine = PortalEngine(engine_used)
+        elif self.engine != PortalEngine.AUTO and self.engine != PortalEngine.UNIFIED:
+            engine = self.engine
+        else:
+            cache_key = self._get_cache_key()
+            engine = self._strategy_cache.get(cache_key, PortalEngine.MACREPLAY)
+        
+        strategy = self._get_strategy(engine)
+        return strategy, token, engine
+
+    def get_all_channels(self) -> Optional[List[Dict[str, Any]]]:
+        """Get all live TV channels using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_all_channels using engine: {engine.value}")
+        return strategy.get_all_channels(token)
+
+    def get_genres(self) -> Optional[List[Dict[str, Any]]]:
+        """Get live TV genres/categories using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_genres using engine: {engine.value}")
+        return strategy.get_genres(token)
+
+    def get_vod_categories(self) -> Optional[List[Dict[str, Any]]]:
+        """Get VOD categories using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_vod_categories using engine: {engine.value}")
+        return strategy.get_vod_categories(token)
+
+    def get_vod_items(self, category_id: str = "*", page: int = 1, 
+                      sortby: str = "added") -> Optional[Dict[str, Any]]:
+        """Get VOD items using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_vod_items using engine: {engine.value}")
+        return strategy.get_vod_items(token, category_id, page, sortby)
+
+    def get_series_categories(self) -> Optional[List[Dict[str, Any]]]:
+        """Get Series categories using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_series_categories using engine: {engine.value}")
+        return strategy.get_series_categories(token)
+
+    def get_series_items(self, category_id: str = "*", page: int = 1,
+                         sortby: str = "added") -> Optional[Dict[str, Any]]:
+        """Get Series items using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_series_items using engine: {engine.value}")
+        return strategy.get_series_items(token, category_id, page, sortby)
+
+    def get_epg(self, period: int = 24) -> Optional[Dict[str, Any]]:
+        """Get EPG data using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_epg using engine: {engine.value}")
+        return strategy.get_epg(token, period)
+
+    def get_short_epg(self, channel_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Get short EPG for a channel using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_short_epg using engine: {engine.value}")
+        return strategy.get_short_epg(token, channel_id)
+
+    def get_account_info(self) -> Optional[Dict[str, Any]]:
+        """Get account info using the configured engine."""
+        strategy, token, engine = self._get_active_strategy_and_token()
+        logger.info(f"UnifiedPortalEngine.get_account_info using engine: {engine.value}")
+        return strategy.get_account_info(token)
+    
     @classmethod
     def get_available_engines(cls) -> List[Dict[str, str]]:
         """Liste aller verfügbaren Engines."""
@@ -823,7 +1762,8 @@ class UnifiedPortalEngine:
 
 def create_portal_client(portal_url: str, mac: str, 
                          engine: str = "auto",
-                         user_agent: str = "MAG250") -> UnifiedPortalEngine:
+                         user_agent: str = "MAG250",
+                         proxy: Optional[str] = None) -> UnifiedPortalEngine:
     """
     Factory-Funktion für UnifiedPortalEngine.
     
@@ -832,6 +1772,7 @@ def create_portal_client(portal_url: str, mac: str,
         mac: MAC-Adresse
         engine: Engine-Name (auto, macreplay, estalker, boxpirate, ob2_2025)
         user_agent: User-Agent Preset
+        proxy: Optional proxy URL
     
     Returns:
         UnifiedPortalEngine Instanz
@@ -841,12 +1782,14 @@ def create_portal_client(portal_url: str, mac: str,
     except ValueError:
         engine_enum = PortalEngine.AUTO
     
-    return UnifiedPortalEngine(
+    client = UnifiedPortalEngine(
         portal_url=portal_url,
         mac=mac,
         engine=engine_enum,
         user_agent=user_agent
     )
+    client.proxy = proxy  # Set proxy for create_link
+    return client
 
 
 def test_portal_connection(portal_url: str, mac: str, 

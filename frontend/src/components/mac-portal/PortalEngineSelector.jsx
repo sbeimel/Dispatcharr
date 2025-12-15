@@ -37,6 +37,14 @@ const PORTAL_ENGINES = [
     badge: 'Recommended',
   },
   {
+    value: 'allinone',
+    label: 'AllinOne Best-of-All',
+    description: 'Combines the best techniques from all engines: prehash, signature, api_signature 263, User-Agent rotation',
+    icon: IconRocket,
+    color: 'teal',
+    badge: 'Best-of-All',
+  },
+  {
     value: 'unified',
     label: 'Unified (All Strategies)',
     description: 'Combines all strategies for maximum compatibility',
@@ -126,6 +134,9 @@ const PortalEngineSelector = ({ value, onChange, disabled = false }) => {
         </Text>
         <Text size="xs" mt="xs">
           • <strong>Auto-Detect:</strong> Best for most users - automatically finds working strategy
+        </Text>
+        <Text size="xs">
+          • <strong>AllinOne:</strong> Best-of-All - combines prehash, signature, api_signature 263, UA rotation
         </Text>
         <Text size="xs">
           • <strong>MacReplayXC:</strong> Standard strategy, works with most portals

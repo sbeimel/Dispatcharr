@@ -42,6 +42,8 @@ urlpatterns = [
     # Add proxy apps - Move these before the catch-all
     path("proxy/", include(("apps.proxy.urls", "proxy"), namespace="proxy")),
     path("proxy", RedirectView.as_view(url="/proxy/", permanent=True)),
+    # API proxy endpoints (for failover test)
+    path("api/proxy/", include(("apps.proxy.urls", "api_proxy"))),
     # xc
     re_path("player_api.php", xc_player_api, name="xc_player_api"),
     re_path("panel_api.php", xc_panel_api, name="xc_panel_api"),

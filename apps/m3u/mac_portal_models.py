@@ -128,6 +128,7 @@ class MACPortalGlobalSettings(models.Model):
     PORTAL_ENGINE_CHOICES = [
         ('auto', 'Auto-Detect (Recommended)'),
         ('unified', 'Unified (All Strategies)'),
+        ('allinone', 'AllinOne Best-of-All (Empfohlen)'),
         ('macreplay', 'MacReplayXC (Standard)'),
         ('estalker', 'EStalker (Enigma2 Style)'),
         ('boxpirate', 'BoxPirate (Dreambox Style)'),

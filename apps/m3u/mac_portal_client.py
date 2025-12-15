@@ -903,6 +903,10 @@ class MacPortalClient:
         resolving all URLs during import.
         """
         raw_list = self.get_all_channels_raw()
+        if not raw_list:
+            logger.warning(f"No channels returned for MAC {self.mac}")
+            return []
+        
         normalized = []
         
         for ch in raw_list:
@@ -943,12 +947,13 @@ class MacPortalClient:
         return normalized
     
     @staticmethod
-    def resolve_mac_url(mac_url: str, proxy: Optional[str] = None) -> str:
+    def resolve_mac_url(mac_url: str, proxy: Optional[str] = None, portal_engine: Optional[str] = None) -> str:
         """Resolve a mac:// URL to a real stream URL.
         
         Args:
             mac_url: URL in format mac://base64(portal_url|mac|cmd|proxy)
             proxy: Optional proxy to use (overrides encoded proxy)
+            portal_engine: Optional portal engine to use (auto, macreplay, estalker, boxpirate, ob2_2025)
             
         Returns:
             Real stream URL from create_link API
@@ -972,9 +977,34 @@ class MacPortalClient:
             # Use provided proxy, or fall back to encoded proxy
             use_proxy = proxy or encoded_proxy
             
-            logger.info(f"Resolving MAC URL for portal {portal_url}, MAC {mac[:8]}..., proxy: {use_proxy or 'none'}")
+            # Get portal_engine from settings if not provided
+            if not portal_engine:
+                try:
+                    from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+                    settings = MACPortalGlobalSettings.get_settings()
+                    portal_engine = getattr(settings, 'portal_engine', 'auto')
+                except Exception:
+                    portal_engine = 'auto'
             
-            # Create client and resolve URL
+            logger.info(f"Resolving MAC URL for portal {portal_url}, MAC {mac[:8]}..., engine: {portal_engine}, proxy: {use_proxy or 'none'}")
+            
+            # Use UnifiedPortalEngine if a specific engine is configured
+            if portal_engine and portal_engine != 'auto':
+                try:
+                    from apps.m3u.unified_portal_engine import create_portal_client
+                    unified_client = create_portal_client(
+                        portal_url=portal_url,
+                        mac=mac,
+                        engine=portal_engine,
+                        proxy=use_proxy
+                    )
+                    resolved_url = unified_client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL via {portal_engine} to: {resolved_url[:80]}...")
+                    return resolved_url
+                except Exception as e:
+                    logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
+            
+            # Fallback to standard MacPortalClient
             client = MacPortalClient(base_url=portal_url, mac=mac, proxy=use_proxy)
             resolved_url = client.create_link(cmd)
             logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
@@ -984,12 +1014,13 @@ class MacPortalClient:
             raise MacPortalError(f"Failed to resolve MAC URL: {e}")
 
     @staticmethod
-    def resolve_mac_url_with_busy_check(mac_url: str, proxy: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    def resolve_mac_url_with_busy_check(mac_url: str, proxy: Optional[str] = None, portal_engine: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """Resolve a mac:// URL to a real stream URL, preferring non-busy MACs.
         
         Args:
             mac_url: URL in format mac://base64(portal_url|mac|cmd|proxy)
             proxy: Optional proxy to use (overrides encoded proxy)
+            portal_engine: Optional portal engine to use (auto, macreplay, estalker, boxpirate, ob2_2025)
             
         Returns:
             Tuple[str, Optional[str]]: (resolved_url, selected_mac) or raises MacPortalError
@@ -1010,6 +1041,15 @@ class MacPortalClient:
             cmd = parts[2]
             encoded_proxy = parts[3] if len(parts) > 3 else None
             use_proxy = proxy or encoded_proxy
+            
+            # Get portal_engine from settings if not provided
+            if not portal_engine:
+                try:
+                    from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+                    settings = MACPortalGlobalSettings.get_settings()
+                    portal_engine = getattr(settings, 'portal_engine', 'auto')
+                except Exception:
+                    portal_engine = 'auto'
             
             # Try to find the M3U account for this MAC to check for alternatives
             from apps.m3u.models import M3UAccountMac
@@ -1053,9 +1093,25 @@ class MacPortalClient:
             except Exception:
                 selected_mac = original_mac
             
-            logger.info(f"Resolving MAC URL with MAC {selected_mac[:8]}... (original: {original_mac[:8]}...)")
+            logger.info(f"Resolving MAC URL with MAC {selected_mac[:8]}... (original: {original_mac[:8]}...), engine: {portal_engine}")
             
-            # Create client and resolve URL with selected MAC
+            # Use UnifiedPortalEngine if a specific engine is configured
+            if portal_engine and portal_engine != 'auto':
+                try:
+                    from apps.m3u.unified_portal_engine import create_portal_client
+                    unified_client = create_portal_client(
+                        portal_url=portal_url,
+                        mac=selected_mac,
+                        engine=portal_engine,
+                        proxy=use_proxy
+                    )
+                    resolved_url = unified_client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL via {portal_engine} to: {resolved_url[:80]}...")
+                    return resolved_url, selected_mac
+                except Exception as e:
+                    logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
+            
+            # Fallback to standard MacPortalClient
             client = MacPortalClient(base_url=portal_url, mac=selected_mac, proxy=use_proxy)
             resolved_url = client.create_link(cmd)
             logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
@@ -1066,13 +1122,14 @@ class MacPortalClient:
             raise MacPortalError(f"Failed to resolve MAC URL: {e}")
     
     @staticmethod
-    def resolve_mac_url_with_failover_mac(mac_url: str, failover_mac: str, proxy: Optional[str] = None) -> str:
+    def resolve_mac_url_with_failover_mac(mac_url: str, failover_mac: str, proxy: Optional[str] = None, portal_engine: Optional[str] = None) -> str:
         """Resolve a mac:// URL to a real stream URL using a different MAC address for failover.
         
         Args:
             mac_url: URL in format mac://base64(portal_url|mac|cmd|proxy)
             failover_mac: MAC address to use instead of the one encoded in the URL
             proxy: Optional proxy to use (overrides encoded proxy)
+            portal_engine: Optional portal engine to use (auto, macreplay, estalker, boxpirate, ob2_2025)
             
         Returns:
             Real stream URL from create_link API
@@ -1096,9 +1153,34 @@ class MacPortalClient:
             # Use provided proxy, or fall back to encoded proxy
             use_proxy = proxy or encoded_proxy
             
-            logger.info(f"Resolving MAC URL for failover - portal {portal_url}, failover MAC {failover_mac[:8]}..., proxy: {use_proxy or 'none'}")
+            # Get portal_engine from settings if not provided
+            if not portal_engine:
+                try:
+                    from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+                    settings = MACPortalGlobalSettings.get_settings()
+                    portal_engine = getattr(settings, 'portal_engine', 'auto')
+                except Exception:
+                    portal_engine = 'auto'
             
-            # Create client with failover MAC and resolve URL
+            logger.info(f"Resolving MAC URL for failover - portal {portal_url}, failover MAC {failover_mac[:8]}..., engine: {portal_engine}, proxy: {use_proxy or 'none'}")
+            
+            # Use UnifiedPortalEngine if a specific engine is configured
+            if portal_engine and portal_engine != 'auto':
+                try:
+                    from apps.m3u.unified_portal_engine import create_portal_client
+                    unified_client = create_portal_client(
+                        portal_url=portal_url,
+                        mac=failover_mac,
+                        engine=portal_engine,
+                        proxy=use_proxy
+                    )
+                    resolved_url = unified_client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL via {portal_engine} with failover MAC to: {resolved_url[:80]}...")
+                    return resolved_url
+                except Exception as e:
+                    logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
+            
+            # Fallback to standard MacPortalClient
             client = MacPortalClient(base_url=portal_url, mac=failover_mac, proxy=use_proxy)
             resolved_url = client.create_link(cmd)
             logger.info(f"Resolved MAC URL with failover MAC to: {resolved_url[:80]}...")
@@ -1165,3 +1247,211 @@ def normalize_mac_address(mac: str) -> str:
     normalized = ':'.join(clean_mac[i:i+2] for i in range(0, 12, 2))
     
     return normalized.upper()
+
+
+def get_portal_client(base_url: str, mac: str, proxy: Optional[str] = None):
+    """
+    Factory function to get the appropriate portal client based on global settings.
+    
+    If a specific portal_engine is configured (not 'auto'), returns a UnifiedPortalEngine
+    that uses that engine for all operations. Otherwise returns a standard MacPortalClient.
+    
+    Args:
+        base_url: Portal base URL
+        mac: MAC address
+        proxy: Optional proxy URL
+        
+    Returns:
+        Either UnifiedPortalEngine or MacPortalClient instance
+    """
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        portal_engine = getattr(settings, 'portal_engine', 'auto')
+    except Exception:
+        portal_engine = 'auto'
+    
+    # If a specific engine is configured, use UnifiedPortalEngine
+    if portal_engine and portal_engine not in ('auto', 'unified'):
+        try:
+            from apps.m3u.unified_portal_engine import create_portal_client
+            logger.info(f"Using UnifiedPortalEngine with engine: {portal_engine}")
+            return create_portal_client(
+                portal_url=base_url,
+                mac=mac,
+                engine=portal_engine,
+                proxy=proxy
+            )
+        except Exception as e:
+            logger.warning(f"Failed to create UnifiedPortalEngine, falling back to MacPortalClient: {e}")
+    
+    # Default: use standard MacPortalClient
+    return MacPortalClient(base_url=base_url, mac=mac, proxy=proxy)
+
+
+class UnifiedMacPortalClient:
+    """
+    Wrapper class that provides MacPortalClient-compatible interface
+    but uses UnifiedPortalEngine internally when configured.
+    
+    This allows existing code to use the same interface while benefiting
+    from the engine selection feature.
+    """
+    
+    def __init__(self, base_url: str, mac: str, proxy: Optional[str] = None,
+                 timezone: str = "Europe/London"):
+        self.base_url = base_url
+        self.mac = mac
+        self.proxy = proxy
+        self.timezone = timezone
+        
+        # Get portal engine setting
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            self.portal_engine = getattr(settings, 'portal_engine', 'auto')
+        except Exception:
+            self.portal_engine = 'auto'
+        
+        # Create the appropriate client
+        self._unified_client = None
+        self._mac_client = None
+        
+        if self.portal_engine and self.portal_engine not in ('auto', 'unified'):
+            try:
+                from apps.m3u.unified_portal_engine import create_portal_client
+                self._unified_client = create_portal_client(
+                    portal_url=base_url,
+                    mac=mac,
+                    engine=self.portal_engine,
+                    proxy=proxy
+                )
+                logger.info(f"UnifiedMacPortalClient using engine: {self.portal_engine}")
+            except Exception as e:
+                logger.warning(f"Failed to create UnifiedPortalEngine: {e}")
+        
+        # Always create MacPortalClient as fallback
+        self._mac_client = MacPortalClient(
+            base_url=base_url,
+            mac=mac,
+            proxy=proxy,
+            timezone=timezone
+        )
+    
+    def get_channels(self) -> List[Dict[str, Any]]:
+        """Get all channels using the configured engine."""
+        if self._unified_client:
+            try:
+                raw_channels = self._unified_client.get_all_channels()
+                if raw_channels:
+                    # Normalize to MacPortalClient format
+                    return self._normalize_channels(raw_channels)
+            except Exception as e:
+                logger.warning(f"UnifiedPortalEngine.get_all_channels failed: {e}")
+        
+        # Fallback to MacPortalClient
+        return self._mac_client.get_channels()
+    
+    def _normalize_channels(self, raw_channels: List[Dict]) -> List[Dict]:
+        """Normalize raw channel data to MacPortalClient format."""
+        import base64
+        normalized = []
+        
+        # Get genres map for group names
+        genres_map = {}
+        if self._unified_client:
+            try:
+                genres = self._unified_client.get_genres()
+                if genres:
+                    for g in genres:
+                        gid = g.get('id')
+                        title = g.get('title') or g.get('name')
+                        if gid and title:
+                            genres_map[str(gid)] = title
+            except Exception:
+                pass
+        
+        for ch in raw_channels:
+            ch_id = ch.get('id')
+            name = ch.get('name') or f"Channel {ch_id}"
+            cmd = ch.get('cmd') or ''
+            
+            if not cmd:
+                continue
+            
+            # Detect group title
+            group_title = (
+                ch.get('tv_genre_title') or
+                ch.get('genre_title') or
+                ch.get('category_name') or
+                genres_map.get(str(ch.get('tv_genre_id', ''))) or
+                genres_map.get(str(ch.get('genre_id', ''))) or
+                'MAC'
+            )
+            
+            # Create mac:// URL
+            proxy_str = self.proxy or ""
+            mac_data = f"{self.base_url}|{self.mac}|{cmd}|{proxy_str}"
+            encoded_data = base64.urlsafe_b64encode(mac_data.encode()).decode()
+            url = f"mac://{encoded_data}"
+            
+            normalized.append({
+                'id': ch_id,
+                'name': name,
+                'group': group_title,
+                'url': url,
+                'logo': ch.get('logo') or ch.get('logo_url') or '',
+                'cmd': cmd,
+                'raw': ch,
+            })
+        
+        return normalized
+    
+    def get_expires(self) -> Optional[str]:
+        """Get account expiry info."""
+        if self._unified_client:
+            try:
+                info = self._unified_client.get_account_info()
+                if info:
+                    return info.get('phone') or info.get('tariff_expired_date')
+            except Exception:
+                pass
+        
+        return self._mac_client.get_expires()
+    
+    def create_link(self, cmd: str) -> str:
+        """Create stream link for a channel command."""
+        if self._unified_client:
+            try:
+                link = self._unified_client.create_link(cmd)
+                if link:
+                    return link
+            except Exception as e:
+                logger.warning(f"UnifiedPortalEngine.create_link failed: {e}")
+        
+        return self._mac_client.create_link(cmd)
+    
+    def handshake(self) -> str:
+        """Perform handshake and get token."""
+        if self._unified_client:
+            try:
+                result = self._unified_client.perform_handshake()
+                if result.success:
+                    return result.token
+            except Exception:
+                pass
+        
+        return self._mac_client.handshake()
+    
+    def get_genres_map(self) -> Dict[str, str]:
+        """Get genre ID to name mapping."""
+        if self._unified_client:
+            try:
+                genres = self._unified_client.get_genres()
+                if genres:
+                    return {str(g.get('id')): g.get('title') or g.get('name') 
+                            for g in genres if g.get('id')}
+            except Exception:
+                pass
+        
+        return self._mac_client.get_genres_map()

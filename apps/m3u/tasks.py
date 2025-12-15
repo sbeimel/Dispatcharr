@@ -1105,7 +1105,7 @@ def cleanup_streams(account_id, scan_start_time=timezone.now):
 def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
     # Import required models at the beginning
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import MacPortalClient, MacPortalError
+    from .mac_portal_client import MacPortalError  # UnifiedMacPortalClient used in sub-functions
     from apps.channels.models import Channel, ChannelGroup
     from django.utils import timezone
     import re
@@ -2690,7 +2690,7 @@ def refresh_single_m3u_account(account_id):
         streams_created = 0
         streams_updated = 0
 
-        if account.account_type in [M3UAccount.Types.STANDARD, M3UAccount.Types.MAC]:
+        if account.account_type in [M3UAccount.Types.STADNARD, M3UAccount.Types.MAC]:
             logger.debug(
                 f"Processing {account.get_account_type_display()} account ({account_id}) with groups: {existing_groups}"
             )
@@ -3012,7 +3012,7 @@ def send_m3u_update(account_id, action, progress, **kwargs):
 def _refresh_mac_account_with_groups(account_id):
     """Direct MAC account refresh function that also returns groups for processing."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import MacPortalClient, MacPortalError
+    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
     from django.utils import timezone
     
     try:
@@ -3071,7 +3071,8 @@ def _refresh_mac_account_with_groups(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                client = MacPortalClient(
+                # Use UnifiedMacPortalClient which automatically uses the configured engine
+                client = UnifiedMacPortalClient(
                     base_url=account.server_url,
                     mac=mac_obj.address,
                     proxy=getattr(account, 'proxy', None)
@@ -3171,7 +3172,7 @@ def _refresh_mac_account_with_groups(account_id):
 def _refresh_mac_account_direct(account_id):
     """Direct MAC account refresh function (non-Celery) to avoid anti-pattern."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import MacPortalClient, MacPortalError
+    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
     from django.utils import timezone
     
     try:
@@ -3229,7 +3230,8 @@ def _refresh_mac_account_direct(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                client = MacPortalClient(
+                # Use UnifiedMacPortalClient which automatically uses the configured engine
+                client = UnifiedMacPortalClient(
                     base_url=account.server_url,
                     mac=mac_obj.address,
                     proxy=getattr(account, 'proxy', None)
@@ -3313,7 +3315,7 @@ def refresh_mac_account(account_id):
 def check_mac_expiry(account_id=None):
     """Check MAC expiry status for accounts."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import MacPortalClient, MacPortalError
+    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
     from django.utils import timezone
     
     if account_id:
@@ -3351,7 +3353,8 @@ def check_mac_expiry(account_id=None):
             
             for mac_obj in macs:
                 try:
-                    client = MacPortalClient(
+                    # Use UnifiedMacPortalClient which automatically uses the configured engine
+                    client = UnifiedMacPortalClient(
                         base_url=account.server_url,
                         mac=mac_obj.address,
                         proxy=getattr(account, 'proxy', None)

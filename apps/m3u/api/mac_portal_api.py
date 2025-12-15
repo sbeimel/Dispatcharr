@@ -123,7 +123,17 @@ class MACPortalSettingsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
     
     def update(self, request, pk=None):
-        """PUT /api/mac-portal/settings/ - Update global settings."""
+        """PUT /api/mac-portal/settings/{pk}/ - Update global settings."""
+        settings = MACPortalGlobalSettings.get_settings()
+        serializer = MACPortalGlobalSettingsSerializer(settings, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['put', 'patch'])
+    def save(self, request):
+        """PUT/PATCH /api/mac-portal/settings/save/ - Update global settings (no pk required)."""
         settings = MACPortalGlobalSettings.get_settings()
         serializer = MACPortalGlobalSettingsSerializer(settings, data=request.data, partial=True)
         if serializer.is_valid():
@@ -165,16 +175,31 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
             'token_auto_refresh_enabled': settings.token_auto_refresh_enabled,
             'debug_logging_enabled': settings.debug_logging_enabled,
             'ob2_2025_engine_enabled': settings.ob2_2025_engine_enabled,
+            'portal_engine': settings.portal_engine,
         }
         return Response(features)
     
     def update(self, request, pk=None):
-        """PUT /api/mac-portal/features/ - Update feature toggles."""
+        """PUT /api/mac-portal/features/{pk}/ - Update feature toggles."""
         settings = MACPortalGlobalSettings.get_settings()
         
         for key, value in request.data.items():
-            if hasattr(settings, key) and isinstance(value, bool):
-                setattr(settings, key, value)
+            if hasattr(settings, key):
+                if isinstance(value, bool) or key == 'portal_engine':
+                    setattr(settings, key, value)
+        
+        settings.save()
+        return self.list(request)
+    
+    @action(detail=False, methods=['put', 'patch'])
+    def save(self, request):
+        """PUT/PATCH /api/mac-portal/features/save/ - Update feature toggles (no pk required)."""
+        settings = MACPortalGlobalSettings.get_settings()
+        
+        for key, value in request.data.items():
+            if hasattr(settings, key):
+                if isinstance(value, bool) or key == 'portal_engine':
+                    setattr(settings, key, value)
         
         settings.save()
         return self.list(request)
@@ -196,7 +221,17 @@ class FailoverSettingsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
     
     def update(self, request, pk=None):
-        """PUT /api/mac-portal/failover-settings/ - Update failover settings."""
+        """PUT /api/mac-portal/failover-settings/{pk}/ - Update failover settings."""
+        settings = FailoverSettings.get_settings()
+        serializer = FailoverSettingsSerializer(settings, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['put', 'patch'])
+    def save(self, request):
+        """PUT/PATCH /api/mac-portal/failover-settings/save/ - Update failover settings (no pk required)."""
         settings = FailoverSettings.get_settings()
         serializer = FailoverSettingsSerializer(settings, data=request.data, partial=True)
         if serializer.is_valid():

@@ -2670,7 +2670,7 @@ export default class API {
 
   static async updateMACPortalSettings(settings) {
     try {
-      const response = await request(`${host}/api/mac-portal/settings/`, {
+      const response = await request(`${host}/api/mac-portal/settings/save/`, {
         method: 'PUT',
         body: settings,
       });
