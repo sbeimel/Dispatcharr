@@ -11,7 +11,7 @@
 
 import React, { useState } from 'react';
 import { Box, Tabs, Title, Group, Text } from '@mantine/core';
-import {
+import { 
   IconDashboard,
   IconSettings,
   IconArrowsShuffle,
@@ -21,6 +21,9 @@ import {
   IconUsers,
   IconDownload,
 } from '@tabler/icons-react';
+
+// Import Tabs components
+const { List, Tab, Panel } = Tabs;
 
 // Import MAC Portal Components
 import MACPortalOverview from '../components/mac-portal/MACPortalOverview';
@@ -74,35 +77,35 @@ const MACPortalPage = () => {
           </Tabs.Tab>
         </Tabs.List>
 
-        <Tabs.Panel value="overview">
+        <Tabs.Panel value="overview" pt="xs">
           <MACPortalOverview />
         </Tabs.Panel>
 
-        <Tabs.Panel value="settings">
+        <Tabs.Panel value="settings" pt="xs">
           <MACPortalSettings />
         </Tabs.Panel>
 
-        <Tabs.Panel value="failover">
+        <Tabs.Panel value="failover" pt="xs">
           <FailoverSettings />
         </Tabs.Panel>
 
-        <Tabs.Panel value="health">
+        <Tabs.Panel value="health" pt="xs">
           <MACHealthDashboard />
         </Tabs.Panel>
 
-        <Tabs.Panel value="batch">
+        <Tabs.Panel value="batch" pt="xs">
           <MACBatchOperations />
         </Tabs.Panel>
 
-        <Tabs.Panel value="import-export">
+        <Tabs.Panel value="import-export" pt="xs">
           <MACImportExport />
         </Tabs.Panel>
 
-        <Tabs.Panel value="connection-test">
+        <Tabs.Panel value="connection-test" pt="xs">
           <ConnectionTestWizard />
         </Tabs.Panel>
 
-        <Tabs.Panel value="logs">
+        <Tabs.Panel value="logs" pt="xs">
           <DebugLogViewer />
         </Tabs.Panel>
       </Tabs>

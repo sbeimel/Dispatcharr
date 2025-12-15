@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "apps.proxy.apps.ProxyConfig",
     "apps.proxy.ts_proxy",
     "apps.vod.apps.VODConfig",
+    "apps.mac_portal",  # MAC Portal Management
     "core",
     "daphne",
     "drf_yasg",
