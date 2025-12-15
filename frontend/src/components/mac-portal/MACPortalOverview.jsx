@@ -43,6 +43,7 @@ import {
   IconDeviceTv,
   IconHeartbeat,
 } from '@tabler/icons-react';
+import API from '../../api';
 
 // API Base URL
 const API_BASE = '/api/mac-portal';
@@ -264,7 +265,14 @@ const MACPortalOverview = () => {
       setLoading(true);
       setError(null);
       
-      const response = await fetch(`${API_BASE}/overview/`);
+      // Get auth token for authenticated request
+      const token = await API.getAuthToken();
+      const response = await fetch(`${API_BASE}/overview/`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
       
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -288,9 +296,12 @@ const MACPortalOverview = () => {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
+      // Get auth token for authenticated request
+      const token = await API.getAuthToken();
       await fetch(`${API_BASE}/overview/refresh-status/`, {
         method: 'POST',
         headers: {
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       });

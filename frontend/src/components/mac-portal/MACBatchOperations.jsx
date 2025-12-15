@@ -55,7 +55,13 @@ const MACBatchOperations = ({ accountId, macs = [], onRefresh }) => {
   const fetchAllMACs = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/api/mac-portal/overview/');
+      const token = await API.getAuthToken();
+      const response = await fetch('/api/mac-portal/overview/', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
       if (response.ok) {
         const data = await response.json();
         const allMacs = [];

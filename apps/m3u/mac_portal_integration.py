@@ -1,7 +1,7 @@
 """
 MAC Portal Integration Module
 Integrates all MAC Portal components into a unified interface.
-Requirements: 41.1, 41.2, 41.3, 41.4
+Requirements: 41.1, 41.2, 41.3, 41.4, 100.1
 """
 
 from typing import Dict, Optional, List, Any
@@ -11,6 +11,7 @@ from .failover_manager import FailoverManager
 from .portal_type_detector import PortalTypeDetector, PortalType, XtreamCredentialExtractor
 from .multi_portal_support import HandshakeStrategySelector, HandshakeResult
 from .ob2_2025_engine import OB2_2025Engine, ErrorPatternRecognizer, HandshakeType
+from .unified_portal_engine import UnifiedPortalEngine, PortalEngine, create_portal_client
 from .extended_features import (
     FavoritesManager, RecentlyWatchedManager, SortingManager,
     SearchFilter, ParentalControl, HiddenCategoriesManager,
@@ -24,9 +25,10 @@ class MACPortalIntegration:
     Unified interface for all MAC Portal functionality.
     """
     
-    def __init__(self, account_id: int, use_ob2_2025: bool = False):
+    def __init__(self, account_id: int, use_ob2_2025: bool = False, portal_engine: str = 'auto'):
         self.account_id = account_id
         self.use_ob2_2025 = use_ob2_2025
+        self.portal_engine = portal_engine
         
         # Core managers
         self.token_manager = TokenManager(account_id)
@@ -39,8 +41,11 @@ class MACPortalIntegration:
         self.hidden_categories = HiddenCategoriesManager(account_id)
         self.parental_control = ParentalControl(account_id)
         
-        # OB2_2025 engine (optional)
+        # OB2_2025 engine (optional - deprecated, use unified_engine instead)
         self.ob2_engine = OB2_2025Engine(enabled=use_ob2_2025) if use_ob2_2025 else None
+        
+        # Unified Portal Engine (new)
+        self._unified_engine: Optional[UnifiedPortalEngine] = None
         
         # Portal client (set after initialization)
         self._portal_client = None
@@ -62,10 +67,51 @@ class MACPortalIntegration:
         self._detected_portal_type = result.portal_type
         return result.portal_type
     
-    def perform_handshake(self, portal_url: str, mac: str, session) -> HandshakeResult:
-        """Perform handshake with automatic strategy selection."""
+    def perform_handshake(self, portal_url: str, mac: str, session=None) -> HandshakeResult:
+        """
+        Perform handshake with automatic strategy selection.
+        
+        Uses the Unified Portal Engine if portal_engine is set,
+        otherwise falls back to legacy OB2_2025 or standard detection.
+        """
+        # Use Unified Portal Engine (new approach)
+        if self.portal_engine and self.portal_engine != 'auto':
+            self._unified_engine = create_portal_client(
+                portal_url=portal_url,
+                mac=mac,
+                engine=self.portal_engine
+            )
+            unified_result = self._unified_engine.perform_handshake()
+            
+            # Convert to legacy HandshakeResult format
+            return HandshakeResult(
+                success=unified_result.success,
+                token=unified_result.token,
+                token_random=unified_result.token_random,
+                portal_type=unified_result.portal_type or 'stalker',
+                error=unified_result.error
+            )
+        
+        # Auto mode: Try Unified Engine first
+        if self.portal_engine == 'auto':
+            self._unified_engine = create_portal_client(
+                portal_url=portal_url,
+                mac=mac,
+                engine='auto'
+            )
+            unified_result = self._unified_engine.perform_handshake()
+            
+            if unified_result.success:
+                return HandshakeResult(
+                    success=unified_result.success,
+                    token=unified_result.token,
+                    token_random=unified_result.token_random,
+                    portal_type=unified_result.portal_type or 'stalker',
+                    error=unified_result.error
+                )
+        
+        # Legacy: OB2_2025 engine
         if self.use_ob2_2025 and self.ob2_engine:
-            # Use OB2_2025 handshake order
             handshake_order = self.ob2_engine.get_handshake_order(portal_url)
             
             for handshake_type in handshake_order:
@@ -82,9 +128,9 @@ class MACPortalIntegration:
                     continue
             
             return HandshakeResult(success=False, error='All OB2_2025 handshake strategies failed')
-        else:
-            # Use standard auto-detection
-            return HandshakeStrategySelector.auto_detect_and_handshake(portal_url, mac, session)[0]
+        
+        # Legacy: Standard auto-detection
+        return HandshakeStrategySelector.auto_detect_and_handshake(portal_url, mac, session)[0]
     
     def get_channels_with_features(self, genre_id: str = None, **kwargs) -> List[Dict]:
         """Get channels with all extended features applied."""
@@ -209,7 +255,13 @@ def create_integration(account_id: int) -> MACPortalIntegration:
     try:
         settings = MACPortalGlobalSettings.get_settings()
         use_ob2_2025 = settings.ob2_2025_engine_enabled
+        portal_engine = getattr(settings, 'portal_engine', 'auto')
     except Exception:
         use_ob2_2025 = False
+        portal_engine = 'auto'
     
-    return MACPortalIntegration(account_id, use_ob2_2025=use_ob2_2025)
+    return MACPortalIntegration(
+        account_id, 
+        use_ob2_2025=use_ob2_2025,
+        portal_engine=portal_engine
+    )

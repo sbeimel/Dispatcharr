@@ -111,6 +111,8 @@ class FailurePattern(models.Model):
     )
     
     class Meta:
+        app_label = 'proxy'
+        db_table = 'proxy_failurepattern'
         ordering = ['-confidence', '-hit_count']
         verbose_name = "Failure Pattern"
         verbose_name_plural = "Failure Patterns"
@@ -322,6 +324,8 @@ class PredictiveFailoverEvent(models.Model):
     )
     
     class Meta:
+        app_label = 'proxy'
+        db_table = 'proxy_predictivefailoverevent'
         ordering = ['-timestamp']
         verbose_name = "Predictive Failover Event"
         verbose_name_plural = "Predictive Failover Events"
@@ -541,6 +545,8 @@ class StreamPredictiveSettings(models.Model):
     )
     
     class Meta:
+        app_label = 'proxy'
+        db_table = 'proxy_streampredictivesettings'
         verbose_name = "Stream Predictive Settings"
         verbose_name_plural = "Stream Predictive Settings"
         indexes = [

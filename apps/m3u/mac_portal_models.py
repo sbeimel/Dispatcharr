@@ -118,10 +118,26 @@ class MACPortalGlobalSettings(models.Model):
         help_text="Enable debug logging for portal operations"
     )
     
-    # OB2_2025 Engine Toggle (Requirement 76.1)
+    # OB2_2025 Engine Toggle (Requirement 76.1) - DEPRECATED, use portal_engine instead
     ob2_2025_engine_enabled = models.BooleanField(
         default=False,
-        help_text="Use OB2_2025 checking logic instead of MacReplay"
+        help_text="Use OB2_2025 checking logic instead of MacReplay (deprecated)"
+    )
+    
+    # Unified Portal Engine Selection (Requirement 100.1)
+    PORTAL_ENGINE_CHOICES = [
+        ('auto', 'Auto-Detect (Recommended)'),
+        ('unified', 'Unified (All Strategies)'),
+        ('macreplay', 'MacReplayXC (Standard)'),
+        ('estalker', 'EStalker (Enigma2 Style)'),
+        ('boxpirate', 'BoxPirate (Dreambox Style)'),
+        ('ob2_2025', 'OB2_2025 (Extended Metrics)'),
+    ]
+    portal_engine = models.CharField(
+        max_length=20,
+        choices=PORTAL_ENGINE_CHOICES,
+        default='auto',
+        help_text="Portal authentication engine to use"
     )
     
     created_at = models.DateTimeField(auto_now_add=True)

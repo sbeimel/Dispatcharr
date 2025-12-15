@@ -17,12 +17,17 @@ import {
   Badge,
   Alert,
   LoadingOverlay,
+  Tabs,
+  Modal,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconRefresh,
   IconPlus,
   IconAlertCircle,
+  IconDeviceTv,
+  IconList,
+  IconTestPipe,
 } from '@tabler/icons-react';
 import failoverTestApi from '../../api/failoverTestApi';
 import TestChannelList from './TestChannelList';
@@ -30,6 +35,7 @@ import TestChannelForm from './TestChannelForm';
 import StreamSimulator from './StreamSimulator';
 import LiveLogViewer from './LiveLogViewer';
 import TestStatistics from './TestStatistics';
+import RealChannelBrowser from './RealChannelBrowser';
 import useFailoverTestWebSocket from './hooks/useFailoverTestWebSocket';
 
 const FailoverTestPage = () => {
@@ -42,6 +48,8 @@ const FailoverTestPage = () => {
   const [statistics, setStatistics] = useState(null);
   const [settings, setSettings] = useState(null);
   const [activeSimulations, setActiveSimulations] = useState([]);
+  const [activeTab, setActiveTab] = useState('test');
+  const [showBrowserModal, setShowBrowserModal] = useState(false);
 
   // Handle WebSocket events - use useCallback to prevent reconnection loops
   const handleWebSocketEvent = React.useCallback((event) => {
@@ -247,6 +255,42 @@ const FailoverTestPage = () => {
     }
   };
 
+  // Handle importing channels from the browser
+  const handleImportFromBrowser = async (channelsToImport) => {
+    try {
+      for (const channel of channelsToImport) {
+        await failoverTestApi.importChannelForTest(channel.id);
+      }
+      notifications.show({
+        title: 'Success',
+        message: `Imported ${channelsToImport.length} channel(s)`,
+        color: 'green',
+      });
+      loadData();
+      setShowBrowserModal(false);
+    } catch (error) {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to import channels',
+        color: 'red',
+      });
+    }
+  };
+
+  // Handle creating test from channel/stream
+  const handleCreateTestFromChannel = async (channelData) => {
+    setEditingChannel(null);
+    // Pre-fill the form with channel data
+    const prefillData = {
+      name: channelData.name,
+      primary_stream_url: channelData.primary_stream_url || channelData.url || '',
+      original_channel_id: channelData.id,
+    };
+    setEditingChannel(prefillData);
+    setShowChannelForm(true);
+    setShowBrowserModal(false);
+  };
+
   if (loading) {
     return (
       <Box pos="relative" h={400}>
@@ -273,6 +317,13 @@ const FailoverTestPage = () => {
             Refresh
           </Button>
           <Button
+            variant="outline"
+            leftSection={<IconDeviceTv size={16} />}
+            onClick={() => setShowBrowserModal(true)}
+          >
+            Browse Channels
+          </Button>
+          <Button
             leftSection={<IconPlus size={16} />}
             onClick={() => setShowChannelForm(true)}
           >
@@ -281,60 +332,82 @@ const FailoverTestPage = () => {
         </Group>
       </Group>
 
-      <Alert icon={<IconAlertCircle size={16} />} color="blue" mb="md">
-        Test your failover configuration by creating test channels and simulating
-        stream interruptions. Watch the live log to see failover events in real-time.
-      </Alert>
+      <Tabs value={activeTab} onChange={setActiveTab} mb="md">
+        <Tabs.List>
+          <Tabs.Tab value="test" leftSection={<IconTestPipe size={14} />}>
+            Test Environment
+          </Tabs.Tab>
+          <Tabs.Tab value="channels" leftSection={<IconDeviceTv size={14} />}>
+            Real Channels & Streams
+          </Tabs.Tab>
+        </Tabs.List>
 
-      <Grid>
-        {/* Left Column - Channels and Simulator */}
-        <Grid.Col span={{ base: 12, md: 5 }}>
-          <Stack gap="md">
-            <Paper shadow="xs" p="md">
-              <TestChannelList
-                channels={testChannels}
-                selectedChannel={selectedChannel}
-                onSelect={setSelectedChannel}
-                onDelete={handleDeleteChannel}
-                onEdit={(ch) => {
-                  setEditingChannel(ch);
-                  setShowChannelForm(true);
-                }}
-              />
-            </Paper>
+        <Tabs.Panel value="test" pt="md">
+          <Alert icon={<IconAlertCircle size={16} />} color="blue" mb="md">
+            Test your failover configuration by creating test channels and simulating
+            stream interruptions. Watch the live log to see failover events in real-time.
+          </Alert>
 
-            {selectedChannel && (
-              <Paper shadow="xs" p="md">
-                <StreamSimulator
-                  channel={selectedChannel}
-                  activeSimulations={activeSimulations}
-                  onInterrupt={handleInterrupt}
-                  onStartAuto={handleStartAutoSimulation}
-                  onStop={handleStopSimulation}
+          <Grid>
+            {/* Left Column - Channels and Simulator */}
+            <Grid.Col span={{ base: 12, md: 5 }}>
+              <Stack gap="md">
+                <Paper shadow="xs" p="md">
+                  <TestChannelList
+                    channels={testChannels}
+                    selectedChannel={selectedChannel}
+                    onSelect={setSelectedChannel}
+                    onDelete={handleDeleteChannel}
+                    onEdit={(ch) => {
+                      setEditingChannel(ch);
+                      setShowChannelForm(true);
+                    }}
+                  />
+                </Paper>
+
+                {selectedChannel && (
+                  <Paper shadow="xs" p="md">
+                    <StreamSimulator
+                      channel={selectedChannel}
+                      activeSimulations={activeSimulations}
+                      onInterrupt={handleInterrupt}
+                      onStartAuto={handleStartAutoSimulation}
+                      onStop={handleStopSimulation}
+                    />
+                  </Paper>
+                )}
+
+                <Paper shadow="xs" p="md">
+                  <TestStatistics
+                    statistics={statistics}
+                    onReset={handleResetStatistics}
+                    onExport={handleExportStatistics}
+                  />
+                </Paper>
+              </Stack>
+            </Grid.Col>
+
+            {/* Right Column - Live Log */}
+            <Grid.Col span={{ base: 12, md: 7 }}>
+              <Paper shadow="xs" p="md" h="100%">
+                <LiveLogViewer
+                  entries={logEntries}
+                  onExport={handleExportLogs}
                 />
               </Paper>
-            )}
+            </Grid.Col>
+          </Grid>
+        </Tabs.Panel>
 
-            <Paper shadow="xs" p="md">
-              <TestStatistics
-                statistics={statistics}
-                onReset={handleResetStatistics}
-                onExport={handleExportStatistics}
-              />
-            </Paper>
-          </Stack>
-        </Grid.Col>
-
-        {/* Right Column - Live Log */}
-        <Grid.Col span={{ base: 12, md: 7 }}>
-          <Paper shadow="xs" p="md" h="100%">
-            <LiveLogViewer
-              entries={logEntries}
-              onExport={handleExportLogs}
+        <Tabs.Panel value="channels" pt="md">
+          <Paper shadow="xs" p="md">
+            <RealChannelBrowser
+              onImportChannel={handleImportFromBrowser}
+              onCreateTestFromChannel={handleCreateTestFromChannel}
             />
           </Paper>
-        </Grid.Col>
-      </Grid>
+        </Tabs.Panel>
+      </Tabs>
 
       {/* Channel Form Modal */}
       {showChannelForm && (
@@ -347,6 +420,19 @@ const FailoverTestPage = () => {
           }}
         />
       )}
+
+      {/* Channel Browser Modal */}
+      <Modal
+        opened={showBrowserModal}
+        onClose={() => setShowBrowserModal(false)}
+        title="Browse Channels & Streams"
+        size="xl"
+      >
+        <RealChannelBrowser
+          onImportChannel={handleImportFromBrowser}
+          onCreateTestFromChannel={handleCreateTestFromChannel}
+        />
+      </Modal>
     </Box>
   );
 };

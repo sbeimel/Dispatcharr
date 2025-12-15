@@ -42,8 +42,11 @@ export { default as SeriesDetailView } from './SeriesDetailView';
 export { default as PortalTypeBadge } from './PortalTypeBadge';
 export { default as StreamValidationStatus } from './StreamValidationStatus';
 
-// OB2_2025 Components
+// OB2_2025 Components (deprecated - use PortalEngineSelector)
 export { default as OB2_2025Toggle } from './OB2_2025Toggle';
+
+// Unified Portal Engine Components
+export { default as PortalEngineSelector } from './PortalEngineSelector';
 
 // Overview Component
 export { default as MACPortalOverview } from './MACPortalOverview';

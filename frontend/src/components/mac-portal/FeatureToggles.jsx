@@ -2,7 +2,7 @@
  * Feature Toggles Component
  * 
  * Enable/disable optional MAC Portal features.
- * Requirements: 47.1, 47.2, 47.3, 47.4
+ * Requirements: 47.1, 47.2, 47.3, 47.4, 100.1
  */
 
 import React, { useState, useEffect } from 'react';
@@ -17,6 +17,7 @@ import {
   Badge,
   Divider,
 } from '@mantine/core';
+import PortalEngineSelector from './PortalEngineSelector';
 
 const FeatureToggles = ({ settings, onSave }) => {
   const [localSettings, setLocalSettings] = useState({
@@ -32,6 +33,7 @@ const FeatureToggles = ({ settings, onSave }) => {
     token_auto_refresh_enabled: true,
     debug_logging_enabled: false,
     ob2_2025_engine_enabled: false,
+    portal_engine: 'auto',
   });
   const [hasChanges, setHasChanges] = useState(false);
 
@@ -50,6 +52,7 @@ const FeatureToggles = ({ settings, onSave }) => {
         token_auto_refresh_enabled: settings.token_auto_refresh_enabled ?? true,
         debug_logging_enabled: settings.debug_logging_enabled ?? false,
         ob2_2025_engine_enabled: settings.ob2_2025_engine_enabled ?? false,
+        portal_engine: settings.portal_engine ?? 'auto',
       });
       setHasChanges(false);
     }
@@ -83,6 +86,7 @@ const FeatureToggles = ({ settings, onSave }) => {
         token_auto_refresh_enabled: settings.token_auto_refresh_enabled ?? true,
         debug_logging_enabled: settings.debug_logging_enabled ?? false,
         ob2_2025_engine_enabled: settings.ob2_2025_engine_enabled ?? false,
+        portal_engine: settings.portal_engine ?? 'auto',
       });
       setHasChanges(false);
     }
@@ -175,6 +179,14 @@ const FeatureToggles = ({ settings, onSave }) => {
       </Paper>
 
       <Paper withBorder p="md">
+        <Title order={4} mb="md">Portal Engine</Title>
+        <PortalEngineSelector
+          value={localSettings.portal_engine}
+          onChange={(value) => handleChange('portal_engine', value)}
+        />
+      </Paper>
+
+      <Paper withBorder p="md">
         <Title order={4} mb="md">Advanced Features</Title>
         <Stack gap="sm">
           <FeatureSwitch
@@ -182,13 +194,6 @@ const FeatureToggles = ({ settings, onSave }) => {
             label="Debug Logging"
             description="Enable detailed debug logs"
             badge={{ text: 'Dev', color: 'yellow' }}
-          />
-          <Divider my="xs" />
-          <FeatureSwitch
-            field="ob2_2025_engine_enabled"
-            label="OB2_2025 Engine"
-            description="Use alternative portal authentication engine"
-            badge={{ text: 'Experimental', color: 'orange' }}
           />
         </Stack>
       </Paper>
