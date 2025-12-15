@@ -1,8 +1,12 @@
 /**
- * Failover Test Page - Redesigned
+ * Failover Test Page - Klon der Channels-Seite mit Failover-Test-Funktionen
  * 
- * Shows real channels like the Channels tab with ability to kill streams
- * and watch failover events in real-time.
+ * Features:
+ * - Channels-Tabelle wie im Channels-Tab
+ * - Vorschau-Funktion (Video Player)
+ * - Kill FFmpeg Button - beendet den aktiven Stream
+ * - Simulate Error Button - simuliert verschiedene Fehler
+ * - Live Log für Failover-Events
  */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
@@ -24,10 +28,12 @@ import {
   Tooltip,
   Modal,
   Alert,
-  Code,
   Loader,
   Switch,
-  Collapse,
+  Menu,
+  Center,
+  Flex,
+  NativeSelect,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
@@ -36,16 +42,19 @@ import {
   IconAlertTriangle,
   IconSearch,
   IconTrash,
-  IconChevronDown,
-  IconChevronRight,
   IconActivity,
   IconWifi,
   IconWifiOff,
   IconBolt,
   IconPlayerPlay,
+  IconX,
+  IconChevronDown,
+  IconChevronRight,
 } from '@tabler/icons-react';
+import { CirclePlay, SquareMinus } from 'lucide-react';
 import API from '../../api';
-import useChannelsStore from '../../store/channels';
+import useVideoStore from '../../store/useVideoStore';
+import useSettingsStore from '../../store/settings';
 
 const FailoverTestPage = () => {
   // State
@@ -55,13 +64,19 @@ const FailoverTestPage = () => {
   const [logEntries, setLogEntries] = useState([]);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-  const [expandedChannels, setExpandedChannels] = useState(new Set());
+  const [pageSize, setPageSize] = useState(50);
   const [wsConnected, setWsConnected] = useState(false);
   const [autoScroll, setAutoScroll] = useState(true);
   const [killingStream, setKillingStream] = useState(null);
+  const [simulatingError, setSimulatingError] = useState(null);
+  const [expandedChannels, setExpandedChannels] = useState(new Set());
+  const [channelStreams, setChannelStreams] = useState({});
 
-  // WebSocket for live logs
+  // Video Store für Vorschau
+  const showVideo = useVideoStore((s) => s.showVideo);
+  const env_mode = useSettingsStore((s) => s.environment?.env_mode);
+
+  // WebSocket für Live Logs
   useEffect(() => {
     let ws = null;
     let reconnectTimer = null;
@@ -70,58 +85,67 @@ const FailoverTestPage = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/failover-test/`;
       
-      ws = new WebSocket(wsUrl);
-      
-      ws.onopen = () => {
-        setWsConnected(true);
-        console.log('Failover test WebSocket connected');
-      };
-      
-      ws.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          if (data.type === 'log_entry' || data.type === 'failover_event') {
-            setLogEntries(prev => {
-              const newEntries = [data.data, ...prev].slice(0, 500);
-              return newEntries;
-            });
-          } else if (data.type === 'stream_status') {
-            setActiveStreams(prev => ({
-              ...prev,
-              [data.data.channel_id]: data.data,
-            }));
+      try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+          setWsConnected(true);
+          addLogEntry('system', 'WebSocket verbunden - Live Logs aktiv');
+        };
+        
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'log_entry' || data.type === 'failover_event') {
+              setLogEntries(prev => [data.data, ...prev].slice(0, 500));
+            } else if (data.type === 'stream_status') {
+              setActiveStreams(prev => ({
+                ...prev,
+                [data.data.channel_id]: data.data,
+              }));
+            }
+          } catch (e) {
+            console.error('WebSocket parse error:', e);
           }
-        } catch (e) {
-          console.error('WebSocket message parse error:', e);
-        }
-      };
-      
-      ws.onclose = () => {
-        setWsConnected(false);
-        reconnectTimer = setTimeout(connect, 3000);
-      };
-      
-      ws.onerror = () => {
-        ws.close();
-      };
+        };
+        
+        ws.onclose = () => {
+          setWsConnected(false);
+          reconnectTimer = setTimeout(connect, 3000);
+        };
+        
+        ws.onerror = () => ws.close();
+      } catch (e) {
+        console.log('WebSocket not available');
+      }
     };
 
     connect();
-
     return () => {
       if (ws) ws.close();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   }, []);
 
-  // Load channels
+  // Helper: Log Entry hinzufügen
+  const addLogEntry = (type, message, extra = {}) => {
+    setLogEntries(prev => [{
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      event_type: type,
+      message,
+      ...extra,
+    }, ...prev].slice(0, 500));
+  };
+
+  // Channels laden
   const loadChannels = useCallback(async () => {
     setLoading(true);
     try {
       const response = await API.getChannels();
       setChannels(response || []);
       
-      // Also load active streams
+      // Active Streams laden
       try {
         const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
         const streamsResponse = await fetch(`${host}/api/proxy/active-streams/`, {
@@ -136,35 +160,26 @@ const FailoverTestPage = () => {
           setActiveStreams(streamMap);
         }
       } catch (e) {
-        console.log('Could not load active streams:', e);
+        console.log('Could not load active streams');
       }
     } catch (error) {
-      console.error('Failed to load channels:', error);
-      notifications.show({
-        title: 'Error',
-        message: 'Failed to load channels',
-        color: 'red',
-      });
+      notifications.show({ title: 'Fehler', message: 'Channels konnten nicht geladen werden', color: 'red' });
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    loadChannels();
-  }, [loadChannels]);
+  useEffect(() => { loadChannels(); }, [loadChannels]);
 
-  // Filter channels
+  // Filter & Pagination
   const filteredChannels = useMemo(() => {
     if (!search) return channels;
-    const searchLower = search.toLowerCase();
+    const s = search.toLowerCase();
     return channels.filter(ch => 
-      ch.name?.toLowerCase().includes(searchLower) ||
-      ch.channel_number?.toString().includes(searchLower)
+      ch.name?.toLowerCase().includes(s) || ch.channel_number?.toString().includes(s)
     );
   }, [channels, search]);
 
-  // Paginate
   const paginatedChannels = useMemo(() => {
     const start = (page - 1) * pageSize;
     return filteredChannels.slice(start, start + pageSize);
@@ -172,43 +187,30 @@ const FailoverTestPage = () => {
 
   const totalPages = Math.ceil(filteredChannels.length / pageSize);
 
-  // Channel streams cache
-  const [channelStreams, setChannelStreams] = useState({});
-
-  // Toggle channel expansion and load streams
-  const toggleExpand = async (channelId) => {
-    const isCurrentlyExpanded = expandedChannels.has(channelId);
-    
-    setExpandedChannels(prev => {
-      const next = new Set(prev);
-      if (next.has(channelId)) {
-        next.delete(channelId);
-      } else {
-        next.add(channelId);
-      }
-      return next;
-    });
-
-    // Load streams if expanding and not already loaded
-    if (!isCurrentlyExpanded && !channelStreams[channelId]) {
-      try {
-        const streams = await API.getChannelStreams(channelId);
-        setChannelStreams(prev => ({
-          ...prev,
-          [channelId]: streams || [],
-        }));
-      } catch (e) {
-        console.log('Could not load streams for channel:', channelId, e);
-      }
-    }
+  // Channel URL generieren
+  const getChannelURL = (channel) => {
+    if (!channel?.uuid) return '';
+    const uri = `/proxy/ts/stream/${channel.uuid}`;
+    const host = env_mode === 'dev' 
+      ? `${window.location.protocol}//${window.location.hostname}:5656`
+      : `${window.location.protocol}//${window.location.host}`;
+    return `${host}${uri}`;
   };
 
-  // Kill stream for a channel
-  const killStream = async (channelId) => {
-    setKillingStream(channelId);
+  // Vorschau starten
+  const handleWatchStream = (channel) => {
+    const url = getChannelURL(channel);
+    addLogEntry('preview', `Vorschau gestartet: ${channel.name}`, { channel_id: channel.id });
+    showVideo(url);
+  };
+
+
+  // Kill FFmpeg - Stream beenden
+  const killStream = async (channel) => {
+    setKillingStream(channel.id);
     try {
       const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
-      const response = await fetch(`${host}/api/proxy/kill-stream/${channelId}/`, {
+      const response = await fetch(`${host}/api/proxy/kill-stream/${channel.id}/`, {
         method: 'POST',
         headers: { 
           Authorization: `Bearer ${await API.getAuthToken()}`,
@@ -217,59 +219,114 @@ const FailoverTestPage = () => {
       });
       
       if (response.ok) {
-        const result = await response.json();
+        addLogEntry('stream_killed', `FFmpeg beendet für: ${channel.name}`, { 
+          channel_id: channel.id,
+          success: true 
+        });
         notifications.show({
-          title: 'Stream Killed',
-          message: `Killed stream for channel ${channelId}. Failover should trigger.`,
+          title: 'Stream beendet',
+          message: `FFmpeg für "${channel.name}" wurde beendet. Failover sollte starten.`,
           color: 'orange',
         });
-        
-        // Add to log
-        setLogEntries(prev => [{
-          id: Date.now(),
-          timestamp: new Date().toISOString(),
-          event_type: 'stream_killed',
-          channel_id: channelId,
-          message: `Stream manually killed - waiting for failover`,
-          success: true,
-        }, ...prev].slice(0, 500));
-        
-        // Refresh active streams
         setTimeout(loadChannels, 1000);
       } else {
-        throw new Error('Failed to kill stream');
+        throw new Error('Kill failed');
       }
     } catch (error) {
-      notifications.show({
-        title: 'Error',
-        message: 'Failed to kill stream',
-        color: 'red',
-      });
+      addLogEntry('error', `Fehler beim Beenden: ${channel.name}`, { channel_id: channel.id });
+      notifications.show({ title: 'Fehler', message: 'Stream konnte nicht beendet werden', color: 'red' });
     } finally {
       setKillingStream(null);
     }
   };
 
-  // Clear logs
-  const clearLogs = () => {
-    setLogEntries([]);
+  // Simulate Error - verschiedene Fehlertypen simulieren
+  const simulateError = async (channel, errorType = 'timeout') => {
+    setSimulatingError(channel.id);
+    try {
+      const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
+      const response = await fetch(`${host}/api/proxy/simulate-error/${channel.id}/`, {
+        method: 'POST',
+        headers: { 
+          Authorization: `Bearer ${await API.getAuthToken()}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ error_type: errorType }),
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        addLogEntry('error_simulated', `Fehler simuliert (${errorType}): ${channel.name}`, { 
+          channel_id: channel.id,
+          error_type: errorType,
+        });
+        notifications.show({
+          title: 'Fehler simuliert',
+          message: `${errorType} Fehler für "${channel.name}" ausgelöst`,
+          color: 'yellow',
+        });
+      } else {
+        // Fallback: Lokale Simulation
+        addLogEntry('error_simulated', `Fehler simuliert (lokal): ${channel.name}`, { 
+          channel_id: channel.id,
+          error_type: errorType,
+        });
+        notifications.show({
+          title: 'Fehler simuliert (lokal)',
+          message: `${errorType} Fehler für "${channel.name}" - API nicht verfügbar`,
+          color: 'yellow',
+        });
+      }
+    } catch (error) {
+      // Lokale Simulation als Fallback
+      addLogEntry('error_simulated', `Fehler simuliert (lokal): ${channel.name}`, { 
+        channel_id: channel.id,
+        error_type: errorType,
+      });
+    } finally {
+      setSimulatingError(null);
+    }
   };
 
-  // Format timestamp
-  const formatTime = (ts) => {
-    if (!ts) return '';
-    const d = new Date(ts);
-    return d.toLocaleTimeString();
+  // Streams für Channel laden
+  const toggleExpand = async (channelId) => {
+    const isExpanded = expandedChannels.has(channelId);
+    setExpandedChannels(prev => {
+      const next = new Set(prev);
+      isExpanded ? next.delete(channelId) : next.add(channelId);
+      return next;
+    });
+
+    if (!isExpanded && !channelStreams[channelId]) {
+      try {
+        const streams = await API.getChannelStreams(channelId);
+        setChannelStreams(prev => ({ ...prev, [channelId]: streams || [] }));
+      } catch (e) {
+        console.log('Could not load streams');
+      }
+    }
   };
 
-  // Get event color
+  // Logs löschen
+  const clearLogs = () => setLogEntries([]);
+
+  // Zeit formatieren
+  const formatTime = (ts) => ts ? new Date(ts).toLocaleTimeString('de-DE') : '';
+
+  // Event Farbe
   const getEventColor = (entry) => {
-    if (entry.event_type === 'failover_success') return 'green';
-    if (entry.event_type === 'failover_failed') return 'red';
-    if (entry.event_type === 'stream_killed') return 'orange';
-    if (entry.event_type === 'reconnect') return 'blue';
-    return 'gray';
+    const colors = {
+      failover_success: 'green',
+      failover_failed: 'red',
+      stream_killed: 'orange',
+      error_simulated: 'yellow',
+      reconnect: 'blue',
+      preview: 'cyan',
+      system: 'gray',
+    };
+    return colors[entry.event_type] || 'gray';
   };
+
 
   return (
     <Box p="md">
@@ -278,7 +335,7 @@ const FailoverTestPage = () => {
         <Group>
           <Title order={2}>Failover Test</Title>
           <Badge color={wsConnected ? 'green' : 'red'} variant="dot" size="lg">
-            {wsConnected ? 'Live' : 'Disconnected'}
+            {wsConnected ? 'Live' : 'Offline'}
           </Badge>
         </Group>
         <Button
@@ -287,22 +344,23 @@ const FailoverTestPage = () => {
           onClick={loadChannels}
           loading={loading}
         >
-          Refresh
+          Aktualisieren
         </Button>
       </Group>
 
       <Alert color="blue" mb="md" icon={<IconActivity size={16} />}>
-        Select a channel and click "Kill Stream" to terminate the active connection. 
-        This will trigger the failover mechanism. Watch the Live Log to see failover events.
+        Wähle einen Kanal und nutze die Test-Buttons: <strong>Vorschau</strong> startet den Stream, 
+        <strong> Kill FFmpeg</strong> beendet den aktiven Prozess, <strong>Simulate Error</strong> löst einen Fehler aus.
+        Beobachte das Live Log für Failover-Events.
       </Alert>
 
       <Box style={{ display: 'flex', gap: '16px', height: 'calc(100vh - 220px)' }}>
-        {/* Left: Channels Table */}
+        {/* Links: Channels Tabelle */}
         <Paper shadow="xs" p="md" style={{ flex: 2, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <Group justify="space-between" mb="md">
             <Text fw={600}>Channels ({filteredChannels.length})</Text>
             <TextInput
-              placeholder="Search channels..."
+              placeholder="Suchen..."
               leftSection={<IconSearch size={14} />}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -318,7 +376,7 @@ const FailoverTestPage = () => {
                   <Table.Th style={{ width: 60 }}>#</Table.Th>
                   <Table.Th>Name</Table.Th>
                   <Table.Th style={{ width: 100 }}>Status</Table.Th>
-                  <Table.Th style={{ width: 120 }}>Actions</Table.Th>
+                  <Table.Th style={{ width: 200 }}>Aktionen</Table.Th>
                 </Table.Tr>
               </Table.Thead>
               <Table.Tbody>
@@ -330,67 +388,90 @@ const FailoverTestPage = () => {
                     <React.Fragment key={channel.id}>
                       <Table.Tr>
                         <Table.Td>
-                          <ActionIcon
-                            variant="subtle"
-                            size="sm"
-                            onClick={() => toggleExpand(channel.id)}
-                          >
+                          <ActionIcon variant="subtle" size="sm" onClick={() => toggleExpand(channel.id)}>
                             {isExpanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
                           </ActionIcon>
                         </Table.Td>
-                        <Table.Td>{channel.channel_number}</Table.Td>
+                        <Table.Td>
+                          <Text size="sm" c="dimmed">{channel.channel_number}</Text>
+                        </Table.Td>
                         <Table.Td>
                           <Text size="sm" fw={500}>{channel.name}</Text>
                         </Table.Td>
                         <Table.Td>
                           {isActive ? (
-                            <Badge color="green" leftSection={<IconWifi size={10} />}>
-                              Active
-                            </Badge>
+                            <Badge color="green" leftSection={<IconWifi size={10} />}>Aktiv</Badge>
                           ) : (
-                            <Badge color="gray" leftSection={<IconWifiOff size={10} />}>
-                              Idle
-                            </Badge>
+                            <Badge color="gray" leftSection={<IconWifiOff size={10} />}>Idle</Badge>
                           )}
                         </Table.Td>
                         <Table.Td>
                           <Group gap="xs">
-                            <Tooltip label="Kill Stream (Trigger Failover)">
+                            {/* Vorschau Button */}
+                            <Tooltip label="Vorschau starten">
+                              <ActionIcon
+                                color="green"
+                                variant="light"
+                                onClick={() => handleWatchStream(channel)}
+                              >
+                                <CirclePlay size={16} />
+                              </ActionIcon>
+                            </Tooltip>
+
+                            {/* Kill FFmpeg Button */}
+                            <Tooltip label="Kill FFmpeg (Stream beenden)">
                               <ActionIcon
                                 color="red"
                                 variant="light"
-                                onClick={() => killStream(channel.id)}
+                                onClick={() => killStream(channel)}
                                 loading={killingStream === channel.id}
                                 disabled={!isActive}
                               >
                                 <IconPlayerStop size={16} />
                               </ActionIcon>
                             </Tooltip>
-                            <Tooltip label="Simulate Error">
-                              <ActionIcon
-                                color="orange"
-                                variant="light"
-                                onClick={() => {
-                                  // Simulate different error types
-                                  notifications.show({
-                                    title: 'Simulating Error',
-                                    message: 'Triggering timeout error...',
-                                    color: 'orange',
-                                  });
-                                }}
-                              >
-                                <IconBolt size={16} />
-                              </ActionIcon>
-                            </Tooltip>
+
+                            {/* Simulate Error Menu */}
+                            <Menu shadow="md" width={200}>
+                              <Menu.Target>
+                                <Tooltip label="Fehler simulieren">
+                                  <ActionIcon
+                                    color="orange"
+                                    variant="light"
+                                    loading={simulatingError === channel.id}
+                                  >
+                                    <IconBolt size={16} />
+                                  </ActionIcon>
+                                </Tooltip>
+                              </Menu.Target>
+                              <Menu.Dropdown>
+                                <Menu.Label>Fehlertyp wählen</Menu.Label>
+                                <Menu.Item onClick={() => simulateError(channel, 'timeout')}>
+                                  Timeout Error
+                                </Menu.Item>
+                                <Menu.Item onClick={() => simulateError(channel, 'connection_reset')}>
+                                  Connection Reset
+                                </Menu.Item>
+                                <Menu.Item onClick={() => simulateError(channel, 'http_403')}>
+                                  HTTP 403 Forbidden
+                                </Menu.Item>
+                                <Menu.Item onClick={() => simulateError(channel, 'http_404')}>
+                                  HTTP 404 Not Found
+                                </Menu.Item>
+                                <Menu.Item onClick={() => simulateError(channel, 'stream_corrupt')}>
+                                  Stream Corrupt
+                                </Menu.Item>
+                              </Menu.Dropdown>
+                            </Menu>
                           </Group>
                         </Table.Td>
                       </Table.Tr>
                       
-                      {/* Expanded row with streams */}
+                      {/* Expanded: Streams anzeigen */}
                       {isExpanded && (
                         <Table.Tr>
                           <Table.Td colSpan={5} style={{ background: 'var(--mantine-color-dark-7)', padding: '8px 16px' }}>
-                            <Text size="xs" c="dimmed" mb="xs">Streams for this channel:</Text>
+                            <Text size="xs" c="dimmed" mb="xs">Streams für diesen Kanal:</Text>
                             {channelStreams[channel.id]?.length > 0 ? (
                               <Stack gap="xs">
                                 {channelStreams[channel.id].map((stream, idx) => (
@@ -398,11 +479,8 @@ const FailoverTestPage = () => {
                                     <Badge size="xs" color={idx === 0 ? 'blue' : 'gray'}>
                                       {idx === 0 ? 'Primary' : `Backup ${idx}`}
                                     </Badge>
-                                    <Text size="xs" style={{ fontFamily: 'monospace', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    <Text size="xs" ff="monospace" style={{ maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                       {stream.url || stream.m3u_account?.name || 'Unknown'}
-                                    </Text>
-                                    <Text size="xs" c="dimmed">
-                                      ({stream.m3u_account?.name || 'Custom'})
                                     </Text>
                                   </Group>
                                 ))}
@@ -410,7 +488,7 @@ const FailoverTestPage = () => {
                             ) : channelStreams[channel.id] === undefined ? (
                               <Loader size="xs" />
                             ) : (
-                              <Text size="xs" c="dimmed">No streams configured</Text>
+                              <Text size="xs" c="dimmed">Keine Streams konfiguriert</Text>
                             )}
                           </Table.Td>
                         </Table.Tr>
@@ -424,65 +502,45 @@ const FailoverTestPage = () => {
 
           {/* Pagination */}
           <Group justify="space-between" mt="md">
-            <Select
+            <NativeSelect
               value={pageSize.toString()}
-              onChange={(v) => setPageSize(parseInt(v))}
-              data={['10', '25', '50', '100']}
+              onChange={(e) => setPageSize(parseInt(e.target.value))}
+              data={['25', '50', '100', '200']}
               style={{ width: 80 }}
               size="xs"
             />
-            <Pagination
-              total={totalPages}
-              value={page}
-              onChange={setPage}
-              size="sm"
-            />
+            <Pagination total={totalPages} value={page} onChange={setPage} size="sm" />
           </Group>
         </Paper>
 
-        {/* Right: Live Log */}
+        {/* Rechts: Live Log */}
         <Paper shadow="xs" p="md" style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <Group justify="space-between" mb="md">
             <Text fw={600}>Live Log</Text>
             <Group gap="xs">
-              <Switch
-                label="Auto-scroll"
-                checked={autoScroll}
-                onChange={(e) => setAutoScroll(e.target.checked)}
-                size="xs"
-              />
-              <ActionIcon variant="subtle" onClick={clearLogs}>
-                <IconTrash size={14} />
-              </ActionIcon>
+              <Switch label="Auto-scroll" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} size="xs" />
+              <ActionIcon variant="subtle" onClick={clearLogs}><IconTrash size={14} /></ActionIcon>
             </Group>
           </Group>
 
           <ScrollArea style={{ flex: 1 }} viewportRef={(ref) => {
-            if (ref && autoScroll && logEntries.length > 0) {
-              ref.scrollTop = 0;
-            }
+            if (ref && autoScroll && logEntries.length > 0) ref.scrollTop = 0;
           }}>
             <Stack gap="xs">
               {logEntries.length === 0 ? (
                 <Text size="sm" c="dimmed" ta="center" py="xl">
-                  No events yet. Kill a stream to trigger failover.
+                  Noch keine Events. Starte eine Vorschau oder beende einen Stream.
                 </Text>
               ) : (
                 logEntries.map((entry, idx) => (
                   <Paper key={entry.id || idx} p="xs" withBorder style={{ borderLeftWidth: 3, borderLeftColor: `var(--mantine-color-${getEventColor(entry)}-6)` }}>
                     <Group justify="space-between" mb={4}>
-                      <Badge size="xs" color={getEventColor(entry)}>
-                        {entry.event_type}
-                      </Badge>
+                      <Badge size="xs" color={getEventColor(entry)}>{entry.event_type}</Badge>
                       <Text size="xs" c="dimmed">{formatTime(entry.timestamp)}</Text>
                     </Group>
-                    <Text size="xs">{entry.message || entry.reason || 'Event occurred'}</Text>
-                    {entry.channel_id && (
-                      <Text size="xs" c="dimmed">Channel: {entry.channel_id}</Text>
-                    )}
-                    {entry.duration_ms && (
-                      <Text size="xs" c="dimmed">Duration: {entry.duration_ms}ms</Text>
-                    )}
+                    <Text size="xs">{entry.message}</Text>
+                    {entry.channel_id && <Text size="xs" c="dimmed">Channel ID: {entry.channel_id}</Text>}
+                    {entry.error_type && <Text size="xs" c="dimmed">Error Type: {entry.error_type}</Text>}
                   </Paper>
                 ))
               )}

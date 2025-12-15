@@ -185,3 +185,74 @@ def kill_stream(request, channel_id):
     except Exception as e:
         logger.error(f"Error killing stream for channel {channel_id}: {e}")
         return JsonResponse({'error': str(e)}, status=500)
+
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def simulate_error(request, channel_id):
+    """Simulate various stream errors to test failover behavior."""
+    try:
+        import time
+        import datetime
+        
+        error_type = request.data.get('error_type', 'timeout')
+        
+        redis_client = RedisClient.get_instance()
+        if not redis_client:
+            return JsonResponse({'error': 'Redis not available'}, status=503)
+        
+        # Simuliere verschiedene Fehlertypen
+        error_messages = {
+            'timeout': 'Connection timeout - no response from server',
+            'connection_reset': 'Connection reset by peer',
+            'http_403': 'HTTP 403 Forbidden - Access denied',
+            'http_404': 'HTTP 404 Not Found - Stream not available',
+            'stream_corrupt': 'Stream data corrupt - invalid TS packets',
+        }
+        
+        message = error_messages.get(error_type, f'Unknown error: {error_type}')
+        
+        # Setze Error-Flag für den Channel
+        error_key = f'ts_proxy:channel:{channel_id}:simulated_error'
+        redis_client.set(error_key, error_type, ex=60)
+        
+        # Publiziere Error-Event
+        events_channel = f'ts_proxy:events:{channel_id}'
+        redis_client.publish(events_channel, f'error:{error_type}')
+        
+        # Sende WebSocket Event
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+        
+        try:
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                async_to_sync(channel_layer.group_send)(
+                    'failover_test',
+                    {
+                        'type': 'failover_event',
+                        'data': {
+                            'id': f'error_{channel_id}_{int(time.time() * 1000)}',
+                            'timestamp': datetime.datetime.now().isoformat(),
+                            'event_type': 'error_simulated',
+                            'channel_id': channel_id,
+                            'error_type': error_type,
+                            'message': message,
+                            'success': True,
+                        }
+                    }
+                )
+        except Exception as e:
+            logger.debug(f"Could not send WebSocket event: {e}")
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Error simulated for channel {channel_id}',
+            'error_type': error_type,
+            'error_message': message,
+        })
+        
+    except Exception as e:
+        logger.error(f"Error simulating error for channel {channel_id}: {e}")
+        return JsonResponse({'error': str(e)}, status=500)

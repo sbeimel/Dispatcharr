@@ -10,4 +10,5 @@ urlpatterns = [
     # Failover test endpoints
     path('active-streams/', proxy_views.get_active_streams, name='active-streams'),
     path('kill-stream/<int:channel_id>/', proxy_views.kill_stream, name='kill-stream'),
+    path('simulate-error/<int:channel_id>/', proxy_views.simulate_error, name='simulate-error'),
 ]
