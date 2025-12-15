@@ -84,13 +84,74 @@ class HandshakeResult:
     token: Optional[str] = None
     token_random: Optional[str] = None
     play_token: Optional[str] = None
-    portal_type: Optional[str] = None
+    portal_type: Optional[str] = None  # stalker, xtream, xui
+    portal_version: Optional[str] = None  # z.B. "5.3.0", "XUI 1.5.12"
     engine_used: Optional[str] = None
     error: Optional[str] = None
     status: int = 0
     blocked: str = "0"
     expire_date: str = ""
     extra_data: Dict[str, Any] = field(default_factory=dict)
+
+
+def detect_portal_type_and_version(profile_data: Dict[str, Any], response_headers: Dict[str, str] = None) -> Tuple[str, str]:
+    """
+    Erkennt Portal-Typ und Version aus Profil-Daten und Response-Headers.
+    
+    Returns:
+        Tuple[portal_type, portal_version]
+        portal_type: "stalker", "xtream", "xui", "ministra", "unknown"
+        portal_version: Version string oder "unknown"
+    """
+    portal_type = "unknown"
+    portal_version = "unknown"
+    
+    # Check response headers for server info
+    if response_headers:
+        server = response_headers.get('Server', '').lower()
+        x_powered_by = response_headers.get('X-Powered-By', '').lower()
+        
+        if 'nginx' in server:
+            portal_type = "stalker"  # Most Stalker portals use nginx
+        if 'xui' in x_powered_by or 'xtream' in x_powered_by:
+            portal_type = "xui"
+    
+    # Check profile data for portal type indicators
+    js_data = profile_data.get('js', profile_data)
+    
+    # XUI/Xtream indicators
+    if js_data.get('panel_type') or js_data.get('xui_version'):
+        portal_type = "xui"
+        portal_version = js_data.get('xui_version', js_data.get('panel_version', 'unknown'))
+    
+    # Ministra/Stalker indicators
+    if js_data.get('portal_version'):
+        portal_version = js_data.get('portal_version')
+        portal_type = "ministra" if 'ministra' in str(portal_version).lower() else "stalker"
+    
+    # Check for version in various fields
+    version_fields = ['version', 'api_version', 'server_version', 'portal_version']
+    for field in version_fields:
+        if js_data.get(field) and portal_version == "unknown":
+            portal_version = str(js_data.get(field))
+    
+    # Check for Xtream Codes specific fields
+    if js_data.get('server_info', {}).get('xui'):
+        portal_type = "xui"
+        portal_version = js_data.get('server_info', {}).get('version', portal_version)
+    
+    # Check for exp_date format (Xtream uses Unix timestamp, Stalker uses date string)
+    exp_date = js_data.get('exp_date') or js_data.get('expire_billing_date')
+    if exp_date:
+        try:
+            # If it's a large number, it's likely Xtream (Unix timestamp)
+            if isinstance(exp_date, (int, float)) or (isinstance(exp_date, str) and exp_date.isdigit() and len(exp_date) > 8):
+                if portal_type == "unknown":
+                    portal_type = "xtream"
+        except Exception:
+            pass
+    
+    return portal_type, portal_version
 
 
 class BasePortalStrategy:
@@ -1591,7 +1652,7 @@ class UnifiedPortalEngine:
         Vollständiger Login: Handshake + Profil.
         
         Returns:
-            HandshakeResult mit allen Daten inkl. Status/Blocked.
+            HandshakeResult mit allen Daten inkl. Status/Blocked und Portal-Version.
         """
         result = self.perform_handshake()
         
@@ -1608,6 +1669,15 @@ class UnifiedPortalEngine:
             result.blocked = js.get("blocked", "0")
             result.expire_date = js.get("tariff_expired_date", "")
             result.extra_data = js
+            
+            # Erkenne Portal-Typ und Version
+            portal_type, portal_version = detect_portal_type_and_version(profile_data)
+            if portal_type != "unknown":
+                result.portal_type = portal_type
+            if portal_version != "unknown":
+                result.portal_version = portal_version
+            
+            logger.info(f"Portal detected: type={result.portal_type}, version={result.portal_version}")
         
         return result
     

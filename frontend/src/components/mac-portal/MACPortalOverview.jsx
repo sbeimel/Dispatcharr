@@ -141,13 +141,23 @@ const PortalCard = ({ portal, onRefresh }) => {
           </ThemeIcon>
           <Title order={5}>{portal.name}</Title>
           <Badge size="sm" variant="outline">
-            {portal.type || 'Unknown'}
+            {portal.portal_type || portal.type || 'Unknown'}
           </Badge>
+          {portal.portal_version && portal.portal_version !== 'unknown' && (
+            <Badge size="sm" variant="light" color="blue">
+              v{portal.portal_version}
+            </Badge>
+          )}
         </Group>
         <Group gap="xs">
           <Badge color="green" variant="light">
             {portal.available_count} / {portal.mac_count} MACs
           </Badge>
+          {portal.max_connections && (
+            <Badge color="cyan" variant="light" leftSection={<IconDeviceTv size={12} />}>
+              Max {portal.max_connections} Streams
+            </Badge>
+          )}
           <ActionIcon variant="subtle" onClick={() => setExpanded(!expanded)}>
             {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
           </ActionIcon>

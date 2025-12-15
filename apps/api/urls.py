@@ -3,6 +3,9 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from rest_framework.permissions import AllowAny
 
+# Import predictive failover URLs
+from apps.proxy.ts_proxy.predictive.api import get_predictive_failover_urls
+
 app_name = 'api'
 
 schema_view = get_schema_view(
@@ -31,8 +34,9 @@ urlpatterns = [
     #path('player/', include(('apps.player.api_urls', 'player'), namespace='player')),
     #path('settings/', include(('apps.settings.api_urls', 'settings'), namespace='settings')),
     #path('streams/', include(('apps.streams.api_urls', 'streams'), namespace='streams')),
-
-
+    
+    # Predictive Failover API
+    path('', include(get_predictive_failover_urls())),
 
     # Swagger Documentation api_urls
     re_path(r'^swagger/?$', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),

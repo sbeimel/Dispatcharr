@@ -22,35 +22,28 @@ import {
   Table,
   ActionIcon,
   TextInput,
-  Select,
   Pagination,
   ScrollArea,
   Tooltip,
-  Modal,
   Alert,
   Loader,
   Switch,
-  Center,
-  Flex,
   NativeSelect,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import {
   IconRefresh,
   IconPlayerStop,
-  IconAlertTriangle,
   IconSearch,
   IconTrash,
   IconActivity,
   IconWifi,
   IconWifiOff,
   IconBolt,
-  IconPlayerPlay,
-  IconX,
   IconChevronDown,
   IconChevronRight,
 } from '@tabler/icons-react';
-import { CirclePlay, SquareMinus } from 'lucide-react';
+import { CirclePlay } from 'lucide-react';
 import API from '../../api';
 import useVideoStore from '../../store/useVideoStore';
 import useSettingsStore from '../../store/settings';
@@ -95,13 +88,33 @@ const FailoverTestPage = () => {
         ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            if (data.type === 'log_entry' || data.type === 'failover_event') {
-              setLogEntries(prev => [data.data, ...prev].slice(0, 500));
+            // Handle various event types
+            if (data.type === 'log_entry' || data.type === 'failover_event' || 
+                data.type === 'failover_test_event' || data.type === 'simulation_started' ||
+                data.type === 'simulation_stopped' || data.type === 'simulation_completed') {
+              const eventData = data.data || {};
+              // Ensure event has required fields
+              const logEntry = {
+                id: eventData.id || `ws_${Date.now()}`,
+                timestamp: eventData.timestamp || data.timestamp || new Date().toISOString(),
+                event_type: eventData.event_type || data.type,
+                message: eventData.message || '',
+                channel_id: eventData.channel_id,
+                channel_name: eventData.channel_name,
+                success: eventData.success !== false,
+                ...eventData,
+              };
+              setLogEntries(prev => [logEntry, ...prev].slice(0, 500));
             } else if (data.type === 'stream_status') {
               setActiveStreams(prev => ({
                 ...prev,
                 [data.data.channel_id]: data.data,
               }));
+            } else if (data.type === 'initial_state') {
+              // Handle initial state from WebSocket
+              if (data.data?.recent_logs) {
+                setLogEntries(prev => [...data.data.recent_logs, ...prev].slice(0, 500));
+              }
             }
           } catch (e) {
             console.error('WebSocket parse error:', e);
@@ -154,7 +167,9 @@ const FailoverTestPage = () => {
           const streams = await streamsResponse.json();
           const streamMap = {};
           (streams || []).forEach(s => {
-            streamMap[s.channel_id] = s;
+            // Map by both channel_id (int) and channel_uuid for compatibility
+            if (s.channel_id) streamMap[s.channel_id] = s;
+            if (s.channel_uuid) streamMap[s.channel_uuid] = s;
           });
           setActiveStreams(streamMap);
         }
@@ -169,6 +184,32 @@ const FailoverTestPage = () => {
   }, []);
 
   useEffect(() => { loadChannels(); }, [loadChannels]);
+
+  // Periodischer Refresh der aktiven Streams (alle 5 Sekunden)
+  useEffect(() => {
+    const refreshActiveStreams = async () => {
+      try {
+        const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
+        const streamsResponse = await fetch(`${host}/api/proxy/active-streams/`, {
+          headers: { Authorization: `Bearer ${await API.getAuthToken()}` },
+        });
+        if (streamsResponse.ok) {
+          const streams = await streamsResponse.json();
+          const streamMap = {};
+          (streams || []).forEach(s => {
+            if (s.channel_id) streamMap[s.channel_id] = s;
+            if (s.channel_uuid) streamMap[s.channel_uuid] = s;
+          });
+          setActiveStreams(streamMap);
+        }
+      } catch (e) {
+        // Silently ignore refresh errors
+      }
+    };
+
+    const interval = setInterval(refreshActiveStreams, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Filter & Pagination
   const filteredChannels = useMemo(() => {
@@ -199,8 +240,36 @@ const FailoverTestPage = () => {
   // Vorschau starten
   const handleWatchStream = (channel) => {
     const url = getChannelURL(channel);
-    addLogEntry('preview', `Vorschau gestartet: ${channel.name}`, { channel_id: channel.id });
+    addLogEntry('preview', `Vorschau gestartet: ${channel.name}`, { channel_id: channel.id, channel_name: channel.name });
     showVideo(url);
+    
+    // Markiere Channel sofort als aktiv (optimistisches Update)
+    setActiveStreams(prev => ({
+      ...prev,
+      [channel.id]: { channel_id: channel.id, channel_uuid: channel.uuid, status: 'connecting', client_count: 1 },
+      [channel.uuid]: { channel_id: channel.id, channel_uuid: channel.uuid, status: 'connecting', client_count: 1 },
+    }));
+    
+    // Nach kurzer Zeit aktive Streams neu laden für echten Status
+    setTimeout(async () => {
+      try {
+        const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
+        const streamsResponse = await fetch(`${host}/api/proxy/active-streams/`, {
+          headers: { Authorization: `Bearer ${await API.getAuthToken()}` },
+        });
+        if (streamsResponse.ok) {
+          const streams = await streamsResponse.json();
+          const streamMap = {};
+          (streams || []).forEach(s => {
+            if (s.channel_id) streamMap[s.channel_id] = s;
+            if (s.channel_uuid) streamMap[s.channel_uuid] = s;
+          });
+          setActiveStreams(streamMap);
+        }
+      } catch (e) {
+        console.log('Could not refresh active streams');
+      }
+    }, 2000);
   };
 
 
@@ -254,15 +323,14 @@ const FailoverTestPage = () => {
       });
       
       if (response.ok) {
-        const result = await response.json();
-        addLogEntry('error_simulated', `Fehler simuliert (${errorType}): ${channel.name}`, { 
+        addLogEntry('failover_triggered', `Failover ausgelöst: ${channel.name}`, { 
           channel_id: channel.id,
           error_type: errorType,
         });
         notifications.show({
-          title: 'Fehler simuliert',
-          message: `${errorType} Fehler für "${channel.name}" ausgelöst`,
-          color: 'yellow',
+          title: 'Failover ausgelöst',
+          message: `Failover für "${channel.name}" wurde gestartet`,
+          color: 'orange',
         });
       } else {
         // Fallback: Lokale Simulation
@@ -315,13 +383,30 @@ const FailoverTestPage = () => {
   // Event Farbe
   const getEventColor = (entry) => {
     const colors = {
+      // Failover events
       failover_success: 'green',
       failover_failed: 'red',
+      failover_started: 'yellow',
+      failover_triggered: 'blue',
+      failover_no_alternative: 'orange',
+      failover_exhausted: 'red',
+      // Stream events
       stream_killed: 'orange',
+      stream_switch_success: 'teal',
+      // Simulation events
       error_simulated: 'yellow',
+      simulation_started: 'blue',
+      simulation_stopped: 'gray',
+      simulation_completed: 'green',
+      // Other events
       reconnect: 'blue',
       preview: 'cyan',
       system: 'gray',
+      // MAC/Portal events
+      mac_failover: 'blue',
+      portal_failover: 'violet',
+      endpoint_failover: 'grape',
+      useragent_failover: 'pink',
     };
     return colors[entry.event_type] || 'gray';
   };
@@ -380,7 +465,7 @@ const FailoverTestPage = () => {
               </Table.Thead>
               <Table.Tbody>
                 {paginatedChannels.map(channel => {
-                  const isActive = activeStreams[channel.id];
+                  const isActive = activeStreams[channel.id] || activeStreams[channel.uuid];
                   const isExpanded = expandedChannels.has(channel.id);
                   
                   return (
@@ -417,21 +502,20 @@ const FailoverTestPage = () => {
                               </ActionIcon>
                             </Tooltip>
 
-                            {/* Kill FFmpeg Button */}
+                            {/* Kill FFmpeg Button - immer aktiv */}
                             <Tooltip label="Kill FFmpeg (Stream beenden)">
                               <ActionIcon
                                 color="red"
                                 variant="light"
                                 onClick={() => killStream(channel)}
                                 loading={killingStream === channel.id}
-                                disabled={!isActive}
                               >
                                 <IconPlayerStop size={16} />
                               </ActionIcon>
                             </Tooltip>
 
-                            {/* Simulate Error Button */}
-                            <Tooltip label="Stream-Fehler simulieren">
+                            {/* Simulate Error / Trigger Failover Button */}
+                            <Tooltip label="Failover auslösen">
                               <ActionIcon
                                 color="orange"
                                 variant="light"

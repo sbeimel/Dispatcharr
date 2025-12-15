@@ -82,6 +82,10 @@ def get_active_streams(request):
         
         active_streams = []
         
+        # Cache für Channel-Lookups
+        from apps.channels.models import Channel
+        channel_cache = {}
+        
         # Scan for active channel metadata
         cursor = 0
         while True:
@@ -91,15 +95,27 @@ def get_active_streams(request):
                 try:
                     metadata = redis_client.hgetall(key)
                     if metadata:
-                        channel_id = key.split(':')[2]
+                        channel_uuid = key.split(':')[2]
                         
                         # Get client count
-                        clients_key = f'ts_proxy:channel:{channel_id}:clients'
+                        clients_key = f'ts_proxy:channel:{channel_uuid}:clients'
                         client_count = redis_client.scard(clients_key) or 0
                         
                         if client_count > 0 or metadata.get('status') == 'streaming':
+                            # Hole Channel-ID aus der Datenbank
+                            if channel_uuid not in channel_cache:
+                                try:
+                                    ch = Channel.objects.get(uuid=channel_uuid)
+                                    channel_cache[channel_uuid] = {'id': ch.id, 'name': ch.name}
+                                except Channel.DoesNotExist:
+                                    channel_cache[channel_uuid] = {'id': None, 'name': 'Unknown'}
+                            
+                            ch_info = channel_cache[channel_uuid]
+                            
                             active_streams.append({
-                                'channel_id': int(channel_id),
+                                'channel_id': ch_info['id'],
+                                'channel_uuid': channel_uuid,
+                                'channel_name': ch_info['name'],
                                 'status': metadata.get('status', 'unknown'),
                                 'stream_url': metadata.get('stream_url', ''),
                                 'client_count': client_count,
@@ -125,31 +141,42 @@ def get_active_streams(request):
 def kill_stream(request, channel_id):
     """Kill/terminate an active stream to trigger failover."""
     try:
+        import time
+        import datetime
+        
         redis_client = RedisClient.get_client()
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
-        # Set the stopping flag for the channel
-        stopping_key = f'ts_proxy:channel:{channel_id}:stopping'
+        # Hole die Channel UUID aus der Datenbank
+        from apps.channels.models import Channel
+        try:
+            channel = Channel.objects.get(id=channel_id)
+            channel_uuid = str(channel.uuid)
+        except Channel.DoesNotExist:
+            return JsonResponse({'error': f'Channel {channel_id} not found'}, status=404)
+        
+        # Set the stopping flag for the channel (use UUID)
+        stopping_key = f'ts_proxy:channel:{channel_uuid}:stopping'
         redis_client.set(stopping_key, '1', ex=30)
         
         # Publish stop event to trigger immediate termination
-        events_channel = f'ts_proxy:events:{channel_id}'
+        events_channel = f'ts_proxy:events:{channel_uuid}'
         redis_client.publish(events_channel, 'stop')
         
         # Also try to signal all clients to stop
-        clients_key = f'ts_proxy:channel:{channel_id}:clients'
+        clients_key = f'ts_proxy:channel:{channel_uuid}:clients'
         clients = redis_client.smembers(clients_key) or []
         
         for client_id in clients:
             try:
-                client_stop_key = f'ts_proxy:channel:{channel_id}:client:{client_id}:stop'
+                client_stop_key = f'ts_proxy:channel:{channel_uuid}:client:{client_id}:stop'
                 redis_client.set(client_stop_key, '1', ex=30)
             except Exception:
                 pass
         
         # Clear channel metadata to force reconnection
-        metadata_key = f'ts_proxy:channel:{channel_id}:metadata'
+        metadata_key = f'ts_proxy:channel:{channel_uuid}:metadata'
         redis_client.delete(metadata_key)
         
         # Log the kill event
@@ -164,11 +191,13 @@ def kill_stream(request, channel_id):
                     {
                         'type': 'failover_event',
                         'data': {
-                            'id': f'kill_{channel_id}_{int(__import__("time").time() * 1000)}',
-                            'timestamp': __import__("datetime").datetime.now().isoformat(),
+                            'id': f'kill_{channel_id}_{int(time.time() * 1000)}',
+                            'timestamp': datetime.datetime.now().isoformat(),
                             'event_type': 'stream_killed',
                             'channel_id': channel_id,
-                            'message': f'Stream for channel {channel_id} was manually killed',
+                            'channel_uuid': channel_uuid,
+                            'channel_name': channel.name,
+                            'message': f'Stream für "{channel.name}" wurde manuell beendet',
                             'success': True,
                         }
                     }
@@ -178,7 +207,8 @@ def kill_stream(request, channel_id):
         
         return JsonResponse({
             'success': True,
-            'message': f'Stream for channel {channel_id} killed',
+            'message': f'Stream for channel {channel.name} killed',
+            'channel_uuid': channel_uuid,
             'clients_notified': len(clients),
         })
         
@@ -201,15 +231,23 @@ def simulate_error(request, channel_id):
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
+        # Hole die Channel UUID aus der Datenbank
+        from apps.channels.models import Channel
+        try:
+            channel = Channel.objects.get(id=channel_id)
+            channel_uuid = str(channel.uuid)
+        except Channel.DoesNotExist:
+            return JsonResponse({'error': f'Channel {channel_id} not found'}, status=404)
+        
         # Setze force_failover Flag - der StreamManager wird dies erkennen und _try_next_stream() aufrufen
-        failover_key = f'ts_proxy:channel:{channel_id}:force_failover'
+        failover_key = f'ts_proxy:channel:{channel_uuid}:force_failover'
         redis_client.set(failover_key, '1', ex=30)
         
         # Publiziere FORCE_FAILOVER Event als JSON
-        events_channel = f'ts_proxy:events:{channel_id}'
+        events_channel = f'ts_proxy:events:{channel_uuid}'
         failover_event = {
             'event': 'force_failover',
-            'channel_id': channel_id,
+            'channel_id': channel_uuid,
             'reason': 'manual_test',
             'timestamp': time.time()
         }
@@ -231,7 +269,9 @@ def simulate_error(request, channel_id):
                             'timestamp': datetime.datetime.now().isoformat(),
                             'event_type': 'failover_triggered',
                             'channel_id': channel_id,
-                            'message': f'Failover manuell ausgelöst für Channel {channel_id}',
+                            'channel_uuid': channel_uuid,
+                            'channel_name': channel.name,
+                            'message': f'Failover manuell ausgelöst für "{channel.name}"',
                             'success': True,
                         }
                     }
@@ -241,7 +281,8 @@ def simulate_error(request, channel_id):
         
         return JsonResponse({
             'success': True,
-            'message': f'Failover triggered for channel {channel_id}',
+            'message': f'Failover triggered for channel {channel.name}',
+            'channel_uuid': channel_uuid,
         })
         
     except Exception as e:

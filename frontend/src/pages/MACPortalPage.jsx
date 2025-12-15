@@ -2,13 +2,12 @@
  * MAC Portal Page - Hauptseite mit allen MAC Portal Funktionen
  * 
  * Tabs:
- * 1. Overview - Portal-Übersicht mit Status
+ * 1. Overview - Portal-Übersicht mit Status (inkl. Health-Infos)
  * 2. MAC Portal Settings - Globale Einstellungen
  * 3. Failover - Failover-Konfiguration
- * 4. Health - MAC Health Dashboard (zeigt angelegte Portale mit MACs)
- * 5. Batch Ops - Batch-Operationen für angelegte Portale/MACs
- * 6. Connection Test - Verbindungstest
- * 7. Debug Logs - Debug Logs
+ * 4. Batch Ops - Batch-Operationen für angelegte Portale/MACs
+ * 5. Connection Test - Verbindungstest
+ * 6. Debug Logs - Debug Logs
  */
 
 import React, { useState } from 'react';
@@ -17,7 +16,6 @@ import {
   IconDashboard,
   IconSettings,
   IconArrowsShuffle,
-  IconHeartbeat,
   IconFileText,
   IconTestPipe,
   IconUsers,
@@ -27,7 +25,6 @@ import {
 import MACPortalOverview from '../components/mac-portal/MACPortalOverview';
 import MACPortalSettings from '../components/mac-portal/MACPortalSettings';
 import FailoverSettings from '../components/mac-portal/FailoverSettings';
-import MACHealthDashboard from '../components/mac-portal/MACHealthDashboard';
 import DebugLogViewer from '../components/mac-portal/DebugLogViewer';
 import ConnectionTestWizard from '../components/mac-portal/ConnectionTestWizard';
 import MACBatchOperations from '../components/mac-portal/MACBatchOperations';
@@ -57,9 +54,6 @@ const MACPortalPage = () => {
           <Tabs.Tab value="failover" leftSection={<IconArrowsShuffle size={16} />}>
             Failover
           </Tabs.Tab>
-          <Tabs.Tab value="health" leftSection={<IconHeartbeat size={16} />}>
-            Health
-          </Tabs.Tab>
           <Tabs.Tab value="batch" leftSection={<IconUsers size={16} />}>
             Batch Ops
           </Tabs.Tab>
@@ -81,10 +75,6 @@ const MACPortalPage = () => {
 
         <Tabs.Panel value="failover" pt="xs">
           <FailoverSettings />
-        </Tabs.Panel>
-
-        <Tabs.Panel value="health" pt="xs">
-          <MACHealthDashboard />
         </Tabs.Panel>
 
         <Tabs.Panel value="batch" pt="xs">

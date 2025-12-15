@@ -696,7 +696,27 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
-            channels = response.json()["js"]["data"]
+            
+            # Check for empty response before parsing JSON
+            if not response.text or response.text.strip() == "":
+                logger.debug(f"Empty response from GET channels for MAC {self.mac}")
+                raise ValueError("Empty response")
+            
+            data = response.json()
+            
+            # Handle different response formats
+            if isinstance(data, dict):
+                if "js" in data and isinstance(data["js"], dict):
+                    channels = data["js"].get("data", [])
+                elif "data" in data:
+                    channels = data["data"]
+                else:
+                    channels = []
+            elif isinstance(data, list):
+                channels = data
+            else:
+                channels = []
+            
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
                 return channels
@@ -715,7 +735,27 @@ class MacPortalClient:
                 timeout=30,
             )
             logger.debug(f"Channels request status: {response.status_code}")
-            channels = response.json()["js"]["data"]
+            
+            # Check for empty response before parsing JSON
+            if not response.text or response.text.strip() == "":
+                logger.warning(f"Empty response from POST channels for MAC {self.mac}")
+                return None
+            
+            data = response.json()
+            
+            # Handle different response formats
+            if isinstance(data, dict):
+                if "js" in data and isinstance(data["js"], dict):
+                    channels = data["js"].get("data", [])
+                elif "data" in data:
+                    channels = data["data"]
+                else:
+                    channels = []
+            elif isinstance(data, list):
+                channels = data
+            else:
+                channels = []
+            
             if channels:
                 logger.info(f"Got {len(channels)} channels for MAC {self.mac} via POST")
                 return channels
@@ -723,6 +763,8 @@ class MacPortalClient:
             logger.error(f"Timeout getting channels for MAC {self.mac}")
         except requests.RequestException as e:
             logger.error(f"Request error getting channels for MAC {self.mac}: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON response getting channels for MAC {self.mac}: {e}")
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
         

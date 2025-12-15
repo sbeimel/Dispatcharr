@@ -3109,6 +3109,26 @@ def _refresh_mac_account_with_groups(account_id):
                         total_channels = len(channels)
                         logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
                         
+                        # Save portal type/version info to account custom_properties
+                        try:
+                            custom_props = account.custom_properties or {}
+                            custom_props['portal_engine'] = portal_engine
+                            
+                            # Try to get portal type/version from UnifiedMacPortalClient
+                            if hasattr(client, '_unified_client') and client._unified_client:
+                                result = getattr(client._unified_client, '_last_result', None)
+                                if result:
+                                    if result.portal_type:
+                                        custom_props['portal_type'] = result.portal_type
+                                    if result.portal_version:
+                                        custom_props['portal_version'] = result.portal_version
+                            
+                            account.custom_properties = custom_props
+                            account.save(update_fields=['custom_properties'])
+                            logger.debug(f"Saved portal info: type={custom_props.get('portal_type')}, version={custom_props.get('portal_version')}")
+                        except Exception as e:
+                            logger.debug(f"Could not save portal info: {e}")
+                        
                         # Convert MAC channels to EXTINF format and extract groups
                         for channel in channels:
                             group_name = channel.get('group', 'Default Group')

@@ -103,17 +103,30 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         """Holt alle Daten für ein Portal."""
         from apps.m3u.models import M3UAccountMac
         
+        # Hole Portal-Typ und Version aus custom_properties
+        custom_props = portal.custom_properties or {}
+        portal_type = custom_props.get('portal_type', 'unknown')
+        portal_version = custom_props.get('portal_version', 'unknown')
+        portal_engine = custom_props.get('portal_engine', 'auto')
+        
+        # Hole max_connections aus custom_properties
+        portal_max_conn = custom_props.get('max_connections', getattr(portal, 'max_streams', 1))
+        
         portal_data = {
             'id': portal.id,
             'name': portal.name,
             'url': portal.server_url or '',
             'type': 'MAC/STB Portal',
+            'portal_type': portal_type,  # stalker, xtream, xui, ministra
+            'portal_version': portal_version,  # z.B. "5.3.0"
+            'portal_engine': portal_engine,  # macreplay, ob2_2025, auto, etc.
             'status': 'online' if portal.is_active and getattr(portal, 'status', '') != 'error' else 'offline',
             'last_check': portal.updated_at.isoformat() if portal.updated_at else None,
             'macs': [],
             'mac_count': 0,
             'available_count': 0,
             'max_streams': getattr(portal, 'max_streams', 1),
+            'max_connections': portal_max_conn,  # max_connections pro Portal
             'is_active': portal.is_active,
         }
         
@@ -123,6 +136,10 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         if mac_objects.exists():
             # Verwende M3UAccountMac Objekte
             for mac_obj in mac_objects:
+                # Hole max_connections aus custom_properties oder default 1
+                mac_custom_props = getattr(mac_obj, 'custom_properties', {}) or {}
+                max_conn = mac_custom_props.get('max_connections', 1)
+                
                 mac_data = {
                     'id': mac_obj.id,
                     'mac_address': mac_obj.address,
@@ -132,7 +149,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'health_score': 100,
                     'last_used': mac_obj.last_checked.isoformat() if mac_obj.last_checked else None,
                     'cooldown_until': None,
-                    'max_connections': 1,
+                    'max_connections': max_conn,
                     'expires_text': getattr(mac_obj, 'expires_text', '') or '',
                     'last_error': getattr(mac_obj, 'last_error', '') or '',
                 }
