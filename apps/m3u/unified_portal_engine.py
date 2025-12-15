@@ -107,12 +107,11 @@ class BasePortalStrategy:
         'MAG424': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG424 stbapp ver: 5 rev: 3116 Safari/533.3',
     }
     
-    # Standard Endpoints
+    # Standard Endpoints - optimized order (most common first)
     ENDPOINTS = [
-        '/server/load.php',
         '/portal.php',
+        '/server/load.php',
         '/stalker_portal/server/load.php',
-        '/c/server/load.php',
     ]
     
     def __init__(self, portal_url: str, identity: PortalIdentity, 
@@ -1037,29 +1036,25 @@ class AllinOneStrategy(BasePortalStrategy):
     - api_signature: 263 (OB2_2025)
     - Prehash-Support für "missing" Responses (EStalker)
     - GET/POST Fallback für alle Operationen
-    - User-Agent Rotation bei Fehlern
+    - User-Agent Rotation bei Fehlern (limited to 2 attempts for speed)
     - Referer Header für create_link (BoxPirate)
     """
     
     NAME = "allinone"
     DESCRIPTION = "AllinOne Best-of-All (Kombiniert alle Techniken)"
     
-    # User-Agent Rotation Pool
+    # User-Agent Rotation Pool - MAG254 first (most compatible)
     USER_AGENT_POOL = [
-        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/533.3',
         'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG254 stbapp ver: 2 rev: 369 Safari/533.3',
-        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG322 stbapp ver: 4 rev: 2721 Safari/533.3',
-        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG424 stbapp ver: 5 rev: 3116 Safari/533.3',
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/533.3',
     ]
     
-    # Extended Endpoints (alle bekannten Pfade)
+    # Optimized Endpoints - most common first for speed
     ENDPOINTS = [
-        '/server/load.php',
         '/portal.php',
+        '/server/load.php',
         '/stalker_portal/server/load.php',
-        '/c/server/load.php',
         '/c/',
-        '/stalker_portal/c/',
     ]
     
     def __init__(self, *args, **kwargs):
@@ -1477,6 +1472,15 @@ class UnifiedPortalEngine:
         PortalEngine.ALLINONE: AllinOneStrategy,
     }
     
+    # Optimized order for AUTO mode - fastest strategies first, skip allinone (redundant)
+    AUTO_STRATEGY_ORDER = [
+        PortalEngine.MACREPLAY,   # Fastest, most common
+        PortalEngine.OB2_2025,    # Fast, good compatibility
+        PortalEngine.ESTALKER,    # Medium speed
+        PortalEngine.BOXPIRATE,   # Medium speed
+        # AllinOne skipped in AUTO - it's redundant and slow
+    ]
+    
     # Cache für erfolgreiche Strategien pro Portal
     _strategy_cache: Dict[str, PortalEngine] = {}
     
@@ -1525,10 +1529,10 @@ class UnifiedPortalEngine:
             return result
     
     def _auto_handshake(self) -> HandshakeResult:
-        """Automatischer Handshake mit allen Strategien."""
+        """Automatischer Handshake mit optimierter Strategie-Reihenfolge."""
         cache_key = self._get_cache_key()
         
-        # Prüfe Cache
+        # Prüfe Cache - use cached strategy if available
         if cache_key in self._strategy_cache:
             cached_engine = self._strategy_cache[cache_key]
             logger.info(f"Using cached strategy: {cached_engine.value}")
@@ -1539,10 +1543,11 @@ class UnifiedPortalEngine:
                 return result
             # Cache war nicht mehr gültig
             del self._strategy_cache[cache_key]
+            logger.info(f"Cached strategy {cached_engine.value} failed, trying others")
         
-        # Versuche alle Strategien
+        # Versuche Strategien in optimierter Reihenfolge (schnellste zuerst)
         errors = []
-        for engine, strategy_class in self.STRATEGIES.items():
+        for engine in self.AUTO_STRATEGY_ORDER:
             logger.info(f"Trying strategy: {engine.value}")
             try:
                 strategy = self._get_strategy(engine)

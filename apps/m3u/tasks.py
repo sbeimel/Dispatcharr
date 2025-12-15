@@ -3012,7 +3012,7 @@ def send_m3u_update(account_id, action, progress, **kwargs):
 def _refresh_mac_account_with_groups(account_id):
     """Direct MAC account refresh function that also returns groups for processing."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
+    from .mac_portal_client import MacPortalClient, MacPortalError
     from django.utils import timezone
     
     try:
@@ -3025,6 +3025,17 @@ def _refresh_mac_account_with_groups(account_id):
         if not account.server_url:
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
+        
+        # Get portal engine setting - default to 'auto' which uses fast MacPortalClient
+        portal_engine = 'auto'
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            portal_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+        except Exception:
+            pass
+        
+        logger.info(f"MAC refresh using portal_engine: {portal_engine}")
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3071,12 +3082,23 @@ def _refresh_mac_account_with_groups(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                # Use UnifiedMacPortalClient which automatically uses the configured engine
-                client = UnifiedMacPortalClient(
-                    base_url=account.server_url,
-                    mac=mac_obj.address,
-                    proxy=getattr(account, 'proxy', None)
-                )
+                # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+                # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
+                if portal_engine in ('auto', 'macreplay', '', None):
+                    # Fast path: Direct MacPortalClient (original MacReplay behavior)
+                    client = MacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
+                else:
+                    # Slow path: UnifiedPortalEngine for other engines
+                    from .mac_portal_client import UnifiedMacPortalClient
+                    client = UnifiedMacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
                 
                 # Test connection and get channels
                 channels = client.get_channels()
@@ -3172,7 +3194,7 @@ def _refresh_mac_account_with_groups(account_id):
 def _refresh_mac_account_direct(account_id):
     """Direct MAC account refresh function (non-Celery) to avoid anti-pattern."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
+    from .mac_portal_client import MacPortalClient, MacPortalError
     from django.utils import timezone
     
     try:
@@ -3185,6 +3207,15 @@ def _refresh_mac_account_direct(account_id):
         if not account.server_url:
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
+        
+        # Get portal engine setting - default to 'auto' which uses fast MacPortalClient
+        portal_engine = 'auto'
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            portal_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+        except Exception:
+            pass
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3230,12 +3261,20 @@ def _refresh_mac_account_direct(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                # Use UnifiedMacPortalClient which automatically uses the configured engine
-                client = UnifiedMacPortalClient(
-                    base_url=account.server_url,
-                    mac=mac_obj.address,
-                    proxy=getattr(account, 'proxy', None)
-                )
+                # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+                if portal_engine in ('auto', 'macreplay', '', None):
+                    client = MacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
+                else:
+                    from .mac_portal_client import UnifiedMacPortalClient
+                    client = UnifiedMacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
                 
                 # Test connection and get channels
                 channels = client.get_channels()
@@ -3315,7 +3354,7 @@ def refresh_mac_account(account_id):
 def check_mac_expiry(account_id=None):
     """Check MAC expiry status for accounts."""
     from .models import M3UAccount, M3UAccountMac
-    from .mac_portal_client import UnifiedMacPortalClient, MacPortalError
+    from .mac_portal_client import MacPortalClient, MacPortalError
     from django.utils import timezone
     
     if account_id:
@@ -3329,6 +3368,15 @@ def check_mac_expiry(account_id=None):
             account_type=M3UAccount.Types.MAC,
             is_active=True
         )
+    
+    # Get portal engine setting - default to 'auto' which uses fast MacPortalClient
+    portal_engine = 'auto'
+    try:
+        from .mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        portal_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+    except Exception:
+        pass
     
     results = []
     
@@ -3353,12 +3401,20 @@ def check_mac_expiry(account_id=None):
             
             for mac_obj in macs:
                 try:
-                    # Use UnifiedMacPortalClient which automatically uses the configured engine
-                    client = UnifiedMacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_obj.address,
-                        proxy=getattr(account, 'proxy', None)
-                    )
+                    # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+                    if portal_engine in ('auto', 'macreplay', '', None):
+                        client = MacPortalClient(
+                            base_url=account.server_url,
+                            mac=mac_obj.address,
+                            proxy=getattr(account, 'proxy', None)
+                        )
+                    else:
+                        from .mac_portal_client import UnifiedMacPortalClient
+                        client = UnifiedMacPortalClient(
+                            base_url=account.server_url,
+                            mac=mac_obj.address,
+                            proxy=getattr(account, 'proxy', None)
+                        )
                     
                     expires_text = client.get_expires()
                     

@@ -13,15 +13,12 @@ router = DefaultRouter()
 router.register(r'portals', views.MACPortalViewSet, basename='macportal')
 router.register(r'mac-addresses', views.MACAddressViewSet, basename='macaddress')
 
-# Overview ViewSet
+# Overview ViewSet - 'list' is the standard DRF method for GET on collection
 overview_viewset = MACPortalOverviewViewSet.as_view({
-    'get': 'overview',
+    'get': 'list',
 })
 overview_statistics = MACPortalOverviewViewSet.as_view({
     'get': 'statistics',
-})
-overview_refresh = MACPortalOverviewViewSet.as_view({
-    'post': 'refresh_status',
 })
 
 
@@ -200,7 +197,6 @@ urlpatterns = [
     # Overview Endpunkte
     path('overview/', overview_viewset, name='overview'),
     path('overview/statistics/', overview_statistics, name='overview-statistics'),
-    path('overview/refresh-status/', overview_refresh, name='overview-refresh'),
     
     # Zusätzliche benutzerdefinierte Endpunkte
     path('portals/<int:pk>/refresh/', views.MACPortalViewSet.as_view({'post': 'refresh'}), name='portal-refresh'),

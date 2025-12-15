@@ -18,6 +18,25 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _is_debug_enabled():
+    """Check if debug logging is enabled in MAC Portal settings."""
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        return getattr(settings, 'debug_logging_enabled', False)
+    except Exception:
+        return False
+
+
+def _debug_log(message, *args, **kwargs):
+    """Log debug message only if debug logging is enabled in settings."""
+    if _is_debug_enabled():
+        logger.info(f"[MAC-DEBUG] {message}", *args, **kwargs)
+    else:
+        logger.debug(message, *args, **kwargs)
+
+
 # Try to import cloudscraper for Cloudflare bypass
 try:
     import cloudscraper
@@ -422,7 +441,7 @@ class MacPortalClient:
                 else:
                     full_url = portal + endpoint
                 
-                logger.debug(f"Trying token endpoint: {full_url}")
+                _debug_log(f"Trying token endpoint: {full_url}")
                 response = _get_session().get(
                     full_url,
                     cookies=self._cookies(),
@@ -430,7 +449,7 @@ class MacPortalClient:
                     proxies=proxies,
                     timeout=10,  # Reduced for faster failover (was 20)
                 )
-                logger.debug(f"Token request status: {response.status_code}")
+                _debug_log(f"Token request status: {response.status_code}")
                 
                 # Try to parse response
                 if response.status_code == 200:
@@ -546,7 +565,7 @@ class MacPortalClient:
         }
         
         try:
-            logger.debug(f"Getting expiry for MAC {self.mac}")
+            _debug_log(f"Getting expiry for MAC {self.mac}")
             response = _get_session().get(
                 portal + "?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
                 cookies=self._cookies(),
@@ -667,7 +686,7 @@ class MacPortalClient:
         
         # Try GET first (standard) - EXACT MacReplayXC copy
         try:
-            logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
+            _debug_log(f"Getting all channels for MAC {self.mac} (GET)")
             response = _get_session().get(
                 portal,
                 params=params,
@@ -686,7 +705,7 @@ class MacPortalClient:
         
         # Try POST as fallback (some portals require this) - EXACT MacReplayXC copy
         try:
-            logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
+            _debug_log(f"Getting all channels for MAC {self.mac} (POST)")
             response = _get_session().post(
                 portal,
                 data=params,
@@ -995,8 +1014,16 @@ class MacPortalClient:
             
             logger.info(f"Resolving MAC URL for portal {portal_url}, MAC {mac[:8]}..., engine: {portal_engine}, proxy: {use_proxy or 'none'}")
             
-            # Use UnifiedPortalEngine if a specific engine is configured
-            if portal_engine and portal_engine != 'auto':
+            # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+            # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
+            if portal_engine in ('auto', 'macreplay', '', None):
+                # Fast path: Direct MacPortalClient (original MacReplay behavior)
+                client = MacPortalClient(base_url=portal_url, mac=mac, proxy=use_proxy)
+                resolved_url = client.create_link(cmd)
+                logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+                return resolved_url
+            else:
+                # Slow path: UnifiedPortalEngine for other engines
                 try:
                     from apps.m3u.unified_portal_engine import create_portal_client
                     unified_client = create_portal_client(
@@ -1010,12 +1037,11 @@ class MacPortalClient:
                     return resolved_url
                 except Exception as e:
                     logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
-            
-            # Fallback to standard MacPortalClient
-            client = MacPortalClient(base_url=portal_url, mac=mac, proxy=use_proxy)
-            resolved_url = client.create_link(cmd)
-            logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
-            return resolved_url
+                    # Fallback to standard MacPortalClient
+                    client = MacPortalClient(base_url=portal_url, mac=mac, proxy=use_proxy)
+                    resolved_url = client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+                    return resolved_url
         except Exception as e:
             logger.error(f"Failed to resolve mac:// URL: {e}")
             raise MacPortalError(f"Failed to resolve MAC URL: {e}")
@@ -1102,8 +1128,16 @@ class MacPortalClient:
             
             logger.info(f"Resolving MAC URL with MAC {selected_mac[:8]}... (original: {original_mac[:8]}...), engine: {portal_engine}")
             
-            # Use UnifiedPortalEngine if a specific engine is configured
-            if portal_engine and portal_engine != 'auto':
+            # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+            # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
+            if portal_engine in ('auto', 'macreplay', '', None):
+                # Fast path: Direct MacPortalClient (original MacReplay behavior)
+                client = MacPortalClient(base_url=portal_url, mac=selected_mac, proxy=use_proxy)
+                resolved_url = client.create_link(cmd)
+                logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+                return resolved_url, selected_mac
+            else:
+                # Slow path: UnifiedPortalEngine for other engines
                 try:
                     from apps.m3u.unified_portal_engine import create_portal_client
                     unified_client = create_portal_client(
@@ -1117,12 +1151,11 @@ class MacPortalClient:
                     return resolved_url, selected_mac
                 except Exception as e:
                     logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
-            
-            # Fallback to standard MacPortalClient
-            client = MacPortalClient(base_url=portal_url, mac=selected_mac, proxy=use_proxy)
-            resolved_url = client.create_link(cmd)
-            logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
-            return resolved_url, selected_mac
+                    # Fallback to standard MacPortalClient
+                    client = MacPortalClient(base_url=portal_url, mac=selected_mac, proxy=use_proxy)
+                    resolved_url = client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
+                    return resolved_url, selected_mac
             
         except Exception as e:
             logger.error(f"Failed to resolve mac:// URL with busy check: {e}")
@@ -1171,8 +1204,16 @@ class MacPortalClient:
             
             logger.info(f"Resolving MAC URL for failover - portal {portal_url}, failover MAC {failover_mac[:8]}..., engine: {portal_engine}, proxy: {use_proxy or 'none'}")
             
-            # Use UnifiedPortalEngine if a specific engine is configured
-            if portal_engine and portal_engine != 'auto':
+            # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+            # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
+            if portal_engine in ('auto', 'macreplay', '', None):
+                # Fast path: Direct MacPortalClient (original MacReplay behavior)
+                client = MacPortalClient(base_url=portal_url, mac=failover_mac, proxy=use_proxy)
+                resolved_url = client.create_link(cmd)
+                logger.info(f"Resolved MAC URL with failover MAC to: {resolved_url[:80]}...")
+                return resolved_url
+            else:
+                # Slow path: UnifiedPortalEngine for other engines
                 try:
                     from apps.m3u.unified_portal_engine import create_portal_client
                     unified_client = create_portal_client(
@@ -1186,12 +1227,11 @@ class MacPortalClient:
                     return resolved_url
                 except Exception as e:
                     logger.warning(f"UnifiedPortalEngine ({portal_engine}) failed, falling back to standard: {e}")
-            
-            # Fallback to standard MacPortalClient
-            client = MacPortalClient(base_url=portal_url, mac=failover_mac, proxy=use_proxy)
-            resolved_url = client.create_link(cmd)
-            logger.info(f"Resolved MAC URL with failover MAC to: {resolved_url[:80]}...")
-            return resolved_url
+                    # Fallback to standard MacPortalClient
+                    client = MacPortalClient(base_url=portal_url, mac=failover_mac, proxy=use_proxy)
+                    resolved_url = client.create_link(cmd)
+                    logger.info(f"Resolved MAC URL with failover MAC to: {resolved_url[:80]}...")
+                    return resolved_url
         except Exception as e:
             logger.error(f"Failed to resolve mac:// URL with failover MAC: {e}")
             raise MacPortalError(f"Failed to resolve MAC URL with failover MAC: {e}")
@@ -1213,7 +1253,7 @@ class MacPortalClient:
         }
 
         try:
-            logger.debug(f"Getting EPG for MAC {self.mac}")
+            _debug_log(f"Getting EPG for MAC {self.mac}")
             response = _get_session().get(
                 portal,
                 params=params,
@@ -1260,8 +1300,8 @@ def get_portal_client(base_url: str, mac: str, proxy: Optional[str] = None):
     """
     Factory function to get the appropriate portal client based on global settings.
     
-    If a specific portal_engine is configured (not 'auto'), returns a UnifiedPortalEngine
-    that uses that engine for all operations. Otherwise returns a standard MacPortalClient.
+    For 'auto' and 'macreplay' engines, returns the fast MacPortalClient.
+    For other engines (estalker, boxpirate, ob2_2025), returns UnifiedPortalEngine.
     
     Args:
         base_url: Portal base URL
@@ -1278,8 +1318,13 @@ def get_portal_client(base_url: str, mac: str, proxy: Optional[str] = None):
     except Exception:
         portal_engine = 'auto'
     
-    # If a specific engine is configured, use UnifiedPortalEngine
-    if portal_engine and portal_engine not in ('auto', 'unified'):
+    # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
+    # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
+    if portal_engine in ('auto', 'macreplay', '', None, 'unified'):
+        # Fast path: Direct MacPortalClient (original MacReplay behavior)
+        return MacPortalClient(base_url=base_url, mac=mac, proxy=proxy)
+    else:
+        # Slow path: UnifiedPortalEngine for other engines
         try:
             from apps.m3u.unified_portal_engine import create_portal_client
             logger.info(f"Using UnifiedPortalEngine with engine: {portal_engine}")
@@ -1291,9 +1336,7 @@ def get_portal_client(base_url: str, mac: str, proxy: Optional[str] = None):
             )
         except Exception as e:
             logger.warning(f"Failed to create UnifiedPortalEngine, falling back to MacPortalClient: {e}")
-    
-    # Default: use standard MacPortalClient
-    return MacPortalClient(base_url=base_url, mac=mac, proxy=proxy)
+            return MacPortalClient(base_url=base_url, mac=mac, proxy=proxy)
 
 
 class UnifiedMacPortalClient:
@@ -1303,6 +1346,9 @@ class UnifiedMacPortalClient:
     
     This allows existing code to use the same interface while benefiting
     from the engine selection feature.
+    
+    NOTE: For 'auto' and 'macreplay' engines, this class just delegates to
+    MacPortalClient directly for maximum performance.
     """
     
     def __init__(self, base_url: str, mac: str, proxy: Optional[str] = None,
@@ -1324,7 +1370,9 @@ class UnifiedMacPortalClient:
         self._unified_client = None
         self._mac_client = None
         
-        if self.portal_engine and self.portal_engine not in ('auto', 'unified'):
+        # Only use UnifiedPortalEngine for non-macreplay engines (estalker, boxpirate, ob2_2025)
+        # For 'auto', 'macreplay', '', None - use fast MacPortalClient directly
+        if self.portal_engine and self.portal_engine not in ('auto', 'macreplay', 'unified', '', None):
             try:
                 from apps.m3u.unified_portal_engine import create_portal_client
                 self._unified_client = create_portal_client(
