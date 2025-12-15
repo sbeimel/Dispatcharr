@@ -6,6 +6,7 @@ This module provides a comprehensive client for communicating with MAC/STB porta
 (Stalker middleware) for IPTV services.
 """
 
+import json
 import requests
 from requests.adapters import HTTPAdapter, Retry
 from urllib.parse import urlparse
@@ -49,24 +50,57 @@ except ImportError:
 _session = None
 _session_created = 0
 _SESSION_MAX_AGE = 300  # Refresh session every 5 minutes
+_session_uses_cloudscraper = False  # Track if current session uses cloudscraper
 
 
-def _get_session(use_cloudscraper=False):
-    """Get or create a requests session with automatic refresh."""
-    global _session, _session_created
+def _should_use_cloudscraper_global():
+    """Check if cloudscraper should be used based on global settings."""
+    if not CLOUDSCRAPER_AVAILABLE:
+        return False
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        return settings.cloudscraper_enabled
+    except Exception:
+        # Default to True if settings can't be loaded
+        return True
+
+
+def _get_session(use_cloudscraper=None):
+    """Get or create a requests session with automatic refresh.
+    
+    Args:
+        use_cloudscraper: Override cloudscraper setting. 
+                         None = check global settings
+                         True = force cloudscraper
+                         False = force standard session
+    """
+    global _session, _session_created, _session_uses_cloudscraper
     
     current_time = time.time()
     
-    # Create new session if none exists or if too old
-    if _session is None or (current_time - _session_created) > _SESSION_MAX_AGE:
+    # Determine if we should use cloudscraper
+    if use_cloudscraper is None:
+        should_use_cloudscraper = _should_use_cloudscraper_global()
+    else:
+        should_use_cloudscraper = use_cloudscraper and CLOUDSCRAPER_AVAILABLE
+    
+    # Create new session if none exists, too old, or cloudscraper setting changed
+    needs_new_session = (
+        _session is None or 
+        (current_time - _session_created) > _SESSION_MAX_AGE or
+        _session_uses_cloudscraper != should_use_cloudscraper
+    )
+    
+    if needs_new_session:
         if _session is not None:
             try:
                 _session.close()
             except Exception as e:
                 logger.debug(f"Error closing old session: {e}")
         
-        # Use cloudscraper if available and requested (for Cloudflare bypass)
-        if use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
+        # Use cloudscraper if enabled (for Cloudflare bypass)
+        if should_use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
             _session = cloudscraper.create_scraper(
                 browser={
                     'browser': 'chrome',
@@ -74,14 +108,16 @@ def _get_session(use_cloudscraper=False):
                     'desktop': True
                 }
             )
-            logger.debug("Created cloudscraper session for Cloudflare bypass")
+            _session_uses_cloudscraper = True
+            logger.info("MacPortalClient: Created cloudscraper session for Cloudflare bypass")
         else:
             _session = requests.Session()
             # NO automatic retries - we handle retries manually at a higher level
             # This prevents urllib3 from retrying on timeouts which causes long waits
             _session.mount("http://", HTTPAdapter(max_retries=0))
             _session.mount("https://", HTTPAdapter(max_retries=0))
-            logger.debug("Created new requests session (no auto-retry)")
+            _session_uses_cloudscraper = False
+            logger.debug("MacPortalClient: Created standard requests session (no cloudscraper)")
         
         _session_created = current_time
     
@@ -90,7 +126,7 @@ def _get_session(use_cloudscraper=False):
 
 def clear_session():
     """Clear the session to free memory."""
-    global _session, _session_created
+    global _session, _session_created, _session_uses_cloudscraper
     if _session is not None:
         try:
             _session.close()
@@ -98,6 +134,8 @@ def clear_session():
             logger.debug(f"Error closing session during clear: {e}")
         _session = None
         _session_created = 0
+        _session_uses_cloudscraper = False
+        logger.debug("Cleared requests session")
         logger.debug("Cleared requests session")
 
 

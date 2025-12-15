@@ -26,6 +26,13 @@ from urllib.parse import urlparse, urlencode, quote
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
+# Try to import cloudscraper for Cloudflare bypass
+try:
+    import cloudscraper
+    CLOUDSCRAPER_AVAILABLE = True
+except ImportError:
+    CLOUDSCRAPER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,7 +184,7 @@ class BasePortalStrategy:
     
     def __init__(self, portal_url: str, identity: PortalIdentity, 
                  user_agent: str = 'MAG250', timeout: int = 10,
-                 proxy: Optional[str] = None):
+                 proxy: Optional[str] = None, use_cloudscraper: Optional[bool] = None):
         # Normalize portal URL - remove trailing slash and extract base URL
         # Default timeout 10s for fast failover
         portal_url = portal_url.rstrip('/')
@@ -196,11 +203,48 @@ class BasePortalStrategy:
         self.user_agent = self.USER_AGENTS.get(user_agent, user_agent)
         self.timeout = timeout
         self.proxy = proxy
+        # Allow explicit override of cloudscraper setting, otherwise check global settings
+        if use_cloudscraper is not None:
+            self.use_cloudscraper = use_cloudscraper and CLOUDSCRAPER_AVAILABLE
+        else:
+            self.use_cloudscraper = self._should_use_cloudscraper()
         self.session = self._create_session()
+        
+        if self.use_cloudscraper:
+            logger.info(f"{self.NAME}: Using cloudscraper for Cloudflare bypass")
+    
+    def _should_use_cloudscraper(self) -> bool:
+        """Check if cloudscraper should be used based on global settings."""
+        if not CLOUDSCRAPER_AVAILABLE:
+            logger.debug("Cloudscraper not available (not installed)")
+            return False
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            enabled = settings.cloudscraper_enabled
+            logger.debug(f"Cloudscraper setting from DB: {enabled}")
+            return enabled
+        except Exception as e:
+            # Default to True if settings can't be loaded
+            logger.debug(f"Could not load cloudscraper setting, defaulting to True: {e}")
+            return True
     
     def _create_session(self) -> requests.Session:
-        """Erstelle HTTP-Session ohne automatische Retries."""
-        session = requests.Session()
+        """Erstelle HTTP-Session mit optionalem Cloudscraper für Cloudflare-Bypass."""
+        if self.use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
+            # Use cloudscraper for Cloudflare bypass - same config as original MacReplay
+            session = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'linux',  # Match original MacReplay
+                    'desktop': True
+                }
+            )
+            logger.debug(f"{self.NAME}: Created cloudscraper session for Cloudflare bypass")
+        else:
+            session = requests.Session()
+            logger.debug(f"{self.NAME}: Created standard requests session (no cloudscraper)")
+        
         # NO automatic retries - we handle retries manually at a higher level
         # This prevents urllib3 from retrying on timeouts which causes long waits
         adapter = HTTPAdapter(max_retries=0)
@@ -1522,6 +1566,7 @@ class UnifiedPortalEngine:
     Unified Portal Engine - Kombiniert alle Strategien.
     
     Versucht automatisch verschiedene Engines und wählt die beste.
+    Cloudscraper wird automatisch für alle Engines verwendet wenn aktiviert.
     """
     
     # Verfügbare Strategien in Prioritätsreihenfolge
@@ -1548,7 +1593,8 @@ class UnifiedPortalEngine:
     def __init__(self, portal_url: str, mac: str, 
                  engine: PortalEngine = PortalEngine.AUTO,
                  user_agent: str = 'MAG250',
-                 timeout: int = 10):  # Fast timeout for quick failover
+                 timeout: int = 10,
+                 use_cloudscraper: Optional[bool] = None):  # Fast timeout for quick failover
         self.portal_url = portal_url.rstrip('/')
         self.mac = mac
         self.engine = engine
@@ -1556,13 +1602,37 @@ class UnifiedPortalEngine:
         self.timeout = timeout
         self.identity = PortalIdentity(mac=mac)
         self._last_result: Optional[HandshakeResult] = None
+        
+        # Determine cloudscraper setting - check global settings if not explicitly set
+        if use_cloudscraper is not None:
+            self._use_cloudscraper = use_cloudscraper
+        else:
+            self._use_cloudscraper = self._check_cloudscraper_setting()
+        
+        if self._use_cloudscraper:
+            logger.info(f"UnifiedPortalEngine: Cloudscraper ENABLED for {portal_url}")
+        else:
+            logger.info(f"UnifiedPortalEngine: Cloudscraper DISABLED for {portal_url}")
+    
+    def _check_cloudscraper_setting(self) -> bool:
+        """Check global cloudscraper setting."""
+        if not CLOUDSCRAPER_AVAILABLE:
+            logger.debug("Cloudscraper not available (not installed)")
+            return False
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.cloudscraper_enabled
+        except Exception as e:
+            logger.debug(f"Could not load cloudscraper setting: {e}")
+            return True  # Default to enabled
     
     def _get_cache_key(self) -> str:
         """Cache-Key für Portal."""
         return f"{self.portal_url}:{self.mac}"
     
     def _get_strategy(self, engine: PortalEngine) -> BasePortalStrategy:
-        """Erstelle Strategie-Instanz."""
+        """Erstelle Strategie-Instanz mit cloudscraper setting."""
         strategy_class = self.STRATEGIES.get(engine)
         if not strategy_class:
             raise ValueError(f"Unknown engine: {engine}")
@@ -1572,7 +1642,8 @@ class UnifiedPortalEngine:
             identity=self.identity,
             user_agent=self.user_agent,
             timeout=self.timeout,
-            proxy=getattr(self, 'proxy', None)
+            proxy=getattr(self, 'proxy', None),
+            use_cloudscraper=self._use_cloudscraper  # Pass cloudscraper setting to strategy
         )
     
     def perform_handshake(self) -> HandshakeResult:
@@ -1852,7 +1923,8 @@ class UnifiedPortalEngine:
 def create_portal_client(portal_url: str, mac: str, 
                          engine: str = "auto",
                          user_agent: str = "MAG250",
-                         proxy: Optional[str] = None) -> UnifiedPortalEngine:
+                         proxy: Optional[str] = None,
+                         use_cloudscraper: Optional[bool] = None) -> UnifiedPortalEngine:
     """
     Factory-Funktion für UnifiedPortalEngine.
     
@@ -1862,6 +1934,7 @@ def create_portal_client(portal_url: str, mac: str,
         engine: Engine-Name (auto, macreplay, estalker, boxpirate, ob2_2025)
         user_agent: User-Agent Preset
         proxy: Optional proxy URL
+        use_cloudscraper: Override cloudscraper setting (None = use global setting)
     
     Returns:
         UnifiedPortalEngine Instanz
@@ -1875,16 +1948,24 @@ def create_portal_client(portal_url: str, mac: str,
         portal_url=portal_url,
         mac=mac,
         engine=engine_enum,
-        user_agent=user_agent
+        user_agent=user_agent,
+        use_cloudscraper=use_cloudscraper
     )
     client.proxy = proxy  # Set proxy for create_link
     return client
 
 
 def test_portal_connection(portal_url: str, mac: str, 
-                           engine: str = "auto") -> Dict[str, Any]:
+                           engine: str = "auto",
+                           use_cloudscraper: Optional[bool] = None) -> Dict[str, Any]:
     """
     Teste Portal-Verbindung mit allen Engines.
+    
+    Args:
+        portal_url: Portal URL
+        mac: MAC address
+        engine: Engine to test (or "auto" for all)
+        use_cloudscraper: Override cloudscraper setting (None = use global setting)
     
     Returns:
         Dict mit Testergebnissen pro Engine.
@@ -1892,17 +1973,30 @@ def test_portal_connection(portal_url: str, mac: str,
     results = {}
     identity = PortalIdentity(mac=mac)
     
+    # Determine cloudscraper setting
+    if use_cloudscraper is None:
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            use_cloudscraper = settings.cloudscraper_enabled
+        except Exception:
+            use_cloudscraper = True
+    
+    logger.info(f"test_portal_connection: cloudscraper={use_cloudscraper}")
+    
     for engine_enum, strategy_class in UnifiedPortalEngine.STRATEGIES.items():
         try:
             strategy = strategy_class(
                 portal_url=portal_url,
-                identity=identity
+                identity=identity,
+                use_cloudscraper=use_cloudscraper  # Pass cloudscraper setting
             )
             result = strategy.perform_handshake()
             results[engine_enum.value] = {
                 "success": result.success,
                 "token": result.token[:20] + "..." if result.token else None,
                 "error": result.error,
+                "cloudscraper_used": use_cloudscraper and CLOUDSCRAPER_AVAILABLE,
             }
         except Exception as e:
             results[engine_enum.value] = {

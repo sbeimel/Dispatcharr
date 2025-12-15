@@ -4,6 +4,7 @@ Implements MAC-level, Profile-level, and Stream-level failover.
 """
 
 import logging
+import re
 import time
 from typing import Optional, Tuple, List, Dict, Any
 from django.shortcuts import get_object_or_404
@@ -81,26 +82,38 @@ class FailoverManager:
                 if not m3u_account or not m3u_account.is_active:
                     continue
                 
-                # For the current stream, try profile failover within the same stream first
+                # For the current stream, try failover within the same account first
                 if current_stream_id and str(stream.id) == str(current_stream_id):
-                    # Only try profile failover for non-MAC accounts (MAC accounts handle their own failover)
                     logger.debug(f"Current stream {stream.id}: account_type={m3u_account.account_type}, is_MAC={m3u_account.account_type == M3UAccount.Types.MAC}")
-                    if m3u_account.account_type != M3UAccount.Types.MAC:
+                    
+                    if m3u_account.account_type == M3UAccount.Types.MAC:
+                        # MAC Account: Try MAC failover (next MAC in same account)
+                        logger.info(f"Trying MAC failover within current stream {stream.id} for channel {self.channel_id}")
+                        result = self._try_mac_account_failover(stream, m3u_account)
+                        if result[0]:  # If we got a URL
+                            # Reset attempt count on success
+                            self.redis_client.delete(attempt_key)
+                            return result
+                        logger.info(f"MAC failover exhausted for stream {stream.id}, trying other streams")
+                    else:
+                        # Standard Account: Try profile failover
                         logger.info(f"Trying profile failover within current stream {stream.id} for channel {self.channel_id}")
                         result = self._try_standard_account_failover(stream, m3u_account)
                         if result[0]:  # If we got a URL
                             # Reset attempt count on success
                             self.redis_client.delete(attempt_key)
                             return result
-                    else:
-                        logger.info(f"Skipping profile failover for MAC account (stream {stream.id}) for channel {self.channel_id}")
-                    # Skip to other streams after trying profile failover
+                        logger.info(f"Profile failover exhausted for stream {stream.id}, trying other streams")
+                    
+                    # Skip to other streams after trying failover within current stream
                     continue
                 
-                # Handle different account types for other streams
+                # Handle different account types for other streams (backup streams)
                 if m3u_account.account_type == M3UAccount.Types.MAC:
+                    logger.info(f"Trying backup MAC stream {stream.id} for channel {self.channel_id}")
                     result = self._try_mac_account_failover(stream, m3u_account)
                 else:
+                    logger.info(f"Trying backup standard stream {stream.id} for channel {self.channel_id}")
                     result = self._try_standard_account_failover(stream, m3u_account)
                 
                 if result[0]:  # If we got a URL
@@ -139,36 +152,53 @@ class FailoverManager:
             logger.error(f"No candidate MACs available for account {m3u_account.id}")
             return None, None, "No candidate MACs available"
         
-        # If Redis is available, prefer MACs that are not currently busy
-        if self.redis_client:
-            free_candidates = []
-            busy_candidates = []
-            
-            for mac_obj in candidates:
-                if self._is_mac_busy(mac_obj.id):
-                    busy_candidates.append(mac_obj)
-                else:
-                    free_candidates.append(mac_obj)
-            
-            if free_candidates:
-                candidates = free_candidates
-            elif candidates:
-                # All MACs are busy - return error to allow profile/stream failover
-                logger.warning(f"All candidate MACs are currently busy for MAC account {m3u_account.id}")
-                return None, None, "All MACs busy"
+        logger.info(f"MAC failover: Found {len(candidates)} candidate MACs for account {m3u_account.id}")
         
-        # Try each MAC in priority order
-        error_messages = []
+        # Get the currently used MAC for this channel (to skip it during failover)
+        current_mac_id = self._get_current_mac_for_channel()
+        if current_mac_id:
+            logger.info(f"MAC failover: Current MAC ID is {current_mac_id}, will skip it and try others")
+            # Mark current MAC in cooldown since it failed
+            self._mark_mac_cooldown(current_mac_id)
+            # Clear busy flag so it's not blocking other channels
+            self._clear_mac_busy(current_mac_id)
+        
+        # Filter candidates: exclude current MAC and MACs in cooldown
+        # Note: We DON'T skip busy MACs here because during failover we need to try all available MACs
+        # The "busy" flag is for preventing multiple channels from using the same MAC simultaneously
+        available_candidates = []
         for mac_obj in candidates:
+            if current_mac_id and mac_obj.id == current_mac_id:
+                logger.debug(f"MAC {mac_obj.address} is the current (failed) MAC, skipping")
+                continue
             if self._is_mac_in_cooldown(mac_obj.id):
                 logger.debug(f"MAC {mac_obj.address} is in cooldown, skipping")
                 continue
-            
+            # For failover, we allow using MACs that are "busy" on THIS channel
+            # because we're switching from one MAC to another on the same channel
+            if self._is_mac_busy(mac_obj.id):
+                # Check if this MAC is busy on a DIFFERENT channel
+                # For now, we'll allow it since we're doing failover
+                logger.debug(f"MAC {mac_obj.address} is marked busy, but allowing for failover")
+            available_candidates.append(mac_obj)
+        
+        if not available_candidates:
+            logger.warning(f"No available MACs for failover (all in cooldown, busy, or current)")
+            return None, None, "No available MACs for failover"
+        
+        logger.info(f"MAC failover: {len(available_candidates)} MACs available to try")
+        
+        # Try each available MAC
+        error_messages = []
+        for mac_obj in available_candidates:
             try:
+                logger.info(f"MAC failover: Trying MAC {mac_obj.address}")
                 stream_url = self._resolve_mac_stream_url(stream, mac_obj, m3u_account)
                 if stream_url:
                     # Mark MAC as busy
                     self._mark_mac_busy(mac_obj.id)
+                    # Store which MAC is used for this channel
+                    self._set_current_mac_for_channel(mac_obj.id)
                     
                     # Get or create a profile for this account
                     profile = self._get_or_create_mac_profile(m3u_account)
@@ -182,18 +212,15 @@ class FailoverManager:
                 logger.error(f"MAC failover failed for {mac_obj.address}: {error_msg}")
                 error_messages.append(f"{mac_obj.address}: {error_msg}")
                 
-                # Mark MAC in cooldown for network errors, but not for MAC-level errors
-                # (MAC-level errors are already handled in _resolve_mac_stream_url)
-                if "MacPortalError" not in str(type(e)):
-                    self._mark_mac_cooldown(mac_obj.id)
+                # Mark MAC in cooldown
+                self._mark_mac_cooldown(mac_obj.id)
                 continue
         
         # All MACs failed
         error_summary = "; ".join(error_messages) if error_messages else "All MACs failed"
-        logger.debug(f"MAC failover exhausted for channel {self.channel_id}: {error_summary}")
+        logger.warning(f"MAC failover exhausted for channel {self.channel_id}: {error_summary}")
         
-        # Try profile failover as fallback
-        return self._try_standard_account_failover(stream, m3u_account)
+        return None, None, f"MAC failover exhausted: {error_summary}"
     
     def _try_standard_account_failover(self, stream: Stream, m3u_account: M3UAccount) -> Tuple[Optional[str], Optional[int], Optional[str]]:
         """Try profile-level failover for standard/XC accounts."""
@@ -415,6 +442,58 @@ class FailoverManager:
         """Mark MAC as busy."""
         busy_key = RedisKeys.mac_busy(mac_id)
         self.redis_client.setex(busy_key, 3600, "1")  # 1 hour max
+    
+    def _clear_mac_busy(self, mac_id: int):
+        """Clear MAC busy flag."""
+        busy_key = RedisKeys.mac_busy(mac_id)
+        self.redis_client.delete(busy_key)
+        logger.debug(f"Cleared busy flag for MAC {mac_id}")
+    
+    def _get_current_mac_for_channel(self) -> Optional[int]:
+        """Get the MAC ID currently used for this channel.
+        
+        First tries to get from Redis cache, then falls back to extracting
+        from the current stream URL metadata.
+        """
+        # Try Redis cache first
+        mac_key = f"channel:{self.channel_id}:current_mac"
+        mac_id = self.redis_client.get(mac_key)
+        if mac_id:
+            try:
+                return int(mac_id)
+            except (ValueError, TypeError):
+                pass
+        
+        # Fallback: Try to extract MAC from current stream metadata
+        try:
+            metadata_key = f"channel:{self.channel_id}:metadata"
+            metadata = self.redis_client.hgetall(metadata_key)
+            if metadata:
+                # Try to get MAC from stream URL
+                stream_url = metadata.get(b'stream_url') or metadata.get('stream_url')
+                if stream_url:
+                    if isinstance(stream_url, bytes):
+                        stream_url = stream_url.decode('utf-8')
+                    
+                    # Extract MAC from URL (format: mac=00:1A:79:...)
+                    mac_match = re.search(r'mac=([0-9A-Fa-f:]{17})', stream_url)
+                    if mac_match:
+                        mac_address = mac_match.group(1).upper()
+                        # Find MAC ID in database
+                        mac_obj = M3UAccountMac.objects.filter(address__iexact=mac_address).first()
+                        if mac_obj:
+                            logger.debug(f"Found current MAC {mac_address} (ID: {mac_obj.id}) from stream URL")
+                            return mac_obj.id
+        except Exception as e:
+            logger.debug(f"Could not extract current MAC from metadata: {e}")
+        
+        return None
+    
+    def _set_current_mac_for_channel(self, mac_id: int):
+        """Store which MAC is used for this channel."""
+        mac_key = f"channel:{self.channel_id}:current_mac"
+        self.redis_client.setex(mac_key, 3600, str(mac_id))  # 1 hour expiry
+        logger.debug(f"Set current MAC {mac_id} for channel {self.channel_id}")
     
     def _mark_profile_cooldown(self, profile_id: int):
         """Mark profile as in cooldown."""
