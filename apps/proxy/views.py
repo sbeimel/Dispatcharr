@@ -76,7 +76,7 @@ class ProxyViewSet(viewsets.ViewSet):
 def get_active_streams(request):
     """Get list of active streams/channels with viewers."""
     try:
-        redis_client = RedisClient.get_instance()
+        redis_client = RedisClient.get_client()
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
@@ -125,7 +125,7 @@ def get_active_streams(request):
 def kill_stream(request, channel_id):
     """Kill/terminate an active stream to trigger failover."""
     try:
-        redis_client = RedisClient.get_instance()
+        redis_client = RedisClient.get_client()
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
@@ -198,7 +198,7 @@ def simulate_error(request, channel_id):
         
         error_type = request.data.get('error_type', 'timeout')
         
-        redis_client = RedisClient.get_instance()
+        redis_client = RedisClient.get_client()
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
