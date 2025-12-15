@@ -16,6 +16,8 @@ from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,8 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
     - GET /api/mac-portal/overview/statistics/ - Nur Statistiken
     - POST /api/mac-portal/overview/refresh-status/ - Status aktualisieren
     """
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
     
     def list(self, request):
         """Alias für overview - wird vom Router aufgerufen."""

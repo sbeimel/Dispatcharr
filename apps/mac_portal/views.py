@@ -1,6 +1,8 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.db import models
 from django.db.models import Count, Q, F
 from .models import MACPortal, MACAddress
@@ -9,6 +11,8 @@ from .serializers import MACPortalSerializer, MACAddressSerializer
 class MACPortalViewSet(viewsets.ModelViewSet):
     queryset = MACPortal.objects.all()
     serializer_class = MACPortalSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         queryset = MACPortal.objects.all()
@@ -49,6 +53,8 @@ class MACPortalViewSet(viewsets.ModelViewSet):
 class MACAddressViewSet(viewsets.ModelViewSet):
     queryset = MACAddress.objects.all()
     serializer_class = MACAddressSerializer
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
     
     def get_queryset(self):
         queryset = MACAddress.objects.all()

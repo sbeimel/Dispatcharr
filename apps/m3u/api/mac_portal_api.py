@@ -27,6 +27,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.shortcuts import get_object_or_404
 
 from ..models import M3UAccount, M3UAccountMac
@@ -112,6 +113,7 @@ class MACPortalSettingsViewSet(viewsets.ViewSet):
     
     Requirements: 44.1, 44.2, 44.3, 44.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -144,6 +146,7 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
     
     Requirements: 47.1, 47.2, 47.3, 47.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -183,6 +186,7 @@ class FailoverSettingsViewSet(viewsets.ViewSet):
     
     Requirements: 55.1, 55.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -208,6 +212,7 @@ class MACHealthViewSet(viewsets.ViewSet):
     
     Requirements: 49.1, 49.2, 49.3, 49.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request, account_pk=None):
@@ -259,6 +264,7 @@ class MACBatchOperationsViewSet(viewsets.ViewSet):
     
     Requirements: 50.1, 50.2, 50.3, 50.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['post'])
@@ -333,6 +339,7 @@ class MACImportExportViewSet(viewsets.ViewSet):
     
     Requirements: 51.1, 51.2, 51.3, 51.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['get'])
@@ -402,6 +409,7 @@ class ConnectionTestViewSet(viewsets.ViewSet):
     
     Requirements: 52.1, 52.2, 52.3, 52.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['post'])
@@ -539,6 +547,7 @@ class DebugLogsViewSet(viewsets.ViewSet):
     
     Requirements: 53.1, 53.2, 53.3, 53.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -578,6 +587,7 @@ class FailoverStatisticsViewSet(viewsets.ViewSet):
     
     Requirements: 61.2
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request, account_pk=None):
@@ -607,6 +617,7 @@ class VODSeriesAPIViewSet(viewsets.ViewSet):
     
     Requirements: 4.1-4.5, 13.1-13.4
     """
+    authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['get'])
