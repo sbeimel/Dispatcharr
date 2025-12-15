@@ -526,24 +526,33 @@ class ProviderHealthViewSet(viewsets.ViewSet):
         
         Returns provider health data including scores, problem MACs, and top performers.
         """
-        from .provider_health import get_provider_health_scorer
-        
-        scorer = get_provider_health_scorer()
-        
-        # Get all health data
-        providers = scorer.get_all_health_data()
-        
-        # Get problem MACs
-        problem_macs = scorer.get_problem_macs(threshold=50)
-        
-        # Get top performers
-        top_performers = scorer.get_top_performers(limit=10)
-        
-        return Response({
-            'providers': providers,
-            'problem_macs': problem_macs,
-            'top_performers': top_performers,
-        })
+        try:
+            from .provider_health import get_provider_health_scorer
+            
+            scorer = get_provider_health_scorer()
+            
+            # Get all health data
+            providers = scorer.get_all_health_data() or {}
+            
+            # Get problem MACs
+            problem_macs = scorer.get_problem_macs(threshold=50) or []
+            
+            # Get top performers
+            top_performers = scorer.get_top_performers(limit=10) or []
+            
+            return Response({
+                'providers': providers,
+                'problem_macs': problem_macs,
+                'top_performers': top_performers,
+            })
+        except Exception as e:
+            logger.error(f"Error getting provider health data: {e}")
+            # Return empty data instead of error to prevent frontend crash
+            return Response({
+                'providers': {},
+                'problem_macs': [],
+                'top_performers': [],
+            })
     
     @action(detail=False, methods=['get'])
     def provider(self, request):

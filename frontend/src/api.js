@@ -103,6 +103,76 @@ export default class API {
     return await useAuthStore.getState().getToken();
   }
 
+  /**
+   * Generic GET request method
+   */
+  static async get(url, options = {}) {
+    try {
+      const fullUrl = url.startsWith('http') ? url : `${host}${url}`;
+      const response = await request(fullUrl, {
+        method: 'GET',
+        ...options,
+      });
+      return { data: response };
+    } catch (error) {
+      console.error(`GET ${url} failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generic POST request method
+   */
+  static async post(url, data = {}, options = {}) {
+    try {
+      const fullUrl = url.startsWith('http') ? url : `${host}${url}`;
+      const response = await request(fullUrl, {
+        method: 'POST',
+        body: data,
+        ...options,
+      });
+      return { data: response };
+    } catch (error) {
+      console.error(`POST ${url} failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generic PUT request method
+   */
+  static async put(url, data = {}, options = {}) {
+    try {
+      const fullUrl = url.startsWith('http') ? url : `${host}${url}`;
+      const response = await request(fullUrl, {
+        method: 'PUT',
+        body: data,
+        ...options,
+      });
+      return { data: response };
+    } catch (error) {
+      console.error(`PUT ${url} failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Generic DELETE request method
+   */
+  static async delete(url, options = {}) {
+    try {
+      const fullUrl = url.startsWith('http') ? url : `${host}${url}`;
+      const response = await request(fullUrl, {
+        method: 'DELETE',
+        ...options,
+      });
+      return { data: response };
+    } catch (error) {
+      console.error(`DELETE ${url} failed:`, error);
+      throw error;
+    }
+  }
+
   static async fetchSuperUser() {
     try {
       return await request(`${host}/api/accounts/initialize-superuser/`, {

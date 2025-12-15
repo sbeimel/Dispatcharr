@@ -2097,6 +2097,17 @@ class StreamManager:
             bool: True on successful switch to a different MAC (and URL), False otherwise.
         """
         try:
+            # Check if MAC failover is enabled in settings
+            try:
+                from apps.m3u.mac_portal_models import FailoverSettings
+                settings = FailoverSettings.get_settings()
+                if not settings.mac_failover_enabled:
+                    logger.info(f"MAC failover is disabled in settings, skipping for channel {self.channel_id}")
+                    return False
+            except Exception as e:
+                logger.debug(f"Could not check MAC failover settings: {e}")
+                # Continue with failover if settings can't be loaded
+            
             # We need a current stream_id to work with
             if not getattr(self, "current_stream_id", None):
                 return False

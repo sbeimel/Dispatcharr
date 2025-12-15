@@ -5,11 +5,14 @@ Zeigt:
 - Alle M3UAccounts mit account_type='MAC'
 - MAC-Adressen aus dem mac_address Feld oder M3UAccountMac Objekten
 - Status und Health-Informationen
+- Aktive Streams pro Portal
+- Failover-Statistiken pro Portal
 """
 
 import logging
 import re
 from typing import Dict, Any, List
+from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import viewsets, status
@@ -19,6 +22,110 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 logger = logging.getLogger(__name__)
+
+
+def _get_active_streams_by_portal() -> Dict[int, int]:
+    """
+    Holt aktive Streams aus Redis und gruppiert sie nach Portal-ID.
+    
+    Returns:
+        Dict mapping portal_id -> active_stream_count
+    """
+    try:
+        from core.utils import RedisClient
+        redis_client = RedisClient.get_client()
+        if not redis_client:
+            return {}
+        
+        portal_streams = {}
+        
+        # Scan for active channel metadata
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor, match='ts_proxy:channel:*:metadata', count=100)
+            
+            for key in keys:
+                try:
+                    metadata = redis_client.hgetall(key)
+                    if metadata:
+                        channel_uuid = key.split(':')[2]
+                        
+                        # Get client count
+                        clients_key = f'ts_proxy:channel:{channel_uuid}:clients'
+                        client_count = redis_client.scard(clients_key) or 0
+                        
+                        if client_count > 0 or metadata.get('status') == 'streaming':
+                            # Versuche Portal-ID aus metadata zu holen
+                            account_id = metadata.get('account_id') or metadata.get('m3u_account_id')
+                            
+                            if not account_id:
+                                # Fallback: Hole aus Channel-Datenbank
+                                try:
+                                    from apps.channels.models import Channel
+                                    ch = Channel.objects.get(uuid=channel_uuid)
+                                    # Hole den ersten Stream und dessen Account
+                                    stream = ch.streams.first()
+                                    if stream and stream.m3u_account_id:
+                                        account_id = stream.m3u_account_id
+                                except Exception:
+                                    pass
+                            
+                            if account_id:
+                                try:
+                                    account_id = int(account_id)
+                                    portal_streams[account_id] = portal_streams.get(account_id, 0) + 1
+                                except (ValueError, TypeError):
+                                    pass
+                except Exception as e:
+                    logger.debug(f"Error processing key {key}: {e}")
+                    continue
+            
+            if cursor == 0:
+                break
+        
+        return portal_streams
+        
+    except Exception as e:
+        logger.error(f"Error getting active streams by portal: {e}")
+        return {}
+
+
+def _get_failover_counts_by_portal(hours: int = 24) -> Dict[int, int]:
+    """
+    Holt Failover-Counts aus der Datenbank für die letzten X Stunden.
+    
+    Args:
+        hours: Zeitraum in Stunden (default 24)
+        
+    Returns:
+        Dict mapping portal_id -> failover_count
+    """
+    try:
+        from apps.proxy.ts_proxy.predictive.models import PredictiveFailoverEvent
+        from django.db.models import Count
+        
+        since = timezone.now() - timedelta(hours=hours)
+        
+        # Gruppiere Failover-Events nach m3u_account
+        failover_counts = (
+            PredictiveFailoverEvent.objects
+            .filter(
+                timestamp__gte=since,
+                event_type__in=['failover_triggered', 'failover_success', 'stream_switch']
+            )
+            .values('m3u_account_id')
+            .annotate(count=Count('id'))
+        )
+        
+        return {
+            item['m3u_account_id']: item['count']
+            for item in failover_counts
+            if item['m3u_account_id']
+        }
+        
+    except Exception as e:
+        logger.debug(f"Could not get failover counts: {e}")
+        return {}
 
 
 class MACPortalOverviewViewSet(viewsets.ViewSet):
@@ -40,6 +147,10 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
             # Hole alle MAC-Accounts (account_type = 'MAC')
             portals = M3UAccount.objects.filter(account_type='MAC')
             
+            # Hole aktive Streams und Failover-Counts
+            active_streams_by_portal = _get_active_streams_by_portal()
+            failover_counts_by_portal = _get_failover_counts_by_portal(hours=24)
+            
             result = {
                 'portals': [],
                 'statistics': {
@@ -53,6 +164,8 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'expired_macs': 0,
                     'expiring_soon': 0,
                     'avg_health_score': 0,
+                    'total_active_streams': 0,
+                    'total_failovers_24h': 0,
                 }
             }
             
@@ -60,6 +173,11 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
             
             for portal in portals:
                 portal_data = self._get_portal_data(portal)
+                
+                # Füge aktive Streams und Failover-Count hinzu
+                portal_data['active_streams'] = active_streams_by_portal.get(portal.id, 0)
+                portal_data['failover_count_24h'] = failover_counts_by_portal.get(portal.id, 0)
+                
                 result['portals'].append(portal_data)
                 
                 # Statistiken aktualisieren
@@ -67,6 +185,9 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     result['statistics']['online_portals'] += 1
                 else:
                     result['statistics']['offline_portals'] += 1
+                
+                result['statistics']['total_active_streams'] += portal_data['active_streams']
+                result['statistics']['total_failovers_24h'] += portal_data['failover_count_24h']
                 
                 for mac in portal_data['macs']:
                     result['statistics']['total_macs'] += 1

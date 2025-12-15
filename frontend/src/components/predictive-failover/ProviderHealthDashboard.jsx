@@ -52,13 +52,20 @@ const ProviderHealthDashboard = () => {
     try {
       setLoading(true);
       const response = await API.get('/api/predictive-failover/provider-health/');
-      setHealthData(response.data.providers || {});
-      setProblemMacs(response.data.problem_macs || []);
-      setTopPerformers(response.data.top_performers || []);
+      const data = response.data || {};
+      setHealthData(data.providers || {});
+      setProblemMacs(Array.isArray(data.problem_macs) ? data.problem_macs : []);
+      setTopPerformers(Array.isArray(data.top_performers) ? data.top_performers : []);
       setError(null);
     } catch (err) {
-      setError('Fehler beim Laden der Health-Daten');
+      // Don't show error if just no data yet
+      if (err.response?.status === 500) {
+        setError('Fehler beim Laden der Health-Daten');
+      }
       console.error('Error fetching health data:', err);
+      setHealthData({});
+      setProblemMacs([]);
+      setTopPerformers([]);
     } finally {
       setLoading(false);
     }

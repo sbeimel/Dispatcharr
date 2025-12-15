@@ -569,6 +569,19 @@ const M3U = ({
                     {...form.getInputProps('proxy')}
                     key={form.key('proxy')}
                   />
+
+                  <Group justify="space-between" mt="md">
+                    <Box>Enable VOD Scanning</Box>
+                    <Switch
+                      id="enable_vod_mac"
+                      name="enable_vod"
+                      description="Scan and import VOD content (movies/series) from this MAC/STB portal"
+                      key={form.key('enable_vod')}
+                      {...form.getInputProps('enable_vod', {
+                        type: 'checkbox',
+                      })}
+                    />
+                  </Group>
                   
                   {macs.length > 0 && (
                     <Box mt="sm">

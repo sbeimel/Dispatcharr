@@ -219,18 +219,20 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="refresh-vod")
     def refresh_vod(self, request, pk=None):
-        """Trigger VOD content refresh for XtreamCodes accounts"""
+        """Trigger VOD content refresh for XtreamCodes and MAC/STB accounts"""
         account = self.get_object()
 
-        if account.account_type != M3UAccount.Types.XC:
+        # Support both XC and MAC accounts for VOD
+        if account.account_type not in (M3UAccount.Types.XC, M3UAccount.Types.MAC):
             return Response(
-                {"error": "VOD refresh is only available for XtreamCodes accounts"},
+                {"error": "VOD refresh is only available for XtreamCodes and MAC/STB accounts"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Check if VOD is enabled
-        vod_enabled = False
-        if account.custom_properties:
+        vod_enabled = account.enable_vod
+        if not vod_enabled:
+            # Also check custom_properties for backwards compatibility
             custom_props = account.custom_properties or {}
             vod_enabled = custom_props.get("enable_vod", False)
 
@@ -241,8 +243,21 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             )
 
         try:
+            if account.account_type == M3UAccount.Types.MAC:
+                # Use MAC-specific VOD refresh task
+                from apps.vod.tasks import refresh_mac_vod_content
+                refresh_mac_vod_content.delay(account.id)
+            else:
+                from apps.vod.tasks import refresh_vod_content
+                refresh_vod_content.delay(account.id)
+            
+            return Response(
+                {"message": f"VOD refresh initiated for account {account.name}"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except ImportError:
+            # Fallback if MAC VOD task doesn't exist yet
             from apps.vod.tasks import refresh_vod_content
-
             refresh_vod_content.delay(account.id)
             return Response(
                 {"message": f"VOD refresh initiated for account {account.name}"},

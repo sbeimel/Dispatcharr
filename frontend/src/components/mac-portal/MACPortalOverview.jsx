@@ -153,6 +153,16 @@ const PortalCard = ({ portal, onRefresh }) => {
           <Badge color="green" variant="light">
             {portal.available_count} / {portal.mac_count} MACs
           </Badge>
+          {portal.active_streams > 0 && (
+            <Badge color="blue" variant="filled" leftSection={<IconActivity size={12} />}>
+              {portal.active_streams} aktiv
+            </Badge>
+          )}
+          {portal.failover_count_24h > 0 && (
+            <Badge color="yellow" variant="light" leftSection={<IconAlertTriangle size={12} />}>
+              {portal.failover_count_24h} Failovers
+            </Badge>
+          )}
           {portal.max_connections && (
             <Badge color="cyan" variant="light" leftSection={<IconDeviceTv size={12} />}>
               Max {portal.max_connections} Streams
@@ -389,7 +399,7 @@ const MACPortalOverview = () => {
       </Group>
 
       {/* Statistiken */}
-      <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} mb="md">
+      <SimpleGrid cols={{ base: 1, sm: 2, md: 5 }} mb="md">
         <StatCard
           title="Total Portals"
           value={stats.total_portals || 0}
@@ -403,6 +413,13 @@ const MACPortalOverview = () => {
           icon={<IconDeviceTv size={20} />}
           color="cyan"
           subtitle={`${stats.available_macs || 0} available`}
+        />
+        <StatCard
+          title="Active Streams"
+          value={stats.total_active_streams || 0}
+          icon={<IconActivity size={20} />}
+          color="green"
+          subtitle="currently streaming"
         />
         <StatCard
           title="Avg Health Score"

@@ -117,6 +117,17 @@ class FailoverManager:
     def _try_mac_account_failover(self, stream: Stream, m3u_account: M3UAccount) -> Tuple[Optional[str], Optional[int], Optional[str]]:
         """Try MAC-level failover using the proper MAC failover logic from the patch."""
         
+        # Check if MAC failover is enabled in settings
+        try:
+            from apps.m3u.mac_portal_models import FailoverSettings
+            settings = FailoverSettings.get_settings()
+            if not settings.mac_failover_enabled:
+                logger.info(f"MAC failover is disabled in settings, skipping for account {m3u_account.id}")
+                return None, None, "MAC failover disabled"
+        except Exception as e:
+            logger.debug(f"Could not check MAC failover settings: {e}")
+            # Continue with failover if settings can't be loaded
+        
         # Get candidate MACs for streaming (excludes EXPIRED/ERROR and past expires_at)
         try:
             candidates = m3u_account.get_candidate_macs_for_streaming()
@@ -233,8 +244,9 @@ class FailoverManager:
         return None, None, "All profiles exhausted or in cooldown"
     
     def _resolve_mac_stream_url(self, stream: Stream, mac_obj: M3UAccountMac, m3u_account: M3UAccount) -> Optional[str]:
-        """Resolve stream URL using MAC portal client with proper failover logic."""
-        from apps.m3u.mac_portal_client import MacPortalClient, MacPortalError
+        """Resolve stream URL using UnifiedPortalEngine with proper failover logic."""
+        from apps.m3u.unified_portal_engine import UnifiedPortalEngine
+        from apps.m3u.mac_portal_client import MacPortalError
         from django.utils import timezone
         
         try:
@@ -271,19 +283,28 @@ class FailoverManager:
                     logger.warning(f"Failed to extract cmd from mac:// URL: {e}")
                     cmd = stream.url
             
+            # Get engine preference from account settings
+            engine_pref = props.get("portal_engine", "auto")
+            from apps.m3u.unified_portal_engine import PortalEngine
+            try:
+                selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO
+            except ValueError:
+                selected_engine = PortalEngine.AUTO
+            
             # Try each proxy until one works
             for proxy in proxy_list:
                 try:
-                    client = MacPortalClient(
-                        base_url=m3u_account.server_url,
+                    # Use UnifiedPortalEngine which supports all engines (macreplay, ob2_2025, etc.)
+                    engine = UnifiedPortalEngine(
+                        portal_url=m3u_account.server_url,
                         mac=mac_obj.address,
-                        proxy=proxy,
-                        timezone=timezone_str,
+                        engine=selected_engine,
                     )
+                    engine.proxy = proxy  # Set proxy after initialization
                     
                     # Resolve the stream URL
                     if cmd and not cmd.startswith('http'):
-                        resolved_url = client.create_link(cmd)
+                        resolved_url = engine.create_link(cmd)
                     else:
                         resolved_url = cmd
                     

@@ -2105,3 +2105,248 @@ def validate_logo_reference(obj, obj_type="object"):
         logger.warning(f"VOD Logo with ID {obj.logo.pk} does not exist in database for {obj_type} '{getattr(obj, 'name', 'Unknown')}', setting to None")
         obj.logo = None
         return False
+
+
+# =============================================================================
+# MAC/STB Portal VOD Tasks
+# =============================================================================
+
+@shared_task
+def refresh_mac_vod_content(account_id):
+    """
+    Refresh VOD content for a MAC/STB Portal account.
+    Uses UnifiedPortalEngine to fetch VOD categories and items.
+    """
+    from apps.m3u.tasks import send_m3u_update
+    
+    try:
+        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            logger.warning(f"MAC VOD refresh called for non-MAC account {account_id}")
+            return "MAC VOD refresh only available for MAC/STB accounts"
+        
+        logger.info(f"Starting MAC VOD refresh for account {account.name}")
+        start_time = timezone.now()
+        
+        # Send start notification
+        send_m3u_update(account_id, "vod_refresh", 0, status="processing")
+        
+        # Get MAC address for portal connection
+        mac_address = None
+        if hasattr(account, 'macs') and account.macs.exists():
+            mac_obj = account.macs.filter(status__in=['valid', 'active', 'unknown']).first()
+            if mac_obj:
+                mac_address = mac_obj.address
+        
+        if not mac_address:
+            # Fallback to mac_address field
+            mac_address = getattr(account, 'mac_address', None)
+            if mac_address and ',' in mac_address:
+                mac_address = mac_address.split(',')[0].strip()
+        
+        if not mac_address:
+            logger.error(f"No MAC address available for account {account_id}")
+            send_m3u_update(account_id, "vod_refresh", 100, status="error",
+                           message="No MAC address available")
+            return "No MAC address available"
+        
+        # Initialize UnifiedPortalEngine
+        from apps.m3u.unified_portal_engine import UnifiedPortalEngine, PortalEngine
+        
+        props = account.custom_properties or {}
+        engine_pref = props.get("portal_engine", "auto")
+        try:
+            selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO
+        except ValueError:
+            selected_engine = PortalEngine.AUTO
+        
+        engine = UnifiedPortalEngine(
+            portal_url=account.server_url,
+            mac=mac_address,
+            engine=selected_engine,
+        )
+        
+        # Perform handshake
+        result = engine.perform_handshake()
+        if not result.success:
+            logger.error(f"Handshake failed for MAC VOD refresh: {result.error}")
+            send_m3u_update(account_id, "vod_refresh", 100, status="error",
+                           message=f"Portal handshake failed: {result.error}")
+            return f"Handshake failed: {result.error}"
+        
+        # Fetch VOD categories
+        logger.info(f"Fetching VOD categories for account {account.name}")
+        vod_categories = engine.get_vod_categories()
+        
+        if not vod_categories:
+            logger.warning(f"No VOD categories found for account {account.name}")
+            send_m3u_update(account_id, "vod_refresh", 100, status="success",
+                           message="No VOD content found")
+            return "No VOD categories found"
+        
+        # Process VOD categories
+        movie_category_map = batch_create_categories(vod_categories, 'movie', account)
+        logger.info(f"Created/updated {len(movie_category_map)} VOD categories")
+        
+        # Fetch and process VOD items for each category
+        total_movies = 0
+        for cat_data in vod_categories:
+            cat_id = cat_data.get('category_id') or cat_data.get('id')
+            if not cat_id:
+                continue
+            
+            try:
+                vod_items = engine.get_vod_items(category_id=str(cat_id))
+                if vod_items and 'data' in vod_items:
+                    items = vod_items['data']
+                    if items:
+                        # Process movies from this category
+                        process_mac_vod_items(account, items, movie_category_map, start_time)
+                        total_movies += len(items)
+            except Exception as e:
+                logger.warning(f"Error fetching VOD items for category {cat_id}: {e}")
+                continue
+        
+        # Fetch series categories
+        logger.info(f"Fetching series categories for account {account.name}")
+        series_categories = engine.get_series_categories()
+        
+        total_series = 0
+        if series_categories:
+            series_category_map = batch_create_categories(series_categories, 'series', account)
+            logger.info(f"Created/updated {len(series_category_map)} series categories")
+            
+            # Fetch and process series for each category
+            for cat_data in series_categories:
+                cat_id = cat_data.get('category_id') or cat_data.get('id')
+                if not cat_id:
+                    continue
+                
+                try:
+                    series_items = engine.get_series_items(category_id=str(cat_id))
+                    if series_items and 'data' in series_items:
+                        items = series_items['data']
+                        if items:
+                            process_mac_series_items(account, items, series_category_map, start_time)
+                            total_series += len(items)
+                except Exception as e:
+                    logger.warning(f"Error fetching series for category {cat_id}: {e}")
+                    continue
+        
+        end_time = timezone.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        logger.info(f"MAC VOD refresh completed for account {account.name}: "
+                   f"{total_movies} movies, {total_series} series in {duration:.2f}s")
+        
+        # Cleanup orphaned content
+        cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
+        
+        send_m3u_update(account_id, "vod_refresh", 100, status="success",
+                       message=f"VOD refresh completed: {total_movies} movies, {total_series} series")
+        
+        return f"MAC VOD refresh completed: {total_movies} movies, {total_series} series"
+        
+    except Exception as e:
+        logger.error(f"Error refreshing MAC VOD for account {account_id}: {e}", exc_info=True)
+        send_m3u_update(account_id, "vod_refresh", 100, status="error",
+                       message=f"VOD refresh failed: {str(e)}")
+        return f"MAC VOD refresh failed: {str(e)}"
+
+
+def process_mac_vod_items(account, items, category_map, scan_start_time):
+    """Process VOD items from MAC portal and create/update Movie records."""
+    from django.db import transaction
+    
+    for item in items:
+        try:
+            # Extract movie data from portal response
+            external_id = str(item.get('id') or item.get('stream_id') or '')
+            name = item.get('name') or item.get('title') or 'Unknown'
+            
+            # Get category
+            cat_id = str(item.get('category_id', ''))
+            category = category_map.get(cat_id)
+            
+            # Extract additional data
+            cover = item.get('cover') or item.get('stream_icon') or ''
+            plot = item.get('plot') or item.get('description') or ''
+            year = extract_year_from_data(item, 'name')
+            rating = normalize_rating(item.get('rating'))
+            
+            # Create or update movie
+            with transaction.atomic():
+                movie, created = Movie.objects.update_or_create(
+                    name=name,
+                    defaults={
+                        'plot': plot[:2000] if plot else '',
+                        'year': year,
+                        'rating': rating,
+                        'cover_url': cover,
+                        'category': category,
+                    }
+                )
+                
+                # Create M3U relation
+                M3UMovieRelation.objects.update_or_create(
+                    movie=movie,
+                    m3u_account=account,
+                    defaults={
+                        'external_movie_id': external_id,
+                        'stream_url': item.get('cmd') or item.get('stream_url') or '',
+                        'last_seen': scan_start_time or timezone.now(),
+                    }
+                )
+                
+        except Exception as e:
+            logger.debug(f"Error processing MAC VOD item: {e}")
+            continue
+
+
+def process_mac_series_items(account, items, category_map, scan_start_time):
+    """Process series items from MAC portal and create/update Series records."""
+    from django.db import transaction
+    
+    for item in items:
+        try:
+            # Extract series data from portal response
+            external_id = str(item.get('id') or item.get('series_id') or '')
+            name = item.get('name') or item.get('title') or 'Unknown'
+            
+            # Get category
+            cat_id = str(item.get('category_id', ''))
+            category = category_map.get(cat_id)
+            
+            # Extract additional data
+            cover = item.get('cover') or item.get('series_icon') or ''
+            plot = item.get('plot') or item.get('description') or ''
+            year = extract_year_from_data(item, 'name')
+            rating = normalize_rating(item.get('rating'))
+            
+            # Create or update series
+            with transaction.atomic():
+                series, created = Series.objects.update_or_create(
+                    name=name,
+                    defaults={
+                        'plot': plot[:2000] if plot else '',
+                        'year': year,
+                        'rating': rating,
+                        'cover_url': cover,
+                        'category': category,
+                    }
+                )
+                
+                # Create M3U relation
+                M3USeriesRelation.objects.update_or_create(
+                    series=series,
+                    m3u_account=account,
+                    defaults={
+                        'external_series_id': external_id,
+                        'last_seen': scan_start_time or timezone.now(),
+                    }
+                )
+                
+        except Exception as e:
+            logger.debug(f"Error processing MAC series item: {e}")
+            continue
