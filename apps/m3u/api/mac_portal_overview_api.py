@@ -30,8 +30,15 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
     - POST /api/mac-portal/overview/refresh-status/ - Status aktualisieren
     """
     
-    @action(detail=False, methods=['get'])
+    def list(self, request):
+        """Alias für overview - wird vom Router aufgerufen."""
+        return self._get_overview(request)
+    
     def overview(self, request):
+        """GET /api/mac-portal/overview/ - Vollständige Übersicht."""
+        return self._get_overview(request)
+    
+    def _get_overview(self, request):
         """
         Liefert vollständige MAC Portal Übersicht.
         
@@ -280,7 +287,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def statistics(self, request):
         """Liefert nur die Statistiken."""
-        overview = self.overview(request)
+        overview = self._get_overview(request)
         if overview.status_code == 200:
             return Response(overview.data.get('statistics', {}))
         return overview

@@ -108,42 +108,60 @@ class PredictiveFailoverConsumer(AsyncJsonWebsocketConsumer):
         from .warmup_manager import get_warmup_manager
         from .metrics_collector import get_metrics_collector
         from .risk_calculator import RiskScoreCalculator
-        from .models import PredictiveFailoverEvent
         
-        config = get_predictive_config()
-        warmup_manager = get_warmup_manager()
-        collector = get_metrics_collector()
-        calculator = RiskScoreCalculator()
+        try:
+            config = get_predictive_config()
+        except Exception:
+            config = type('Config', (), {
+                'enabled': False,
+                'warmup_threshold': 60,
+                'failover_threshold': 80
+            })()
         
-        # Get active streams with risk scores
-        active_streams = []
-        for stream_info in collector.get_monitored_streams():
-            stream_id = stream_info.get('stream_id')
-            if stream_id:
-                risk_result = calculator.calculate_risk_score(stream_id)
-                active_streams.append({
-                    'stream_id': stream_id,
-                    'channel_id': stream_info.get('channel_id'),
-                    'channel_name': stream_info.get('channel_name', 'Unknown'),
-                    'risk_score': risk_result.score,
-                    'reasons': risk_result.reasons,
-                })
+        try:
+            warmup_manager = get_warmup_manager()
+            warmup_status = warmup_manager.get_all_warmup_status()
+        except Exception:
+            warmup_status = {}
         
-        # Get warmup status
-        warmup_status = warmup_manager.get_all_warmup_status()
+        try:
+            collector = get_metrics_collector()
+            calculator = RiskScoreCalculator()
+            
+            # Get active streams with risk scores
+            active_streams = []
+            for stream_info in collector.get_monitored_streams():
+                stream_id = stream_info.get('stream_id')
+                if stream_id:
+                    risk_result = calculator.calculate_risk_score(stream_id)
+                    active_streams.append({
+                        'stream_id': stream_id,
+                        'channel_id': stream_info.get('channel_id'),
+                        'channel_name': stream_info.get('channel_name', 'Unknown'),
+                        'risk_score': risk_result.score,
+                        'reasons': risk_result.reasons,
+                    })
+        except Exception:
+            active_streams = []
         
-        # Get recent events
-        recent_events = list(
-            PredictiveFailoverEvent.objects.all()[:10].values(
-                'id', 'event_type', 'channel_name', 'risk_score', 
-                'reason', 'timestamp', 'success'
+        # Get recent events - handle missing table gracefully
+        recent_events = []
+        try:
+            from .models import PredictiveFailoverEvent
+            recent_events = list(
+                PredictiveFailoverEvent.objects.all()[:10].values(
+                    'id', 'event_type', 'channel_name', 'risk_score', 
+                    'reason', 'timestamp', 'success'
+                )
             )
-        )
+        except Exception as e:
+            # Table might not exist yet - this is OK
+            logger.debug(f"Could not fetch recent events (table may not exist): {e}")
         
         return {
-            'enabled': config.enabled,
-            'warmup_threshold': config.warmup_threshold,
-            'failover_threshold': config.failover_threshold,
+            'enabled': getattr(config, 'enabled', False),
+            'warmup_threshold': getattr(config, 'warmup_threshold', 60),
+            'failover_threshold': getattr(config, 'failover_threshold', 80),
             'active_streams': active_streams,
             'warmup_status': warmup_status,
             'recent_events': recent_events,

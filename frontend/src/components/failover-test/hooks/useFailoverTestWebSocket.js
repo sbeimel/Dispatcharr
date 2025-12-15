@@ -16,8 +16,21 @@ const useFailoverTestWebSocket = ({ onEvent }) => {
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const reconnectDelayRef = useRef(WS_RECONNECT_DELAY);
+  const onEventRef = useRef(onEvent);
+  const isConnectingRef = useRef(false);
+
+  // Keep onEvent ref updated without causing reconnects
+  useEffect(() => {
+    onEventRef.current = onEvent;
+  }, [onEvent]);
 
   const connect = useCallback(() => {
+    // Prevent multiple simultaneous connection attempts
+    if (isConnectingRef.current || (wsRef.current && wsRef.current.readyState === WebSocket.OPEN)) {
+      return;
+    }
+    isConnectingRef.current = true;
+
     // Build WebSocket URL
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
@@ -31,6 +44,7 @@ const useFailoverTestWebSocket = ({ onEvent }) => {
         console.log('Failover test WebSocket connected');
         setConnected(true);
         reconnectDelayRef.current = WS_RECONNECT_DELAY;
+        isConnectingRef.current = false;
 
         // Request initial state
         ws.send(JSON.stringify({ type: 'get_status' }));
@@ -41,8 +55,8 @@ const useFailoverTestWebSocket = ({ onEvent }) => {
           const data = JSON.parse(event.data);
           setLastEvent(data);
           
-          if (onEvent) {
-            onEvent(data);
+          if (onEventRef.current) {
+            onEventRef.current(data);
           }
         } catch (error) {
           console.error('Failed to parse WebSocket message:', error);
@@ -53,21 +67,24 @@ const useFailoverTestWebSocket = ({ onEvent }) => {
         console.log('Failover test WebSocket disconnected:', event.code);
         setConnected(false);
         wsRef.current = null;
+        isConnectingRef.current = false;
 
-        // Attempt reconnection with exponential backoff
-        if (!event.wasClean) {
+        // Attempt reconnection with exponential backoff only for unexpected closes
+        if (!event.wasClean && event.code !== 1000) {
           scheduleReconnect();
         }
       };
 
       ws.onerror = (error) => {
         console.error('Failover test WebSocket error:', error);
+        isConnectingRef.current = false;
       };
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
+      isConnectingRef.current = false;
       scheduleReconnect();
     }
-  }, [onEvent]);
+  }, []); // No dependencies - stable function
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) {

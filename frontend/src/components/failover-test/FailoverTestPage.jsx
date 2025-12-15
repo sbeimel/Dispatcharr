@@ -43,22 +43,8 @@ const FailoverTestPage = () => {
   const [settings, setSettings] = useState(null);
   const [activeSimulations, setActiveSimulations] = useState([]);
 
-  // WebSocket connection
-  const { connected } = useFailoverTestWebSocket({
-    onEvent: handleWebSocketEvent,
-  });
-
-  // Load initial data
-  useEffect(() => {
-    loadData();
-    return () => {
-      // Cleanup on unmount - stop all simulations
-      failoverTestApi.stopAllSimulations?.().catch(() => {});
-    };
-  }, []);
-
-  // Handle WebSocket events
-  function handleWebSocketEvent(event) {
+  // Handle WebSocket events - use useCallback to prevent reconnection loops
+  const handleWebSocketEvent = React.useCallback((event) => {
     if (event.type === 'initial_state') {
       setTestChannels(event.data.test_channels || []);
       setStatistics(event.data.statistics);
@@ -76,7 +62,21 @@ const FailoverTestPage = () => {
         prev.filter(s => s.simulation_id !== event.data.simulation_id)
       );
     }
-  }
+  }, []);
+
+  // WebSocket connection
+  const { connected } = useFailoverTestWebSocket({
+    onEvent: handleWebSocketEvent,
+  });
+
+  // Load initial data
+  useEffect(() => {
+    loadData();
+    return () => {
+      // Cleanup on unmount - stop all simulations
+      failoverTestApi.stopAllSimulations?.().catch(() => {});
+    };
+  }, []);
 
   const loadData = async () => {
     setLoading(true);

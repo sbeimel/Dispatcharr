@@ -15,11 +15,9 @@ import {
   Card,
   Text,
   Title,
-  Grid,
   Badge,
   Progress,
   ActionIcon,
-  Tooltip,
   Table,
   Paper,
   Collapse,
@@ -33,7 +31,6 @@ import {
   Center,
   Container,
 } from '@mantine/core';
-import { notifications } from '@mantine/notifications';
 import {
   IconRefresh,
   IconChevronDown,
@@ -49,31 +46,6 @@ import {
 
 // API Base URL
 const API_BASE = '/api/mac-portal';
-
-// Add a mock data fallback for development
-const MOCK_DATA = {
-  portals: [
-    {
-      id: 1,
-      name: 'Main Portal',
-      status: 'online',
-      macs: [
-        { id: 1, address: '00:1A:79:XX:XX:XX', status: 'active', streams: 5, maxStreams: 10 },
-        { id: 2, address: '00:1A:79:XX:XX:XY', status: 'inactive', streams: 0, maxStreams: 10 },
-      ],
-      healthScore: 85,
-      expiryDays: 30,
-    },
-  ],
-  stats: {
-    totalPortals: 1,
-    onlinePortals: 1,
-    totalMACs: 2,
-    activeMACs: 1,
-    totalStreams: 5,
-    maxStreams: 20,
-  },
-};
 
 /**
  * Status Badge Komponente
@@ -202,7 +174,7 @@ const PortalCard = ({ portal, onRefresh }) => {
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
-              {portal.macs.map((mac) => (
+              {(portal.macs || []).map((mac) => (
                 <Table.Tr key={mac.id}>
                   <Table.Td>
                     <Text size="sm" ff="monospace">
@@ -213,7 +185,7 @@ const PortalCard = ({ portal, onRefresh }) => {
                     <StatusBadge status={mac.status} />
                   </Table.Td>
                   <Table.Td>
-                    <HealthScore score={mac.health_score} />
+                    <HealthScore score={mac.health_score || 0} />
                   </Table.Td>
                   <Table.Td>
                     <ExpiryCountdown days={mac.days_until_expiry} />
@@ -222,12 +194,12 @@ const PortalCard = ({ portal, onRefresh }) => {
                     <Group gap={4}>
                       <IconDeviceTv size={14} />
                       <Text size="sm">
-                        {mac.current_streams}/{mac.max_connections}
+                        {mac.current_streams || 0}/{mac.max_connections || 1}
                       </Text>
                     </Group>
                   </Table.Td>
                   <Table.Td>
-                    {mac.activity_level !== null ? (
+                    {mac.activity_level !== null && mac.activity_level !== undefined ? (
                       <Badge size="sm" variant="outline">
                         Level {mac.activity_level}
                       </Badge>
@@ -236,7 +208,7 @@ const PortalCard = ({ portal, onRefresh }) => {
                     )}
                   </Table.Td>
                   <Table.Td>
-                    {mac.watchdog_timeout !== null ? (
+                    {mac.watchdog_timeout !== null && mac.watchdog_timeout !== undefined ? (
                       <Text size="sm">{mac.watchdog_timeout}s</Text>
                     ) : (
                       <Text size="sm" c="dimmed">-</Text>
@@ -274,14 +246,17 @@ const StatCard = ({ title, value, icon, color = 'blue', subtitle }) => (
       <ThemeIcon color={color} variant="light" size="lg">
         {icon}
       </ThemeIcon>
+    </Group>
+  </Card>
+);
+
+/**
  * Hauptkomponente: MAC Portal Overview
  */
 const MACPortalOverview = () => {
-  const [portals, setPortals] = useState([]);
-  const [stats, setStats] = useState(null);
+  const [data, setData] = useState({ portals: [], statistics: {} });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [useMockData, setUseMockData] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = useCallback(async () => {
@@ -289,36 +264,22 @@ const MACPortalOverview = () => {
       setLoading(true);
       setError(null);
       
-      // Try to fetch real data first
-      try {
-        // Fetch portals data
-        const portalsRes = await fetch(`${API_BASE}/portals`);
-        if (!portalsRes.ok) throw new Error('Failed to fetch portals');
-        const portalsData = await portalsRes.json();
-        
-        // Fetch stats
-        const statsRes = await fetch(`${API_BASE}/stats`);
-        if (!statsRes.ok) throw new Error('Failed to fetch stats');
-        const statsData = await statsRes.json();
-        
-        setPortals(portalsData);
-        setStats(statsData);
-        setUseMockData(false);
-      } catch (err) {
-        console.error('Error fetching real data, falling back to mock data:', err);
-        throw err; // Will be caught by the outer catch
-      }
-    } catch (err) {
-      console.error('Error in fetchData:', err);
-      setError(err.message || 'Failed to load data');
+      const response = await fetch(`${API_BASE}/overview/`);
       
-      // Fallback to mock data in development
-      if (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'production') {
-        console.warn('Using mock data due to API error');
-        setPortals(MOCK_DATA.portals);
-        setStats(MOCK_DATA.stats);
-        setUseMockData(true);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
+      
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server returned non-JSON response');
+      }
+      
+      const result = await response.json();
+      setData(result);
+    } catch (err) {
+      console.error('Error fetching MAC portal overview:', err);
+      setError(err.message || 'Failed to load data');
     } finally {
       setLoading(false);
     }
@@ -329,7 +290,11 @@ const MACPortalOverview = () => {
     try {
       await fetch(`${API_BASE}/overview/refresh-status/`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
       });
+      // Wait a bit for the refresh to complete
       setTimeout(() => {
         fetchData();
         setRefreshing(false);
@@ -359,25 +324,20 @@ const MACPortalOverview = () => {
     );
   }
 
-  if (error && !useMockData) {
+  if (error) {
     return (
       <Container size="lg" py="xl">
         <Alert 
-          title="Error loading data" 
+          title="Error loading MAC portal overview" 
           color="red" 
           variant="filled"
           icon={<IconAlertTriangle size={24} />}
           mb="md"
         >
           {error}
-          <Text mt="sm">
-            {useMockData 
-              ? 'Showing mock data for demonstration.' 
-              : 'Please check your connection and try again.'}
-          </Text>
           <Button 
             onClick={fetchData} 
-            leftIcon={<IconRefresh size={16} />} 
+            leftSection={<IconRefresh size={16} />} 
             mt="md"
             variant="white"
           >
@@ -388,28 +348,9 @@ const MACPortalOverview = () => {
     );
   }
 
-  if (useMockData) {
-    return (
-      <Container size="lg" py="xl">
-        <Alert 
-          title="Demo Mode" 
-          color="yellow" 
-          mb="md"
-          icon={<IconAlertTriangle size={24} />}
-        >
-          <Text>This is a demo with mock data. The MAC Portal API is not available.</Text>
-          <Text mt="xs">To use real data, ensure the backend API is running and accessible.</Text>
-        </Alert>
-        {renderContent()}
-      </Container>
-    );
-  }
-
-  const stats = stats || {};
-  const portals = portals || [];
-  const portals = data?.portals || [];
-
-  const healthColor = stats.avg_health_score >= 80 ? 'green' : stats.avg_health_score >= 50 ? 'yellow' : 'red';
+  const stats = data.statistics || {};
+  const portals = data.portals || [];
+  const healthColor = (stats.avg_health_score || 0) >= 80 ? 'green' : (stats.avg_health_score || 0) >= 50 ? 'yellow' : 'red';
 
   return (
     <Box p="md">
