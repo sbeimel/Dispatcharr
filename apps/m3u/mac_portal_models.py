@@ -141,6 +141,14 @@ class MACPortalGlobalSettings(models.Model):
         help_text="Portal authentication engine to use"
     )
     
+    # Parental Control PIN (from migration 0025)
+    parental_pin = models.CharField(
+        max_length=10,
+        blank=True,
+        default='',
+        help_text="PIN for parental control"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
