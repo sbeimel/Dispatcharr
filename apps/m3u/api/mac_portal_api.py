@@ -29,6 +29,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 from ..models import M3UAccount, M3UAccountMac
 from ..mac_portal_models import (
@@ -107,6 +109,7 @@ class MACStatusSerializer(serializers.Serializer):
 
 # ============== ViewSets ==============
 
+@method_decorator(csrf_exempt, name='dispatch')
 class MACPortalSettingsViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC Portal global settings.
@@ -150,6 +153,7 @@ class MACPortalSettingsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class FeatureTogglesViewSet(viewsets.ViewSet):
     """
     API endpoint for feature toggles.
@@ -205,6 +209,7 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
         return self.list(request)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class FailoverSettingsViewSet(viewsets.ViewSet):
     """
     API endpoint for failover settings.
@@ -241,6 +246,7 @@ class FailoverSettingsViewSet(viewsets.ViewSet):
 
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class MACHealthViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC health monitoring.
@@ -293,6 +299,7 @@ class MACHealthViewSet(viewsets.ViewSet):
         return Response({'status': 'cooldown_reset', 'mac': mac.address})
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class MACBatchOperationsViewSet(viewsets.ViewSet):
     """
     API endpoint for batch MAC operations.
@@ -368,6 +375,7 @@ class MACBatchOperationsViewSet(viewsets.ViewSet):
         return Response({'status': 'disabled', 'count': len(mac_ids)})
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class MACImportExportViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC import/export.
@@ -438,6 +446,7 @@ class MACImportExportViewSet(viewsets.ViewSet):
         })
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class ConnectionTestViewSet(viewsets.ViewSet):
     """
     API endpoint for connection testing.
@@ -576,6 +585,7 @@ class ConnectionTestViewSet(viewsets.ViewSet):
 
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class DebugLogsViewSet(viewsets.ViewSet):
     """
     API endpoint for debug logs.
@@ -616,6 +626,7 @@ class DebugLogsViewSet(viewsets.ViewSet):
         return Response({'deleted': deleted})
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class FailoverStatisticsViewSet(viewsets.ViewSet):
     """
     API endpoint for failover statistics.
@@ -646,6 +657,7 @@ class FailoverStatisticsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
 
+@method_decorator(csrf_exempt, name='dispatch')
 class VODSeriesAPIViewSet(viewsets.ViewSet):
     """
     API endpoint for VOD and Series.
