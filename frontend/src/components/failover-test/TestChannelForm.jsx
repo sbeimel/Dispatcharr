@@ -65,7 +65,7 @@ const TestChannelForm = ({ channel, onSave, onClose }) => {
       const accounts = await API.getM3UAccounts?.() || [];
       setAvailableAccounts(
         accounts
-          .filter(a => a.account_type === 'mac')
+          .filter(a => a.account_type === 'MAC' || a.account_type === 'mac')
           .map(a => ({
             value: String(a.id),
             label: a.name,

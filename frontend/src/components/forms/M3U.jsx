@@ -88,6 +88,15 @@ const M3U = ({
     console.log(m3uAccount);
     if (m3uAccount) {
       setPlaylist(m3uAccount);
+      
+      // Ensure account_type is valid, default to 'STD' if empty or invalid
+      let accountType = m3uAccount.account_type;
+      const validTypes = ['STD', 'XC', 'MAC'];
+      if (!accountType || !validTypes.includes(accountType)) {
+        console.warn(`Invalid account_type '${accountType}', defaulting to 'STD'`);
+        accountType = 'STD';
+      }
+      
       form.setValues({
         name: m3uAccount.name,
         server_url: m3uAccount.server_url,
@@ -95,7 +104,7 @@ const M3U = ({
         user_agent: m3uAccount.user_agent ? `${m3uAccount.user_agent}` : '0',
         is_active: m3uAccount.is_active,
         refresh_interval: m3uAccount.refresh_interval,
-        account_type: m3uAccount.account_type,
+        account_type: accountType,
         username: m3uAccount.username ?? '',
         password: '',
         stale_stream_days:
@@ -112,7 +121,7 @@ const M3U = ({
         proxy: m3uAccount.proxy ?? '',
       });
 
-      if (m3uAccount.account_type == 'XC') {
+      if (accountType == 'XC') {
         setShowCredentialFields(true);
       } else {
         setShowCredentialFields(false);

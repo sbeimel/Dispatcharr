@@ -254,10 +254,24 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         # Pop out channel group memberships so we can handle them manually
         channel_group_data = validated_data.pop("channel_group", [])
 
+        # Ensure account_type is valid before saving
+        account_type = validated_data.get("account_type")
+        if account_type is not None:
+            # Validate account_type is one of the allowed values
+            valid_types = ['STD', 'XC', 'MAC']
+            if account_type not in valid_types:
+                logger.warning(f"Invalid account_type '{account_type}' received, defaulting to 'STD'")
+                validated_data["account_type"] = 'STD'
+            else:
+                logger.info(f"Updating account_type to '{account_type}' for account {instance.id}")
+
         # First, update the M3UAccount itself
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
+        # Log the saved account_type for debugging
+        logger.info(f"Account {instance.id} saved with account_type='{instance.account_type}'")
 
         # Prepare a list of memberships to update
         memberships_to_update = []
@@ -298,6 +312,15 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         custom_props["auto_enable_new_groups_vod"] = auto_enable_new_groups_vod
         custom_props["auto_enable_new_groups_series"] = auto_enable_new_groups_series
         validated_data["custom_properties"] = custom_props
+
+        # Ensure account_type is valid, default to 'STD' if not provided or invalid
+        account_type = validated_data.get("account_type")
+        valid_types = ['STD', 'XC', 'MAC']
+        if not account_type or account_type not in valid_types:
+            validated_data["account_type"] = 'STD'
+            logger.info(f"Creating account with default account_type='STD' (received: '{account_type}')")
+        else:
+            logger.info(f"Creating account with account_type='{account_type}'")
 
         return super().create(validated_data)
 
