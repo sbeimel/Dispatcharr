@@ -30,7 +30,6 @@ import {
   Alert,
   Loader,
   Switch,
-  Menu,
   Center,
   Flex,
   NativeSelect,
@@ -350,7 +349,7 @@ const FailoverTestPage = () => {
 
       <Alert color="blue" mb="md" icon={<IconActivity size={16} />}>
         Wähle einen Kanal und nutze die Test-Buttons: <strong>Vorschau</strong> startet den Stream, 
-        <strong> Kill FFmpeg</strong> beendet den aktiven Prozess, <strong>Simulate Error</strong> löst einen Fehler aus.
+        <strong> Kill FFmpeg</strong> beendet den aktiven Prozess, <strong>Fehler simulieren</strong> stoppt den Stream für Failover-Test.
         Beobachte das Live Log für Failover-Events.
       </Alert>
 
@@ -431,38 +430,17 @@ const FailoverTestPage = () => {
                               </ActionIcon>
                             </Tooltip>
 
-                            {/* Simulate Error Menu */}
-                            <Menu shadow="md" width={200}>
-                              <Menu.Target>
-                                <Tooltip label="Fehler simulieren">
-                                  <ActionIcon
-                                    color="orange"
-                                    variant="light"
-                                    loading={simulatingError === channel.id}
-                                  >
-                                    <IconBolt size={16} />
-                                  </ActionIcon>
-                                </Tooltip>
-                              </Menu.Target>
-                              <Menu.Dropdown>
-                                <Menu.Label>Fehlertyp wählen</Menu.Label>
-                                <Menu.Item onClick={() => simulateError(channel, 'timeout')}>
-                                  Timeout Error
-                                </Menu.Item>
-                                <Menu.Item onClick={() => simulateError(channel, 'connection_reset')}>
-                                  Connection Reset
-                                </Menu.Item>
-                                <Menu.Item onClick={() => simulateError(channel, 'http_403')}>
-                                  HTTP 403 Forbidden
-                                </Menu.Item>
-                                <Menu.Item onClick={() => simulateError(channel, 'http_404')}>
-                                  HTTP 404 Not Found
-                                </Menu.Item>
-                                <Menu.Item onClick={() => simulateError(channel, 'stream_corrupt')}>
-                                  Stream Corrupt
-                                </Menu.Item>
-                              </Menu.Dropdown>
-                            </Menu>
+                            {/* Simulate Error Button */}
+                            <Tooltip label="Stream-Fehler simulieren">
+                              <ActionIcon
+                                color="orange"
+                                variant="light"
+                                loading={simulatingError === channel.id}
+                                onClick={() => simulateError(channel)}
+                              >
+                                <IconBolt size={16} />
+                              </ActionIcon>
+                            </Tooltip>
                           </Group>
                         </Table.Td>
                       </Table.Tr>

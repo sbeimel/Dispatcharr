@@ -42,6 +42,16 @@ const EVENT_TYPE_COLORS = {
   simulated_stream_error: 'orange',
   test_started: 'green',
   test_completed: 'green',
+  // New failover events from stream_manager
+  failover_started: 'yellow',
+  failover_success: 'green',
+  failover_failed: 'red',
+  failover_no_alternative: 'orange',
+  stream_switch_success: 'teal',
+  failover_exhausted: 'red',
+  error_simulated: 'orange',
+  stream_killed: 'red',
+  failover_triggered: 'blue',
 };
 
 const STRATEGY_LABELS = {
@@ -151,7 +161,7 @@ const LiveLogViewer = ({ entries = [], onExport, onClear }) => {
 };
 
 const LogEntry = ({ entry }) => {
-  const isSuccess = entry.success;
+  const isSuccess = entry.success !== false; // Default to true if not specified
   const color = isSuccess ? 'green' : 'red';
 
   return (
@@ -171,25 +181,50 @@ const LogEntry = ({ entry }) => {
             <IconX size={16} color="red" />
           )}
           <Badge size="xs" color={EVENT_TYPE_COLORS[entry.event_type] || 'gray'}>
-            {STRATEGY_LABELS[entry.strategy] || entry.strategy}
+            {entry.event_type?.replace(/_/g, ' ') || STRATEGY_LABELS[entry.strategy] || entry.strategy || 'event'}
           </Badge>
           <Text size="xs" c="dimmed">
             {formatTimestamp(entry.timestamp)}
           </Text>
         </Group>
-        <Badge size="xs" variant="outline">
-          {entry.duration_ms}ms
-        </Badge>
+        {entry.duration_ms && (
+          <Badge size="xs" variant="outline">
+            {entry.duration_ms}ms
+          </Badge>
+        )}
       </Group>
 
       <Box mt="xs">
-        <Text size="sm" fw={500}>
-          {entry.event_type.replace(/_/g, ' ').replace('simulated ', '⚡ ')}
-        </Text>
+        {/* Show message if available (from new events) */}
+        {entry.message && (
+          <Text size="sm" fw={500}>
+            {entry.message}
+          </Text>
+        )}
+        
+        {/* Fallback to event_type display */}
+        {!entry.message && entry.event_type && (
+          <Text size="sm" fw={500}>
+            {entry.event_type.replace(/_/g, ' ').replace('simulated ', '⚡ ')}
+          </Text>
+        )}
         
         {entry.original_value && entry.new_value && (
           <Text size="xs" c="dimmed">
             {entry.original_value} → {entry.new_value}
+          </Text>
+        )}
+        
+        {/* Show new URL/profile for failover events */}
+        {entry.new_url && (
+          <Text size="xs" c="dimmed">
+            URL: {entry.new_url}
+          </Text>
+        )}
+        
+        {entry.new_profile_id && (
+          <Text size="xs" c="dimmed">
+            Profil ID: {entry.new_profile_id}
           </Text>
         )}
         
@@ -198,10 +233,22 @@ const LogEntry = ({ entry }) => {
             {entry.reason}
           </Text>
         )}
+        
+        {entry.error_reason && (
+          <Text size="xs" c="red" mt={2}>
+            Fehler: {entry.error_reason}
+          </Text>
+        )}
 
         {entry.details?.channel_name && (
           <Text size="xs" c="dimmed">
             Channel: {entry.details.channel_name}
+          </Text>
+        )}
+        
+        {entry.channel_id && !entry.details?.channel_name && (
+          <Text size="xs" c="dimmed">
+            Channel: {entry.channel_id}
           </Text>
         )}
       </Box>

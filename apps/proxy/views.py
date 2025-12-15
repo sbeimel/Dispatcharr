@@ -191,50 +191,29 @@ def kill_stream(request, channel_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def simulate_error(request, channel_id):
-    """Simulate various stream errors to test failover behavior."""
+    """Simulate stream error to trigger failover behavior."""
     try:
         import time
         import datetime
         import json
         
-        error_type = request.data.get('error_type', 'timeout')
-        
         redis_client = RedisClient.get_client()
         if not redis_client:
             return JsonResponse({'error': 'Redis not available'}, status=503)
         
-        # Simuliere verschiedene Fehlertypen
-        error_messages = {
-            'timeout': 'Connection timeout - no response from server',
-            'connection_reset': 'Connection reset by peer',
-            'http_403': 'HTTP 403 Forbidden - Access denied',
-            'http_404': 'HTTP 404 Not Found - Stream not available',
-            'stream_corrupt': 'Stream data corrupt - invalid TS packets',
-        }
+        # Setze force_failover Flag - der StreamManager wird dies erkennen und _try_next_stream() aufrufen
+        failover_key = f'ts_proxy:channel:{channel_id}:force_failover'
+        redis_client.set(failover_key, '1', ex=30)
         
-        message = error_messages.get(error_type, f'Unknown error: {error_type}')
-        
-        # Setze Error-Flag für den Channel
-        error_key = f'ts_proxy:channel:{channel_id}:simulated_error'
-        redis_client.set(error_key, error_type, ex=60)
-        
-        # WICHTIG: Setze auch das stopping-Flag um den Stream wirklich zu stoppen
-        stopping_key = f'ts_proxy:channel:{channel_id}:stopping'
-        redis_client.set(stopping_key, '1', ex=30)
-        
-        # Publiziere CHANNEL_STOP Event als JSON (damit der Event-Listener es verarbeiten kann)
+        # Publiziere FORCE_FAILOVER Event als JSON
         events_channel = f'ts_proxy:events:{channel_id}'
-        stop_event = {
-            'event': 'channel_stop',
+        failover_event = {
+            'event': 'force_failover',
             'channel_id': channel_id,
-            'reason': f'simulated_error:{error_type}',
+            'reason': 'manual_test',
             'timestamp': time.time()
         }
-        redis_client.publish(events_channel, json.dumps(stop_event))
-        
-        # Lösche Channel-Metadaten um Reconnection zu erzwingen
-        metadata_key = f'ts_proxy:channel:{channel_id}:metadata'
-        redis_client.delete(metadata_key)
+        redis_client.publish(events_channel, json.dumps(failover_event))
         
         # Sende WebSocket Event
         from asgiref.sync import async_to_sync
@@ -248,12 +227,11 @@ def simulate_error(request, channel_id):
                     {
                         'type': 'failover_event',
                         'data': {
-                            'id': f'error_{channel_id}_{int(time.time() * 1000)}',
+                            'id': f'failover_{channel_id}_{int(time.time() * 1000)}',
                             'timestamp': datetime.datetime.now().isoformat(),
-                            'event_type': 'error_simulated',
+                            'event_type': 'failover_triggered',
                             'channel_id': channel_id,
-                            'error_type': error_type,
-                            'message': message,
+                            'message': f'Failover manuell ausgelöst für Channel {channel_id}',
                             'success': True,
                         }
                     }
@@ -263,11 +241,9 @@ def simulate_error(request, channel_id):
         
         return JsonResponse({
             'success': True,
-            'message': f'Error simulated and stream stopped for channel {channel_id}',
-            'error_type': error_type,
-            'error_message': message,
+            'message': f'Failover triggered for channel {channel_id}',
         })
         
     except Exception as e:
-        logger.error(f"Error simulating error for channel {channel_id}: {e}")
+        logger.error(f"Error triggering failover for channel {channel_id}: {e}")
         return JsonResponse({'error': str(e)}, status=500)

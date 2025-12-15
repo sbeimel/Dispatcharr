@@ -29,6 +29,7 @@ class EventType:
     CLIENT_CONNECTED = "client_connected"
     CLIENT_DISCONNECTED = "client_disconnected"
     CLIENT_STOP = "client_stop"
+    FORCE_FAILOVER = "force_failover"
 
 # Stream types
 class StreamType:

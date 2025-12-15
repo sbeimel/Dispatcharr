@@ -310,6 +310,21 @@ class ProxyServer:
                                                 stop_key = RedisKeys.client_stop(channel_id, client_id)
                                                 self.redis_client.setex(stop_key, 30, "true")  # 30 second TTL
                                                 logger.info(f"Set stop key for client {client_id}")
+                                    
+                                    elif event_type == EventType.FORCE_FAILOVER:
+                                        logger.info(f"Received {EventType.FORCE_FAILOVER} event for channel {channel_id}")
+                                        # Trigger failover in the stream manager
+                                        if channel_id in self.stream_managers:
+                                            stream_manager = self.stream_managers[channel_id]
+                                            logger.info(f"Triggering manual failover for channel {channel_id}")
+                                            # Call _try_next_stream to trigger failover
+                                            try:
+                                                success = stream_manager._try_next_stream()
+                                                logger.info(f"Manual failover for channel {channel_id}: {'success' if success else 'failed'}")
+                                            except Exception as failover_error:
+                                                logger.error(f"Error during manual failover for channel {channel_id}: {failover_error}")
+                                        else:
+                                            logger.warning(f"No stream manager found for channel {channel_id} - cannot trigger failover")
                         except Exception as e:
                             logger.error(f"Error processing event message: {e}")
 

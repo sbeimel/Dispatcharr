@@ -24,6 +24,34 @@ from .constants import ChannelState, EventType, StreamType, ChannelMetadataField
 from .config_helper import ConfigHelper
 from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
 
+# Helper function to broadcast failover events to WebSocket clients
+def _broadcast_failover_event(channel_id: str, event_type: str, message: str, **extra_data):
+    """Send failover event to WebSocket clients for live log display."""
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+        import datetime
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            event_data = {
+                'id': f'{event_type}_{channel_id}_{int(time.time() * 1000)}',
+                'timestamp': datetime.datetime.now().isoformat(),
+                'event_type': event_type,
+                'channel_id': channel_id,
+                'message': message,
+                **extra_data
+            }
+            async_to_sync(channel_layer.group_send)(
+                'failover_test',
+                {
+                    'type': 'failover_event',
+                    'data': event_data
+                }
+            )
+    except Exception as e:
+        logger.debug(f"Could not broadcast failover event: {e}")
+
 # Predictive Failover imports (lazy loaded to avoid circular imports)
 try:
     from .predictive.metrics_collector import get_metrics_collector, MetricType
@@ -2238,6 +2266,13 @@ class StreamManager:
         """
         try:
             logger.info(f"Attempting failover for channel {self.channel_id}, current stream ID: {self.current_stream_id}")
+            
+            # Broadcast failover attempt to WebSocket
+            _broadcast_failover_event(
+                self.channel_id, 'failover_started',
+                f'Failover gestartet für Channel {self.channel_id}',
+                current_stream_id=self.current_stream_id
+            )
 
             # Try multi-level failover first
             from .failover_utils import get_next_failover_stream
@@ -2264,11 +2299,31 @@ class StreamManager:
                         })
                     
                     logger.info(f"Successfully switched to failover URL for channel {self.channel_id}")
+                    
+                    # Broadcast successful failover to WebSocket
+                    _broadcast_failover_event(
+                        self.channel_id, 'failover_success',
+                        f'Failover erfolgreich! Neues Profil: {failover_profile_id}',
+                        new_url=failover_url[:80] + '...' if len(failover_url) > 80 else failover_url,
+                        new_profile_id=failover_profile_id,
+                        success=True
+                    )
                     return True
                 else:
                     logger.error(f"Failed to update to failover URL for channel {self.channel_id}")
+                    _broadcast_failover_event(
+                        self.channel_id, 'failover_failed',
+                        f'Failover fehlgeschlagen: URL-Update nicht möglich',
+                        success=False
+                    )
             else:
                 logger.warning(f"Failover system could not find alternative for channel {self.channel_id}: {error_reason}")
+                _broadcast_failover_event(
+                    self.channel_id, 'failover_no_alternative',
+                    f'Keine Alternative gefunden: {error_reason}',
+                    error_reason=error_reason,
+                    success=False
+                )
 
             # Fallback to legacy stream switching if failover didn't work
             logger.info(f"Falling back to legacy stream switching for channel {self.channel_id}")
@@ -2351,10 +2406,25 @@ class StreamManager:
                     logger.info(f"Stream metadata updated for channel {self.channel_id} to stream ID {stream_id} with M3U profile {profile_id}")
 
                 logger.info(f"Successfully switched to stream ID {stream_id} with URL {new_url} for channel {self.channel_id}")
+                
+                # Broadcast legacy stream switch success
+                _broadcast_failover_event(
+                    self.channel_id, 'stream_switch_success',
+                    f'Stream gewechselt zu ID {stream_id} (Profil {profile_id})',
+                    new_stream_id=stream_id,
+                    new_profile_id=profile_id,
+                    success=True
+                )
                 return True
 
             # If we get here, we tried all streams but none worked
             logger.error(f"Tried {len(untried_streams)} alternate streams but none were suitable for channel {self.channel_id}")
+            _broadcast_failover_event(
+                self.channel_id, 'failover_exhausted',
+                f'Alle {len(untried_streams)} Streams versucht - keine Alternative verfügbar',
+                tried_count=len(untried_streams),
+                success=False
+            )
             return False
 
         except Exception as e:
