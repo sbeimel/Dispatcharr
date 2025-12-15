@@ -55,7 +55,7 @@ const M3U = ({
   const [showCredentialFields, setShowCredentialFields] = useState(false);
 
   const form = useForm({
-    mode: 'uncontrolled',
+    mode: 'controlled',
     initialValues: {
       name: '',
       server_url: '',
@@ -63,7 +63,7 @@ const M3U = ({
       is_active: true,
       max_streams: 0,
       refresh_interval: 24,
-      account_type: 'XC',
+      account_type: 'STD',
       create_epg: false,
       username: '',
       password: '',
@@ -109,7 +109,7 @@ const M3U = ({
         user_agent: m3uAccount.user_agent ? `${m3uAccount.user_agent}` : '0',
         is_active: m3uAccount.is_active,
         refresh_interval: m3uAccount.refresh_interval,
-        account_type: m3uAccount.account_type,
+        account_type: m3uAccount.account_type || 'STD',
         username: m3uAccount.username ?? '',
         password: '',
         stale_stream_days:
@@ -399,7 +399,6 @@ const M3U = ({
                 label="Name"
                 description="Unique identifier for this M3U account"
                 {...form.getInputProps('name')}
-                key={form.key('name')}
               />
               <TextInput
                 style={{ width: '100%' }}
@@ -408,7 +407,6 @@ const M3U = ({
                 label="URL"
                 description="Direct URL to the M3U playlist or server"
                 {...form.getInputProps('server_url')}
-                key={form.key('server_url')}
               />
 
               <Select
@@ -436,11 +434,10 @@ const M3U = ({
                     label: 'MAC / STB-Portal',
                   },
                 ]}
-                key={form.key('account_type')}
                 {...form.getInputProps('account_type')}
               />
 
-              {form.getValues().account_type === 'MAC' && (
+              {form.values.account_type === 'MAC' && (
                 <>
                   <TextInput
                     style={{ width: '100%' }}
@@ -449,7 +446,6 @@ const M3U = ({
                     label="MAC Address(es)"
                     description="Eine oder mehrere MACs (z.B. AA:BB:CC:DD:EE:FF, 11:22:33:44:55:66 oder jede MAC in neuer Zeile)"
                     {...form.getInputProps('mac_address')}
-                    key={form.key('mac_address')}
                   />
                   <Textarea
                     autosize
@@ -461,7 +457,6 @@ const M3U = ({
                     description="Optional HTTP proxies for MAC account requests. Mehrere Proxies mit Leerzeichen, Komma oder Zeilenumbruch trennen."
                     placeholder="http://proxy1:port1, http://proxy2:port2"
                     {...form.getInputProps('proxy')}
-                    key={form.key('proxy')}
                   />
                   <Checkbox
                     mt="xs"
@@ -470,13 +465,12 @@ const M3U = ({
                     label="Multi-Proxy aktivieren"
                     description="Wird automatisch aktiv, wenn mehr als ein Proxy im Feld definiert ist."
                     {...form.getInputProps('multi_proxy_enabled', { type: 'checkbox' })}
-                    key={form.key('multi_proxy_enabled')}
                     readOnly
                   />
                 </>
               )}
 
-              {form.getValues().account_type === 'XC' && (
+              {form.values.account_type === 'XC' && (
                 <Box>
                   {!m3uAccount && (
                     <Group justify="space-between">
@@ -485,7 +479,6 @@ const M3U = ({
                         id="create_epg"
                         name="create_epg"
                         description="Automatically create matching EPG source for this Xtream account"
-                        key={form.key('create_epg')}
                         {...form.getInputProps('create_epg', {
                           type: 'checkbox',
                         })}
@@ -499,7 +492,6 @@ const M3U = ({
                       id="enable_vod"
                       name="enable_vod"
                       description="Scan and import VOD content (movies/series) from this Xtream account"
-                      key={form.key('enable_vod')}
                       {...form.getInputProps('enable_vod', {
                         type: 'checkbox',
                       })}
@@ -524,7 +516,7 @@ const M3U = ({
                 </Box>
               )}
 
-              {form.getValues().account_type !== 'MAC' && (
+              {form.values.account_type !== 'MAC' && (
                 <FileInput
                   id="file"
                   label="Upload files"
@@ -633,7 +625,6 @@ const M3U = ({
                 placeholder="0 = Unlimited"
                 description="Maximum number of concurrent streams (0 for unlimited)"
                 {...form.getInputProps('max_streams')}
-                key={form.key('max_streams')}
               />
 
               <Select
@@ -642,7 +633,6 @@ const M3U = ({
                 label="User-Agent"
                 description="User-Agent header to use when accessing this M3U source"
                 {...form.getInputProps('user_agent')}
-                key={form.key('user_agent')}
                 data={[{ value: '0', label: '(Use Default)' }].concat(
                   userAgents.map((ua) => ({
                     label: ua.name,
@@ -661,7 +651,6 @@ const M3U = ({
                   </>
                 }
                 {...form.getInputProps('refresh_interval')}
-                key={form.key('refresh_interval')}
               />
 
               <NumberInput
@@ -678,14 +667,12 @@ const M3U = ({
                 label="VOD Priority"
                 description="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content."
                 {...form.getInputProps('priority')}
-                key={form.key('priority')}
               />
 
               <Checkbox
                 label="Is Active"
                 description="Enable or disable this M3U account"
                 {...form.getInputProps('is_active', { type: 'checkbox' })}
-                key={form.key('is_active')}
               />
             </Stack>
           </Group>
