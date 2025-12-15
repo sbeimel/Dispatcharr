@@ -195,6 +195,7 @@ def simulate_error(request, channel_id):
     try:
         import time
         import datetime
+        import json
         
         error_type = request.data.get('error_type', 'timeout')
         
@@ -217,9 +218,23 @@ def simulate_error(request, channel_id):
         error_key = f'ts_proxy:channel:{channel_id}:simulated_error'
         redis_client.set(error_key, error_type, ex=60)
         
-        # Publiziere Error-Event
+        # WICHTIG: Setze auch das stopping-Flag um den Stream wirklich zu stoppen
+        stopping_key = f'ts_proxy:channel:{channel_id}:stopping'
+        redis_client.set(stopping_key, '1', ex=30)
+        
+        # Publiziere CHANNEL_STOP Event als JSON (damit der Event-Listener es verarbeiten kann)
         events_channel = f'ts_proxy:events:{channel_id}'
-        redis_client.publish(events_channel, f'error:{error_type}')
+        stop_event = {
+            'event': 'channel_stop',
+            'channel_id': channel_id,
+            'reason': f'simulated_error:{error_type}',
+            'timestamp': time.time()
+        }
+        redis_client.publish(events_channel, json.dumps(stop_event))
+        
+        # Lösche Channel-Metadaten um Reconnection zu erzwingen
+        metadata_key = f'ts_proxy:channel:{channel_id}:metadata'
+        redis_client.delete(metadata_key)
         
         # Sende WebSocket Event
         from asgiref.sync import async_to_sync
@@ -248,7 +263,7 @@ def simulate_error(request, channel_id):
         
         return JsonResponse({
             'success': True,
-            'message': f'Error simulated for channel {channel_id}',
+            'message': f'Error simulated and stream stopped for channel {channel_id}',
             'error_type': error_type,
             'error_message': message,
         })
