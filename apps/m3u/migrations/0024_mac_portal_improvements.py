@@ -13,8 +13,32 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        # M3UAccountMac Model - Already created in migration 0022_m3uaccountmac
-        # Skipping CreateModel to avoid "relation already exists" error
+        # M3UAccountMac Model - Register in state only (table already exists from 0022)
+        # This is needed so other models can reference it with ForeignKey
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.CreateModel(
+                    name='M3UAccountMac',
+                    fields=[
+                        ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
+                        ('address', models.CharField(max_length=17, help_text='MAC address in format AA:BB:CC:DD:EE:FF')),
+                        ('priority', models.PositiveIntegerField(default=0, help_text='Priority order for failover (0 = highest priority)')),
+                        ('status', models.CharField(choices=[('unknown', 'Unknown'), ('valid', 'Valid'), ('expired', 'Expired'), ('error', 'Error')], default='unknown', max_length=20, help_text='Current validation status of this MAC address')),
+                        ('expires_at', models.DateTimeField(blank=True, null=True, help_text='When this MAC address expires (if known)')),
+                        ('expires_text', models.CharField(blank=True, max_length=255, null=True, help_text='Raw expiry text from portal for display')),
+                        ('last_checked', models.DateTimeField(blank=True, null=True, help_text='When this MAC was last validated')),
+                        ('last_error', models.TextField(blank=True, null=True, help_text='Last error message if validation failed')),
+                        ('account', models.ForeignKey(help_text='The M3U account this MAC belongs to', on_delete=django.db.models.deletion.CASCADE, related_name='macs', to='m3u.m3uaccount')),
+                    ],
+                    options={
+                        'verbose_name': 'MAC Address',
+                        'verbose_name_plural': 'MAC Addresses',
+                        'ordering': ['priority', 'id'],
+                    },
+                ),
+            ],
+            database_operations=[],  # No database changes - table already exists
+        ),
         
         # Add enable_vod_scanning field to M3UAccount (Requirement 91)
         migrations.AddField(
