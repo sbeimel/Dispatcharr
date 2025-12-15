@@ -23,14 +23,13 @@ MAC Portal Import Requirements: 1.1-1.5, 2.1-2.5, 4.1-4.5, 5.1-5.2, 6.1-6.6, 9.1
 """
 
 import logging
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import SessionAuthentication
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
 
 from ..models import M3UAccount, M3UAccountMac
 from ..mac_portal_models import (
@@ -44,9 +43,18 @@ from ..mac_portal_models import (
 logger = logging.getLogger(__name__)
 
 
-# ============== Serializers ==============
+# ============== CSRF Exempt Authentication ==============
 
-from rest_framework import serializers
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    """
+    SessionAuthentication that doesn't enforce CSRF.
+    Used for API endpoints that use JWT authentication.
+    """
+    def enforce_csrf(self, request):
+        return  # Skip CSRF check
+
+
+# ============== Serializers ==============
 
 
 class MACPortalGlobalSettingsSerializer(serializers.ModelSerializer):
@@ -109,14 +117,13 @@ class MACStatusSerializer(serializers.Serializer):
 
 # ============== ViewSets ==============
 
-@method_decorator(csrf_exempt, name='dispatch')
 class MACPortalSettingsViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC Portal global settings.
     
     Requirements: 44.1, 44.2, 44.3, 44.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -153,14 +160,13 @@ class MACPortalSettingsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class FeatureTogglesViewSet(viewsets.ViewSet):
     """
     API endpoint for feature toggles.
     
     Requirements: 47.1, 47.2, 47.3, 47.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -209,14 +215,13 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
         return self.list(request)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class FailoverSettingsViewSet(viewsets.ViewSet):
     """
     API endpoint for failover settings.
     
     Requirements: 55.1, 55.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -246,14 +251,13 @@ class FailoverSettingsViewSet(viewsets.ViewSet):
 
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class MACHealthViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC health monitoring.
     
     Requirements: 49.1, 49.2, 49.3, 49.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request, account_pk=None):
@@ -299,14 +303,13 @@ class MACHealthViewSet(viewsets.ViewSet):
         return Response({'status': 'cooldown_reset', 'mac': mac.address})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class MACBatchOperationsViewSet(viewsets.ViewSet):
     """
     API endpoint for batch MAC operations.
     
     Requirements: 50.1, 50.2, 50.3, 50.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['post'])
@@ -375,14 +378,13 @@ class MACBatchOperationsViewSet(viewsets.ViewSet):
         return Response({'status': 'disabled', 'count': len(mac_ids)})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class MACImportExportViewSet(viewsets.ViewSet):
     """
     API endpoint for MAC import/export.
     
     Requirements: 51.1, 51.2, 51.3, 51.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['get'])
@@ -446,14 +448,13 @@ class MACImportExportViewSet(viewsets.ViewSet):
         })
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class ConnectionTestViewSet(viewsets.ViewSet):
     """
     API endpoint for connection testing.
     
     Requirements: 52.1, 52.2, 52.3, 52.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['post'])
@@ -585,14 +586,13 @@ class ConnectionTestViewSet(viewsets.ViewSet):
 
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class DebugLogsViewSet(viewsets.ViewSet):
     """
     API endpoint for debug logs.
     
     Requirements: 53.1, 53.2, 53.3, 53.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request):
@@ -626,14 +626,13 @@ class DebugLogsViewSet(viewsets.ViewSet):
         return Response({'deleted': deleted})
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class FailoverStatisticsViewSet(viewsets.ViewSet):
     """
     API endpoint for failover statistics.
     
     Requirements: 61.2
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def list(self, request, account_pk=None):
@@ -657,14 +656,13 @@ class FailoverStatisticsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
 
-@method_decorator(csrf_exempt, name='dispatch')
 class VODSeriesAPIViewSet(viewsets.ViewSet):
     """
     API endpoint for VOD and Series.
     
     Requirements: 4.1-4.5, 13.1-13.4
     """
-    authentication_classes = [JWTAuthentication]
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     @action(detail=False, methods=['get'])

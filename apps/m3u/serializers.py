@@ -212,8 +212,9 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
 
-        # Use display name for account_type instead of raw value
-        data["account_type"] = instance.get_account_type_display()
+        # Keep raw account_type value for frontend logic (STD, XC, MAC)
+        # The frontend handles display formatting
+        data["account_type"] = instance.account_type
 
         # Parse custom_properties to get VOD preference and auto_enable_new_groups settings
         custom_props = instance.custom_properties or {}
