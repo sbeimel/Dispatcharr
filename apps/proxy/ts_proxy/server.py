@@ -179,7 +179,14 @@ class ProxyServer:
 
                         try:
                             channel = message["channel"].decode("utf-8")
-                            data = json.loads(message["data"].decode("utf-8"))
+                            raw_data = message["data"].decode("utf-8")
+                            
+                            # Skip non-JSON messages (like simple "stop" commands)
+                            if not raw_data or not raw_data.startswith('{'):
+                                logger.debug(f"Skipping non-JSON event message: {raw_data[:50] if raw_data else 'empty'}")
+                                continue
+                            
+                            data = json.loads(raw_data)
 
                             event_type = data.get("event")
                             channel_id = data.get("channel_id")

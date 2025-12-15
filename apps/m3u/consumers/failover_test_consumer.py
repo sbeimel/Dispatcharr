@@ -168,6 +168,16 @@ class FailoverTestConsumer(AsyncJsonWebsocketConsumer):
             'timestamp': timezone.now().isoformat(),
         })
     
+    async def failover_event(self, event):
+        """
+        Handle failover_event message type (sent from views.py kill_stream).
+        """
+        await self.send_json({
+            'type': 'failover_event',
+            'data': event.get('data', {}),
+            'timestamp': timezone.now().isoformat(),
+        })
+    
     async def simulation_started(self, event):
         """Handle simulation started event."""
         await self.send_json({
