@@ -58,10 +58,11 @@ def _get_session(use_cloudscraper=False):
             logger.debug("Created cloudscraper session for Cloudflare bypass")
         else:
             _session = requests.Session()
-            retries = Retry(total=3, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504])
-            _session.mount("http://", HTTPAdapter(max_retries=retries))
-            _session.mount("https://", HTTPAdapter(max_retries=retries))
-            logger.debug("Created new requests session")
+            # NO automatic retries - we handle retries manually at a higher level
+            # This prevents urllib3 from retrying on timeouts which causes long waits
+            _session.mount("http://", HTTPAdapter(max_retries=0))
+            _session.mount("https://", HTTPAdapter(max_retries=0))
+            logger.debug("Created new requests session (no auto-retry)")
         
         _session_created = current_time
     
@@ -392,11 +393,17 @@ class MacPortalClient:
         
         # If URL has a specific path, try it first
         if url_path and url_path != '/':
-            endpoints.extend([
-                f"{url_path}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml",
-                f"{url_path}/server/load.php?type=stb&action=handshake&JsHttpRequest=1-xml",
-                f"{url_path}?type=stb&action=handshake&JsHttpRequest=1-xml",
-            ])
+            # Check if path already ends with portal.php or load.php - don't duplicate!
+            if url_path.endswith('/portal.php') or url_path.endswith('/load.php'):
+                # URL already has the endpoint, just add query params
+                endpoints.append(f"{url_path}?type=stb&action=handshake&JsHttpRequest=1-xml")
+            else:
+                # Path is a directory (like /c/ or /stalker_portal/), add endpoints
+                endpoints.extend([
+                    f"{url_path}/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml",
+                    f"{url_path}/server/load.php?type=stb&action=handshake&JsHttpRequest=1-xml",
+                    f"{url_path}?type=stb&action=handshake&JsHttpRequest=1-xml",
+                ])
         
         # Standard endpoints
         endpoints.extend([
@@ -421,7 +428,7 @@ class MacPortalClient:
                     cookies=self._cookies(),
                     headers=headers,
                     proxies=proxies,
-                    timeout=20,
+                    timeout=10,  # Reduced for faster failover (was 20)
                 )
                 logger.debug(f"Token request status: {response.status_code}")
                 

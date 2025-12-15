@@ -116,8 +116,21 @@ class BasePortalStrategy:
     ]
     
     def __init__(self, portal_url: str, identity: PortalIdentity, 
-                 user_agent: str = 'MAG250', timeout: int = 30,
+                 user_agent: str = 'MAG250', timeout: int = 10,
                  proxy: Optional[str] = None):
+        # Normalize portal URL - remove trailing slash and extract base URL
+        # Default timeout 10s for fast failover
+        portal_url = portal_url.rstrip('/')
+        
+        # If URL ends with a known endpoint file, extract the base URL
+        # This prevents double paths like /portal.php/portal.php
+        known_endpoints = ['/portal.php', '/load.php', '/server/load.php']
+        for endpoint in known_endpoints:
+            if portal_url.endswith(endpoint):
+                portal_url = portal_url[:-len(endpoint)]
+                logger.debug(f"Normalized portal URL: removed {endpoint} suffix")
+                break
+        
         self.portal_url = portal_url.rstrip('/')
         self.identity = identity
         self.user_agent = self.USER_AGENTS.get(user_agent, user_agent)
@@ -126,10 +139,11 @@ class BasePortalStrategy:
         self.session = self._create_session()
     
     def _create_session(self) -> requests.Session:
-        """Erstelle HTTP-Session mit Retry-Logik."""
+        """Erstelle HTTP-Session ohne automatische Retries."""
         session = requests.Session()
-        retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retry)
+        # NO automatic retries - we handle retries manually at a higher level
+        # This prevents urllib3 from retrying on timeouts which causes long waits
+        adapter = HTTPAdapter(max_retries=0)
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         return session
@@ -1469,7 +1483,7 @@ class UnifiedPortalEngine:
     def __init__(self, portal_url: str, mac: str, 
                  engine: PortalEngine = PortalEngine.AUTO,
                  user_agent: str = 'MAG250',
-                 timeout: int = 30):
+                 timeout: int = 10):  # Fast timeout for quick failover
         self.portal_url = portal_url.rstrip('/')
         self.mac = mac
         self.engine = engine

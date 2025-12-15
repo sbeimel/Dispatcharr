@@ -3,10 +3,12 @@
  * 
  * Tabs:
  * 1. Overview - Portal-Übersicht mit Status
- * 2. Settings - Globale Einstellungen
+ * 2. MAC Portal Settings - Globale Einstellungen
  * 3. Failover - Failover-Konfiguration
- * 4. Health - MAC Health Dashboard
- * 5. Logs - Debug Logs
+ * 4. Health - MAC Health Dashboard (zeigt angelegte Portale mit MACs)
+ * 5. Batch Ops - Batch-Operationen für angelegte Portale/MACs
+ * 6. Connection Test - Verbindungstest
+ * 7. Debug Logs - Debug Logs
  */
 
 import React, { useState } from 'react';
@@ -19,11 +21,7 @@ import {
   IconFileText,
   IconTestPipe,
   IconUsers,
-  IconDownload,
 } from '@tabler/icons-react';
-
-// Import Tabs components
-const { List, Tab, Panel } = Tabs;
 
 // Import MAC Portal Components
 import MACPortalOverview from '../components/mac-portal/MACPortalOverview';
@@ -33,7 +31,6 @@ import MACHealthDashboard from '../components/mac-portal/MACHealthDashboard';
 import DebugLogViewer from '../components/mac-portal/DebugLogViewer';
 import ConnectionTestWizard from '../components/mac-portal/ConnectionTestWizard';
 import MACBatchOperations from '../components/mac-portal/MACBatchOperations';
-import MACImportExport from '../components/mac-portal/MACImportExport';
 
 const MACPortalPage = () => {
   const [activeTab, setActiveTab] = useState('overview');
@@ -55,7 +52,7 @@ const MACPortalPage = () => {
             Overview
           </Tabs.Tab>
           <Tabs.Tab value="settings" leftSection={<IconSettings size={16} />}>
-            Settings
+            MAC Portal Settings
           </Tabs.Tab>
           <Tabs.Tab value="failover" leftSection={<IconArrowsShuffle size={16} />}>
             Failover
@@ -65,9 +62,6 @@ const MACPortalPage = () => {
           </Tabs.Tab>
           <Tabs.Tab value="batch" leftSection={<IconUsers size={16} />}>
             Batch Ops
-          </Tabs.Tab>
-          <Tabs.Tab value="import-export" leftSection={<IconDownload size={16} />}>
-            Import/Export
           </Tabs.Tab>
           <Tabs.Tab value="connection-test" leftSection={<IconTestPipe size={16} />}>
             Connection Test
@@ -95,10 +89,6 @@ const MACPortalPage = () => {
 
         <Tabs.Panel value="batch" pt="xs">
           <MACBatchOperations />
-        </Tabs.Panel>
-
-        <Tabs.Panel value="import-export" pt="xs">
-          <MACImportExport />
         </Tabs.Panel>
 
         <Tabs.Panel value="connection-test" pt="xs">
