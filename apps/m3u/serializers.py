@@ -214,7 +214,11 @@ class M3UAccountSerializer(serializers.ModelSerializer):
 
         # Keep raw account_type value for frontend logic (STD, XC, MAC)
         # The frontend handles display formatting
-        data["account_type"] = instance.account_type
+        # Ensure we always return a valid value, defaulting to 'STD' if empty
+        account_type = instance.account_type
+        if not account_type or account_type not in ['STD', 'XC', 'MAC']:
+            account_type = 'STD'
+        data["account_type"] = account_type
 
         # Parse custom_properties to get VOD preference and auto_enable_new_groups settings
         custom_props = instance.custom_properties or {}
