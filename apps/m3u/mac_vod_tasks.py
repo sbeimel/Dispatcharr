@@ -82,6 +82,118 @@ class MACVodClient:
             return self.portal_url
         return f"{self.portal_url}/portal.php"
     
+    def get_vod_items(self, category_id: str, page: int = 1) -> List[Dict]:
+        """
+        Get VOD items for a category - wie MacReplayXC getVodItems().
+        
+        API: type=vod&action=get_ordered_list&category={cat}&p={page}&JsHttpRequest=1-xml
+        """
+        params = {
+            "type": "vod",
+            "action": "get_ordered_list",
+            "movie_id": "0",
+            "season_id": "0",
+            "episode_id": "0",
+            "row": "0",
+            "JsHttpRequest": "1-xml",
+            "category": str(category_id),
+            "sortby": "added",
+            "fav": "0",
+            "hd": "0",
+            "not_ended": "0",
+            "abc": "*",
+            "genre": "*",
+            "years": "*",
+            "search": "",
+            "p": str(page)
+        }
+        
+        try:
+            response = requests.get(
+                self._get_url(),
+                params=params,
+                cookies=self.cookies,
+                headers=self.headers,
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "js" in data:
+                    js_data = data["js"]
+                    if isinstance(js_data, dict):
+                        # Try multiple possible data keys
+                        for data_key in ["data", "items", "list", "movies", "vods"]:
+                            if data_key in js_data:
+                                items = js_data[data_key]
+                                if isinstance(items, list):
+                                    logger.info(f"Got {len(items)} VOD items for category {category_id}, page {page}")
+                                    return items
+            
+            logger.warning(f"VOD items failed for category {category_id}: {response.status_code}")
+            
+        except Exception as e:
+            logger.error(f"Error getting VOD items for category {category_id}: {e}")
+        
+        return []
+    
+    def get_series_items(self, category_id: str, page: int = 1) -> List[Dict]:
+        """
+        Get Series items for a category - wie MacReplayXC getSeriesItems().
+        
+        API: type=series&action=get_ordered_list&category={cat}&p={page}&JsHttpRequest=1-xml
+        """
+        params = {
+            "type": "series",
+            "action": "get_ordered_list",
+            "movie_id": "0",
+            "season_id": "0",
+            "episode_id": "0",
+            "row": "0",
+            "JsHttpRequest": "1-xml",
+            "category": str(category_id),
+            "sortby": "added",
+            "fav": "0",
+            "hd": "0",
+            "not_ended": "0",
+            "abc": "*",
+            "genre": "*",
+            "years": "*",
+            "search": "",
+            "p": str(page)
+        }
+        
+        try:
+            response = requests.get(
+                self._get_url(),
+                params=params,
+                cookies=self.cookies,
+                headers=self.headers,
+                timeout=30,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "js" in data:
+                    js_data = data["js"]
+                    if isinstance(js_data, dict):
+                        # Try multiple possible data keys
+                        for data_key in ["data", "items", "list", "series"]:
+                            if data_key in js_data:
+                                items = js_data[data_key]
+                                if isinstance(items, list):
+                                    logger.info(f"Got {len(items)} Series items for category {category_id}, page {page}")
+                                    return items
+            
+            logger.warning(f"Series items failed for category {category_id}: {response.status_code}")
+            
+        except Exception as e:
+            logger.error(f"Error getting Series items for category {category_id}: {e}")
+        
+        return []
+    
     def get_vod_categories(self) -> List[Dict]:
         """
         Get VOD categories - wie MacReplayXC getVodCategories().
@@ -206,6 +318,85 @@ def _get_mac_and_token(account) -> tuple:
     except Exception as e:
         logger.error(f"Error getting token for {account.name}: {e}")
         return None, None
+
+
+def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> str:
+    """
+    Save VOD item as Stream - basierend auf MacReplayXC INSERT OR REPLACE INTO vod_items.
+    
+    Args:
+        account: M3UAccount
+        group: ChannelGroup (the category)
+        item: VOD item data from portal
+        vod_type: 'vod_movie' or 'vod_series'
+    
+    Returns: 'created', 'updated', 'skipped', or 'error'
+    """
+    from apps.channels.models import Stream
+    
+    try:
+        # Extract item data (field names vary by portal)
+        item_id = item.get('id') or item.get('cmd', '').split('/')[-1]
+        name = item.get('name') or item.get('title') or f"Item {item_id}"
+        cmd = item.get('cmd', '')
+        
+        if not item_id or not cmd:
+            logger.warning(f"VOD item missing id or cmd: {item}")
+            return 'skipped'
+        
+        # Sanitize name
+        name = sanitize_name(name)
+        
+        # Build stream URL (cmd is usually the stream path)
+        # For MAC portals, cmd is typically like: "/ch/12345" or full URL
+        if cmd.startswith('http'):
+            stream_url = cmd
+        else:
+            # Build full URL from portal base + cmd
+            base_url = account.server_url.rstrip('/')
+            if not cmd.startswith('/'):
+                cmd = '/' + cmd
+            stream_url = f"{base_url}{cmd}"
+        
+        # Extract metadata
+        logo_url = item.get('screenshot') or item.get('poster') or item.get('logo') or ''
+        description = item.get('description') or item.get('desc') or ''
+        year = item.get('year') or item.get('releasedate') or ''
+        genre = item.get('genre') or ''
+        rating = item.get('rating') or item.get('rating_imdb') or ''
+        duration = item.get('duration') or item.get('length') or ''
+        
+        # Custom properties for VOD metadata
+        custom_props = {
+            'is_vod': True,
+            'vod_type': vod_type,
+            'portal_item_id': item_id,
+            'portal_category_id': group.custom_properties.get('portal_category_id'),
+            'description': description,
+            'year': year,
+            'genre': genre,
+            'rating': rating,
+            'duration': duration,
+        }
+        
+        # Create or update Stream
+        stream, created = Stream.objects.update_or_create(
+            m3u_account=account,
+            url=stream_url,
+            defaults={
+                'name': name,
+                'logo_url': logo_url,
+                'channel_group': group,
+                'custom_properties': custom_props,
+                'last_seen': timezone.now(),
+            }
+        )
+        
+        return 'created' if created else 'updated'
+        
+    except Exception as e:
+        logger.error(f"Error saving VOD item {item.get('id')}: {e}")
+        return 'error'
 
 
 def _save_category(account, cat_id: str, title: str, 
@@ -490,24 +681,61 @@ def refresh_mac_portal_selected_vod(account_id):
             token=token
         )
         
-        stats = {"categories": 0, "items": 0, "created": 0, "errors": 0}
+        stats = {"categories": 0, "items": 0, "created": 0, "updated": 0, "errors": 0}
         
         # Import content for each enabled category
         for group_relation in enabled_vod_groups:
             group = group_relation.channel_group
             props = group.custom_properties or {}
             category_id = props.get('portal_category_id')
+            vod_type = props.get('vod_type', group.group_type)  # 'vod_movie' or 'vod_series'
             
             if not category_id:
                 logger.warning(f"Group {group.name} has no portal_category_id")
                 continue
             
             stats["categories"] += 1
+            logger.info(f"Importing VOD items for category {category_id} ({group.name})")
             
-            # TODO: Implement actual VOD item import
-            # This will be similar to MacReplayXC's getVodItems() and getSeriesItems()
-            # For now, just log that we would import this category
-            logger.info(f"Would import VOD items for category {category_id} ({group.name})")
+            # Get VOD items from portal (with pagination)
+            page = 1
+            max_pages = 10  # Safety limit
+            category_items = 0
+            
+            while page <= max_pages:
+                # Get items based on type
+                if vod_type == 'vod_series' or group.group_type == 'vod_series':
+                    items = vod_client.get_series_items(category_id, page)
+                else:
+                    items = vod_client.get_vod_items(category_id, page)
+                
+                if not items:
+                    break  # No more items
+                
+                # Save items as Streams
+                for item in items:
+                    try:
+                        result = _save_vod_item(account, group, item, vod_type)
+                        if result == 'created':
+                            stats["created"] += 1
+                        elif result == 'updated':
+                            stats["updated"] += 1
+                        elif result == 'error':
+                            stats["errors"] += 1
+                        category_items += 1
+                    except Exception as e:
+                        logger.error(f"Error saving VOD item: {e}")
+                        stats["errors"] += 1
+                
+                stats["items"] += len(items)
+                
+                # Check if there are more pages
+                if len(items) < 14:  # MacReplayXC uses 14 items per page
+                    break
+                
+                page += 1
+            
+            logger.info(f"Imported {category_items} items for category {group.name}")
         
         # Done
         duration = (timezone.now() - start_time).total_seconds()
