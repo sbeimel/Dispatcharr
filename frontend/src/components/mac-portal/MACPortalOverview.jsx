@@ -145,9 +145,16 @@ const PortalCard = ({ portal, onRefresh }) => {
   const loadCachedBenchmark = async () => {
     if (!portal.id) return;
     try {
-      const response = await API.get(`/api/m3u-accounts/${portal.id}/engine-benchmark/`);
+      // New simple benchmark API
+      const response = await API.get(`/api/m3u/benchmark/${portal.id}/result/`);
       if (response.data?.fastest_engine) {
-        setFastestEngine(response.data.fastest_engine);
+        setFastestEngine({
+          engine: response.data.fastest_engine,
+          time_ms: response.data.fastest_engine_time_ms,
+          stream_link_ok: response.data.fastest_has_stream_link,
+        });
+      } else if (response.data?.cached_fastest) {
+        setFastestEngine(response.data.cached_fastest);
       }
     } catch (error) {
       // Ignore errors - benchmark may not exist
@@ -158,16 +165,24 @@ const PortalCard = ({ portal, onRefresh }) => {
     if (!portal.id) return;
     setBenchmarking(true);
     try {
-      const response = await API.post(`/api/m3u-accounts/${portal.id}/engine-benchmark/`);
+      // New simple benchmark API
+      const response = await API.post(`/api/m3u/benchmark/${portal.id}/run/`);
       if (response.data?.fastest) {
         setFastestEngine({
           engine: response.data.fastest,
           time_ms: response.data.summary?.fastest_time_ms,
+          stream_link_ok: response.data.summary?.fastest_has_stream_link,
         });
         notifications.show({
           title: 'Benchmark Complete',
-          message: `Fastest engine: ${response.data.fastest} (${response.data.summary?.fastest_time_ms}ms)`,
+          message: `Fastest engine: ${response.data.fastest} (${response.data.summary?.fastest_time_ms}ms)${response.data.summary?.fastest_has_stream_link ? ' ✓' : ''}`,
           color: 'green',
+        });
+      } else {
+        notifications.show({
+          title: 'Benchmark Complete',
+          message: 'No working engine found',
+          color: 'yellow',
         });
       }
     } catch (error) {
