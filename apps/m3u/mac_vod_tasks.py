@@ -440,7 +440,30 @@ def refresh_mac_portal_selected_vod(account_id):
         
         send_m3u_update(account_id, "vod_import", 0, status="processing")
         
-        # Get enabled VOD categories (ChannelGroups with group_type='vod_movie' or 'vod_series')
+        # Step 1: Delete streams from DISABLED VOD categories
+        logger.info("Step 1: Cleaning up disabled VOD categories...")
+        disabled_vod_groups = ChannelGroupM3UAccount.objects.filter(
+            m3u_account=account,
+            enabled=False,
+            channel_group__group_type__in=['vod_movie', 'vod_series']
+        ).select_related('channel_group')
+        
+        deleted_count = 0
+        for group_relation in disabled_vod_groups:
+            group = group_relation.channel_group
+            # Delete all streams from this account that belong to this group
+            streams_to_delete = account.streams.filter(channel_group=group)
+            count = streams_to_delete.count()
+            if count > 0:
+                logger.info(f"Deleting {count} streams from disabled category '{group.name}'")
+                streams_to_delete.delete()
+                deleted_count += count
+        
+        if deleted_count > 0:
+            logger.info(f"Deleted {deleted_count} streams from disabled categories")
+        
+        # Step 2: Get enabled VOD categories
+        logger.info("Step 2: Getting enabled VOD categories...")
         enabled_vod_groups = ChannelGroupM3UAccount.objects.filter(
             m3u_account=account,
             enabled=True,
@@ -450,8 +473,8 @@ def refresh_mac_portal_selected_vod(account_id):
         if not enabled_vod_groups.exists():
             logger.info(f"No enabled VOD categories for {account.name}")
             send_m3u_update(account_id, "vod_import", 100, status="success",
-                          message="No VOD categories selected")
-            return "No categories selected"
+                          message=f"Cleaned up {deleted_count} streams from disabled categories")
+            return f"Cleanup complete: {deleted_count} streams deleted"
         
         # Get MAC and token
         mac_address, token = _get_mac_and_token(account)

@@ -13,10 +13,8 @@ import {
   Checkbox,
   Alert,
 } from '@mantine/core';
-import { CircleCheck, CircleX, RefreshCw, Info } from 'lucide-react';
+import { CircleCheck, CircleX, Info } from 'lucide-react';
 import useVODStore from '../../store/useVODStore';
-import API from '../../api';
-import { notifications } from '@mantine/notifications';
 
 const VODCategoryFilter = ({
   playlist = null,
@@ -109,46 +107,8 @@ const VODCategoryFilter = ({
     );
   };
 
-  const handleRefreshSelectedCategories = async () => {
-    if (!playlist || playlist.account_type !== 'MAC') {
-      return;
-    }
-
-    const selectedCategories = categoryStates.filter(state => state.enabled);
-    if (selectedCategories.length === 0) {
-      notifications.show({
-        title: 'No Categories Selected',
-        message: 'Please select at least one category to import VOD content.',
-        color: 'orange',
-        autoClose: 4000,
-      });
-      return;
-    }
-
-    try {
-      // Trigger Phase 2: Import selected categories
-      await API.refreshVODContent(playlist.id, 'selected_content');
-      
-      notifications.show({
-        title: 'VOD Import Started',
-        message: `Importing VOD content for ${selectedCategories.length} selected categories. This may take a few minutes.`,
-        color: 'blue',
-        autoClose: 5000,
-      });
-    } catch (error) {
-      notifications.show({
-        title: 'Import Failed',
-        message: 'Failed to start VOD content import. Please try again.',
-        color: 'red',
-        autoClose: 5000,
-      });
-    }
-  };
-
-  // Check if this is a MAC account with selected categories
+  // Check if this is a MAC account
   const isMacAccount = playlist?.account_type === 'MAC';
-  const hasSelectedCategories = categoryStates.some(state => state.enabled);
-  const showRefreshButton = isMacAccount && hasSelectedCategories;
 
   return (
     <Stack style={{ paddingTop: 10 }}>
@@ -183,24 +143,10 @@ const VODCategoryFilter = ({
         <Alert icon={<Info size={16} />} color="blue" variant="light">
           <Text size="sm">
             <strong>MAC/STB Portal VOD Import:</strong> Select the categories you want to import, 
-            then click "Import Selected Categories" to download VOD content for those categories only.
+            then click "Save and Refresh" to download VOD content for the selected categories.
+            Deselected categories will have their streams removed.
           </Text>
         </Alert>
-      )}
-
-      {/* Phase 2 Refresh Button for MAC Accounts */}
-      {showRefreshButton && (
-        <Group justify="center">
-          <Button
-            leftSection={<RefreshCw size={16} />}
-            color="green"
-            variant="filled"
-            onClick={handleRefreshSelectedCategories}
-            size="sm"
-          >
-            Import Selected Categories ({categoryStates.filter(s => s.enabled).length})
-          </Button>
-        </Group>
       )}
 
       <Box style={{ maxHeight: '50vh', overflowY: 'auto' }}>
