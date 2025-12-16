@@ -1701,8 +1701,15 @@ class UnifiedMacPortalClient:
                 # Step 5: Detect Portal Type (only on first successful engine)
                 if result['full_success'] and portal_info['portal_type'] == 'unknown':
                     try:
+                        # First check if engine detected portal type/version
+                        if hasattr(client, 'portal_type') and client.portal_type:
+                            portal_info['portal_type'] = client.portal_type.lower()
+                            portal_info['detected_by'] = engine_name
+                        if hasattr(client, 'portal_version') and client.portal_version:
+                            portal_info['portal_version'] = client.portal_version
+                        
                         # Try to detect portal type from channel data
-                        if channels and len(channels) > 0:
+                        if channels and len(channels) > 0 and portal_info['portal_type'] == 'unknown':
                             first_ch = channels[0]
                             cmd = first_ch.get('cmd', '')
                             
@@ -1713,26 +1720,26 @@ class UnifiedMacPortalClient:
                             elif 'ffmpeg' in cmd.lower() or 'http://localhost' in cmd:
                                 portal_info['portal_type'] = 'stalker'
                                 portal_info['detected_by'] = engine_name
-                            
-                            # Try to get profile for more info
-                            if hasattr(client, 'get_profile'):
-                                try:
-                                    profile = client.get_profile(token) if token else None
-                                    if profile:
-                                        js = profile.get('js', {})
-                                        # XUI detection
-                                        if js.get('phone') and 'exp' in str(js.get('phone', '')).lower():
-                                            portal_info['portal_type'] = 'xui'
-                                            portal_info['detected_by'] = engine_name
-                                        # Version detection
-                                        if js.get('portal_version'):
-                                            portal_info['portal_version'] = js.get('portal_version')
-                                        elif js.get('version'):
-                                            portal_info['portal_version'] = js.get('version')
-                                except Exception:
-                                    pass
-                            
-                            logger.debug(f"  Portal Type: {portal_info['portal_type']}")
+                        
+                        # Try to get profile for more info (version, XUI detection)
+                        if hasattr(client, 'get_profile') and not portal_info.get('portal_version'):
+                            try:
+                                profile = client.get_profile(token) if token else None
+                                if profile:
+                                    js = profile.get('js', {})
+                                    # XUI detection
+                                    if js.get('phone') and 'exp' in str(js.get('phone', '')).lower():
+                                        portal_info['portal_type'] = 'xui'
+                                        portal_info['detected_by'] = engine_name
+                                    # Version detection
+                                    if js.get('portal_version'):
+                                        portal_info['portal_version'] = js.get('portal_version')
+                                    elif js.get('version'):
+                                        portal_info['portal_version'] = js.get('version')
+                            except Exception:
+                                pass
+                        
+                        logger.debug(f"  Portal Type: {portal_info['portal_type']}, Version: {portal_info.get('portal_version')}")
                     except Exception as e:
                         logger.debug(f"  Portal type detection failed: {e}")
                 
@@ -1796,19 +1803,23 @@ class UnifiedMacPortalClient:
         }
     
     def __init__(self, base_url: str, mac: str, proxy: Optional[str] = None,
-                 timezone: str = "Europe/London"):
+                 timezone: str = "Europe/London", portal_engine: Optional[str] = None):
         self.base_url = base_url
         self.mac = mac
         self.proxy = proxy
         self.timezone = timezone
         
-        # Get portal engine setting
-        try:
-            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
-            settings = MACPortalGlobalSettings.get_settings()
-            self.portal_engine = getattr(settings, 'portal_engine', 'auto')
-        except Exception:
-            self.portal_engine = 'auto'
+        # Get portal engine setting - priority: parameter > global settings
+        if portal_engine:
+            self.portal_engine = portal_engine
+            logger.debug(f"UnifiedMacPortalClient using provided portal_engine: {portal_engine}")
+        else:
+            try:
+                from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+                settings = MACPortalGlobalSettings.get_settings()
+                self.portal_engine = getattr(settings, 'portal_engine', 'auto')
+            except Exception:
+                self.portal_engine = 'auto'
         
         # Create the appropriate client
         self._engine_client = None  # New: Uses portal_engines registry

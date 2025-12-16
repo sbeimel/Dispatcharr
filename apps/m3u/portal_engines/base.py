@@ -157,6 +157,21 @@ class BasePortalStrategy(ABC):
             logger.info(f"{self.NAME}: Cloudscraper ENABLED")
         else:
             logger.debug(f"{self.NAME}: Cloudscraper DISABLED")
+        
+        # Portal type/version for benchmark detection
+        # Default to "stalker" since all MAC portal engines are Stalker-based
+        self._detected_portal_type = "stalker"
+        self._detected_portal_version = None
+    
+    @property
+    def portal_type(self) -> Optional[str]:
+        """Return detected portal type for benchmark (stalker, xtream, xui, etc.)."""
+        return self._detected_portal_type
+    
+    @property
+    def portal_version(self) -> Optional[str]:
+        """Return detected portal version for benchmark."""
+        return self._detected_portal_version
     
     def _should_use_cloudscraper(self) -> bool:
         """Check if cloudscraper should be used based on global settings."""

@@ -83,6 +83,8 @@ class EStalkerStrategy(BasePortalStrategy):
                     token = js.get("token")
                     if token:
                         logger.info(f"EStalker: Handshake successful via {endpoint}")
+                        # Set portal type for benchmark detection
+                        self._detected_portal_type = "stalker"
                         return HandshakeResult(
                             success=True,
                             token=token,
@@ -135,6 +137,8 @@ class EStalkerStrategy(BasePortalStrategy):
                 
                 if token:
                     logger.info(f"EStalker: Prehash handshake successful")
+                    # Set portal type for benchmark detection
+                    self._detected_portal_type = "stalker"
                     return HandshakeResult(
                         success=True,
                         token=token,

@@ -65,6 +65,19 @@ class MacAttackStrategy(BasePortalStrategy):
         self._device_id = hashlib.sha256(self._sn.encode()).hexdigest().upper()
         self._device_id2 = hashlib.sha256(self.identity.mac.encode()).hexdigest().upper()
         self._hw_version_2 = hashlib.sha1(self.identity.mac.encode()).hexdigest()
+        
+        # Override base class portal detection
+        self._detected_portal_type = "stalker"
+    
+    @property
+    def portal_type(self) -> str:
+        """Return detected portal type for benchmark."""
+        return "stalker"
+    
+    @property
+    def portal_version(self) -> str:
+        """Return detected portal version for benchmark."""
+        return self._portal_version
     
     def _get_session(self) -> requests.Session:
         """Get or create requests session."""

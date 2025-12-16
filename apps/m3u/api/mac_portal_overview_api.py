@@ -227,8 +227,14 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         # Hole Portal-Typ und Version aus custom_properties
         custom_props = portal.custom_properties or {}
         portal_type = custom_props.get('portal_type', 'unknown')
-        portal_version = custom_props.get('portal_version', 'unknown')
+        portal_version = custom_props.get('portal_version')
         portal_engine = custom_props.get('portal_engine', 'auto')
+        
+        # Hole Benchmark-Ergebnisse aus custom_properties
+        fastest_engine = custom_props.get('fastest_engine')
+        fastest_engine_time_ms = custom_props.get('fastest_engine_time_ms')
+        fastest_has_stream_link = custom_props.get('fastest_has_stream_link', False)
+        benchmark_date = custom_props.get('benchmark_date')
         
         # Hole max_connections aus custom_properties
         portal_max_conn = custom_props.get('max_connections', getattr(portal, 'max_streams', 1))
@@ -242,6 +248,11 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
             'portal_type': portal_type,  # stalker, xtream, xui, ministra
             'portal_version': portal_version,  # z.B. "5.3.0"
             'portal_engine': portal_engine,  # macreplay, ob2_2025, auto, etc.
+            # Benchmark-Ergebnisse
+            'fastest_engine': fastest_engine,
+            'fastest_engine_time_ms': fastest_engine_time_ms,
+            'fastest_has_stream_link': fastest_has_stream_link,
+            'benchmark_date': benchmark_date,
             'status': 'online' if portal.is_active and getattr(portal, 'status', '') != 'error' else 'offline',
             'last_check': portal.updated_at.isoformat() if portal.updated_at else None,
             'macs': [],

@@ -253,11 +253,22 @@ def _get_mac_address(account):
 
 
 def _create_portal_engine(account, mac_address):
-    """Create UnifiedPortalEngine for account."""
+    """Create UnifiedPortalEngine for account with fastest engine support."""
     from apps.m3u.unified_portal_engine import UnifiedPortalEngine, PortalEngine
     
     props = account.custom_properties or {}
     engine_pref = props.get("portal_engine", "auto")
+    
+    # Handle "fastest" mode - use benchmarked fastest_engine if available
+    if engine_pref == "fastest":
+        fastest_engine = props.get("fastest_engine")
+        if fastest_engine:
+            engine_pref = fastest_engine
+            logger.info(f"VOD using FASTEST benchmarked engine: {engine_pref}")
+        else:
+            engine_pref = "auto"
+            logger.info(f"VOD: 'fastest' mode but no benchmark data, using auto")
+    
     try:
         selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO
     except ValueError:

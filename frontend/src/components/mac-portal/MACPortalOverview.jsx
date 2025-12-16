@@ -135,12 +135,16 @@ const PortalCard = ({ portal, onRefresh }) => {
 
   const isOnline = portal.status === 'online';
 
-  // Load cached benchmark on mount
+  // Initialize from portal data (comes from overview API)
   useEffect(() => {
-    if (portal.id) {
-      loadCachedBenchmark();
+    if (portal.fastest_engine) {
+      setFastestEngine({
+        engine: portal.fastest_engine,
+        time_ms: portal.fastest_engine_time_ms,
+        stream_link_ok: portal.fastest_has_stream_link,
+      });
     }
-  }, [portal.id]);
+  }, [portal.fastest_engine, portal.fastest_engine_time_ms, portal.fastest_has_stream_link]);
 
   const loadCachedBenchmark = async () => {
     if (!portal.id) return;
