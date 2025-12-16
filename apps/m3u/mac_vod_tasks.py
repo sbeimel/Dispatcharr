@@ -1,307 +1,149 @@
 """
-MAC Portal VOD Tasks - Zweistufiger Import für MAC/STB Portale.
+MAC Portal VOD Tasks - Neu implementiert basierend auf MacReplayXC.
 
-Phase 1: Kategorien laden und im Groups-Tab anzeigen
-Phase 2: Nur ausgewählte Kategorien importieren
+Einfache, direkte Logik wie in MacReplayXC-main/stb.py und app-docker.py:
+1. Kategorien vom Portal laden (type=vod/series, action=get_categories)
+2. In ChannelGroups speichern (wie MacReplayXC in vod_categories Tabelle)
+3. Kategorien im Groups-Tab anzeigen mit group_type='vod_movie' oder 'vod_series'
 """
 
 import logging
+import requests
+from typing import Dict, List
+
 from celery import shared_task
 from django.utils import timezone
-from django.db import transaction
+
 from .models import M3UAccount
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task
-def refresh_mac_portal_categories(account_id):
+# =============================================================================
+# VOD Service - Direkte API-Aufrufe wie in MacReplayXC stb.py
+# =============================================================================
+
+class MACVodClient:
     """
-    Phase 1: Lade nur VOD/Series Kategorien für MAC Portal Account.
-    Erstellt ChannelGroups für VOD-Movies und VOD-Series Kategorien.
-    Only runs if enable_vod is True in account custom_properties.
-    """
-    from apps.m3u.tasks import send_m3u_update
+    Einfacher VOD Client basierend auf MacReplayXC stb.py.
     
-    try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
+    Direkte API-Aufrufe ohne komplexe Abstraktion.
+    """
+    
+    def __init__(self, portal_url: str, mac: str, token: str):
+        self.portal_url = portal_url.rstrip('/')
+        self.mac = mac
+        self.token = token
         
-        if account.account_type != M3UAccount.Types.MAC:
-            logger.warning(f"MAC category refresh called for non-MAC account {account_id}")
-            return "MAC category refresh only available for MAC/STB accounts"
+        # Standard Headers wie in MacReplayXC
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C)",
+            "Authorization": f"Bearer {token}",
+        }
         
-        # Check if VOD scanning is enabled for this account
-        account_props = account.custom_properties or {}
-        if not account_props.get('enable_vod', False):
-            logger.info(f"VOD scanning is disabled for MAC account {account.name}, skipping category refresh")
-            return "VOD scanning is disabled for this account"
+        # Standard Cookies wie in MacReplayXC
+        self.cookies = {
+            "mac": mac,
+            "stb_lang": "en",
+            "timezone": "Europe/London"
+        }
+    
+    def _get_url(self) -> str:
+        """Get portal endpoint URL."""
+        if self.portal_url.endswith('.php'):
+            return self.portal_url
+        return f"{self.portal_url}/portal.php"
+    
+    def get_vod_categories(self) -> List[Dict]:
+        """
+        Get VOD categories - wie MacReplayXC getVodCategories().
         
-        logger.info(f"Starting MAC category refresh for account {account.name}")
-        start_time = timezone.now()
+        API: type=vod&action=get_categories&JsHttpRequest=1-xml
+        """
+        params = {
+            "type": "vod",
+            "action": "get_categories",
+            "JsHttpRequest": "1-xml"
+        }
         
-        # Send start notification
-        send_m3u_update(account_id, "category_refresh", 0, status="processing")
-        
-        # Get MAC address
-        mac_address = _get_mac_address(account)
-        if not mac_address:
-            logger.error(f"No MAC address available for account {account_id}")
-            send_m3u_update(account_id, "category_refresh", 100, status="error",
-                           message="No MAC address available")
-            return "No MAC address available"
-        
-        # Initialize UnifiedPortalEngine
-        engine = _create_portal_engine(account, mac_address)
-        
-        # Perform handshake
-        result = engine.perform_handshake()
-        if not result.success:
-            logger.error(f"Handshake failed for MAC category refresh: {result.error}")
-            send_m3u_update(account_id, "category_refresh", 100, status="error",
-                           message=f"Portal handshake failed: {result.error}")
-            return f"Handshake failed: {result.error}"
-        
-        total_categories = 0
-        
-        # Fetch VOD categories (Movies)
-        logger.info(f"Fetching VOD categories for account {account.name}")
-        vod_categories = engine.get_vod_categories()
-        
-        logger.info(f"VOD categories response type: {type(vod_categories)}")
-        if vod_categories:
-            logger.info(f"VOD categories count: {len(vod_categories)}")
-            # Check if it's a dict with 'js' key (nested format)
-            if isinstance(vod_categories, dict):
-                logger.info(f"VOD categories is dict with keys: {vod_categories.keys()}")
-                if 'js' in vod_categories:
-                    vod_categories = vod_categories['js']
-                    logger.info(f"Extracted 'js' key, now have {len(vod_categories)} categories")
-            
-            vod_count = _create_channel_groups_for_categories(
-                account, vod_categories, "VOD - Movies", "vod_movie"
+        try:
+            response = requests.get(
+                self._get_url(),
+                params=params,
+                cookies=self.cookies,
+                headers=self.headers,
+                timeout=30,
+                verify=False
             )
-            total_categories += vod_count
-            logger.info(f"Created {vod_count} VOD movie category groups")
-        
-        # Fetch Series categories
-        logger.info(f"Fetching series categories for account {account.name}")
-        series_categories = engine.get_series_categories()
-        
-        logger.info(f"Series categories response type: {type(series_categories)}")
-        if series_categories:
-            logger.info(f"Series categories count: {len(series_categories)}")
-            # Check if it's a dict with 'js' key (nested format)
-            if isinstance(series_categories, dict):
-                logger.info(f"Series categories is dict with keys: {series_categories.keys()}")
-                if 'js' in series_categories:
-                    series_categories = series_categories['js']
-                    logger.info(f"Extracted 'js' key, now have {len(series_categories)} categories")
             
-            series_count = _create_channel_groups_for_categories(
-                account, series_categories, "VOD - Series", "vod_series"
+            if response.status_code == 200:
+                data = response.json()
+                if "js" in data:
+                    categories = data["js"]
+                    if isinstance(categories, list):
+                        logger.info(f"Got {len(categories)} VOD categories")
+                        return categories
+            
+            logger.warning(f"VOD categories failed: {response.status_code}")
+            
+        except Exception as e:
+            logger.error(f"Error getting VOD categories: {e}")
+        
+        return []
+    
+    def get_series_categories(self) -> List[Dict]:
+        """
+        Get Series categories - wie MacReplayXC getSeriesCategories().
+        
+        API: type=series&action=get_categories&JsHttpRequest=1-xml
+        """
+        params = {
+            "type": "series",
+            "action": "get_categories",
+            "JsHttpRequest": "1-xml"
+        }
+        
+        try:
+            response = requests.get(
+                self._get_url(),
+                params=params,
+                cookies=self.cookies,
+                headers=self.headers,
+                timeout=30,
+                verify=False
             )
-            total_categories += series_count
-            logger.info(f"Created {series_count} VOD series category groups")
-        
-        end_time = timezone.now()
-        duration = (end_time - start_time).total_seconds()
-        
-        logger.info(f"MAC category refresh completed for account {account.name}: "
-                   f"{total_categories} categories in {duration:.2f}s")
-        
-        send_m3u_update(account_id, "category_refresh", 100, status="success",
-                       message=f"Categories loaded: {total_categories} VOD categories. "
-                               f"Select categories in Groups tab and refresh to import content.")
-        
-        return f"MAC categories loaded: {total_categories} categories"
-        
-    except Exception as e:
-        logger.error(f"Error refreshing MAC categories for account {account_id}: {e}", exc_info=True)
-        send_m3u_update(account_id, "category_refresh", 100, status="error",
-                       message=f"Category refresh failed: {str(e)}")
-        return f"MAC category refresh failed: {str(e)}"
-
-
-def _get_vod_category_id(group_rel):
-    """Get portal_category_id from either ChannelGroup or relationship custom_properties."""
-    # First try relationship's custom_properties (always available)
-    rel_props = group_rel.custom_properties or {}
-    cat_id = rel_props.get('portal_category_id')
-    if cat_id:
-        return cat_id
-    
-    # Then try ChannelGroup's custom_properties (if model has the field)
-    if hasattr(group_rel.channel_group, 'custom_properties'):
-        group_props = group_rel.channel_group.custom_properties or {}
-        cat_id = group_props.get('portal_category_id')
-        if cat_id:
-            return cat_id
-    
-    return None
-
-
-def _get_vod_type(group_rel):
-    """Get VOD type (vod_movie or vod_series) from either ChannelGroup or relationship."""
-    # First try ChannelGroup's group_type (if model has the field)
-    if hasattr(group_rel.channel_group, 'group_type'):
-        return group_rel.channel_group.group_type
-    
-    # Then try relationship's custom_properties
-    rel_props = group_rel.custom_properties or {}
-    return rel_props.get('vod_type')
-
-
-@shared_task
-def refresh_mac_portal_selected_vod(account_id):
-    """
-    Phase 2: Importiere VOD Content nur für ausgewählte Kategorien.
-    Läuft nach Kategorie-Auswahl im Groups-Tab.
-    """
-    from apps.m3u.tasks import send_m3u_update
-    from apps.vod.tasks import batch_create_categories, process_mac_vod_items, process_mac_series_items, cleanup_orphaned_vod_content
-    
-    try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
-        
-        if account.account_type != M3UAccount.Types.MAC:
-            logger.warning(f"MAC VOD import called for non-MAC account {account_id}")
-            return "MAC VOD import only available for MAC/STB accounts"
-        
-        logger.info(f"Starting MAC VOD import for selected categories: {account.name}")
-        start_time = timezone.now()
-        
-        # Send start notification
-        send_m3u_update(account_id, "vod_import", 0, status="processing")
-        
-        # Get enabled VOD category groups - check both new and old model structures
-        has_group_type = hasattr(ChannelGroup, 'group_type')
-        
-        if has_group_type:
-            # New model with group_type field
-            enabled_groups = ChannelGroupM3UAccount.objects.filter(
-                m3u_account=account,
-                enabled=True,
-                channel_group__group_type__in=['vod_movie', 'vod_series']
-            ).select_related('channel_group')
-        else:
-            # Old model - filter by relationship's custom_properties
-            enabled_groups = ChannelGroupM3UAccount.objects.filter(
-                m3u_account=account,
-                enabled=True,
-                custom_properties__is_vod_category=True
-            ).select_related('channel_group')
-        
-        if not enabled_groups.exists():
-            logger.info(f"No VOD categories selected for account {account.name}")
-            send_m3u_update(account_id, "vod_import", 100, status="success",
-                           message="No VOD categories selected for import")
-            return "No VOD categories selected"
-        
-        # Get MAC address and engine
-        mac_address = _get_mac_address(account)
-        if not mac_address:
-            logger.error(f"No MAC address available for account {account_id}")
-            send_m3u_update(account_id, "vod_import", 100, status="error",
-                           message="No MAC address available")
-            return "No MAC address available"
-        
-        engine = _create_portal_engine(account, mac_address)
-        
-        # Perform handshake
-        result = engine.perform_handshake()
-        if not result.success:
-            logger.error(f"Handshake failed for MAC VOD import: {result.error}")
-            send_m3u_update(account_id, "vod_import", 100, status="error",
-                           message=f"Portal handshake failed: {result.error}")
-            return f"Handshake failed: {result.error}"
-        
-        total_movies = 0
-        total_series = 0
-        
-        # Separate movie and series groups using helper function
-        movie_groups = [g for g in enabled_groups if _get_vod_type(g) == 'vod_movie']
-        series_groups = [g for g in enabled_groups if _get_vod_type(g) == 'vod_series']
-        
-        # Process movie categories
-        if movie_groups:
-            logger.info(f"Processing {len(movie_groups)} selected movie categories")
             
-            # Get all VOD categories to create category map
-            vod_categories = engine.get_vod_categories()
-            if vod_categories:
-                movie_category_map = batch_create_categories(vod_categories, 'movie', account)
-                
-                for group_rel in movie_groups:
-                    cat_id = _get_vod_category_id(group_rel)
-                    if not cat_id:
-                        continue
-                    
-                    try:
-                        logger.info(f"Importing VOD items for category {cat_id}")
-                        vod_items = engine.get_vod_items(category_id=str(cat_id))
-                        
-                        if vod_items and 'data' in vod_items:
-                            items = vod_items['data']
-                            if items:
-                                process_mac_vod_items(account, items, movie_category_map, start_time)
-                                total_movies += len(items)
-                                logger.info(f"Imported {len(items)} movies from category {cat_id}")
-                    except Exception as e:
-                        logger.warning(f"Error importing VOD category {cat_id}: {e}")
-                        continue
-        
-        # Process series categories
-        if series_groups:
-            logger.info(f"Processing {len(series_groups)} selected series categories")
+            if response.status_code == 200:
+                data = response.json()
+                if "js" in data:
+                    categories = data["js"]
+                    if isinstance(categories, list):
+                        logger.info(f"Got {len(categories)} Series categories")
+                        return categories
             
-            # Get all series categories to create category map
-            series_categories = engine.get_series_categories()
-            if series_categories:
-                series_category_map = batch_create_categories(series_categories, 'series', account)
-                
-                for group_rel in series_groups:
-                    cat_id = _get_vod_category_id(group_rel)
-                    if not cat_id:
-                        continue
-                    
-                    try:
-                        logger.info(f"Importing series for category {cat_id}")
-                        series_items = engine.get_series_items(category_id=str(cat_id))
-                        
-                        if series_items and 'data' in series_items:
-                            items = series_items['data']
-                            if items:
-                                process_mac_series_items(account, items, series_category_map, start_time)
-                                total_series += len(items)
-                                logger.info(f"Imported {len(items)} series from category {cat_id}")
-                    except Exception as e:
-                        logger.warning(f"Error importing series category {cat_id}: {e}")
-                        continue
+            logger.warning(f"Series categories failed: {response.status_code}")
+            
+        except Exception as e:
+            logger.error(f"Error getting Series categories: {e}")
         
-        end_time = timezone.now()
-        duration = (end_time - start_time).total_seconds()
-        
-        logger.info(f"MAC VOD import completed for account {account.name}: "
-                   f"{total_movies} movies, {total_series} series in {duration:.2f}s")
-        
-        # Cleanup orphaned content
-        cleanup_orphaned_vod_content(account_id=account_id, scan_start_time=start_time)
-        
-        send_m3u_update(account_id, "vod_import", 100, status="success",
-                       message=f"VOD import completed: {total_movies} movies, {total_series} series")
-        
-        return f"MAC VOD import completed: {total_movies} movies, {total_series} series"
-        
-    except Exception as e:
-        logger.error(f"Error importing MAC VOD for account {account_id}: {e}", exc_info=True)
-        send_m3u_update(account_id, "vod_import", 100, status="error",
-                       message=f"VOD import failed: {str(e)}")
-        return f"MAC VOD import failed: {str(e)}"
+        return []
 
 
-def _get_mac_address(account):
-    """Get MAC address for account."""
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def _get_mac_and_token(account) -> tuple:
+    """
+    Get MAC address and token for account.
+    
+    Returns:
+        (mac_address, token) or (None, None) if failed
+    """
+    from apps.m3u.mac_portal_client import MacPortalClient
+    
+    # Get MAC address
     mac_address = None
     if hasattr(account, 'macs') and account.macs.exists():
         mac_obj = account.macs.filter(status__in=['valid', 'active', 'unknown']).first()
@@ -309,159 +151,234 @@ def _get_mac_address(account):
             mac_address = mac_obj.address
     
     if not mac_address:
-        # Fallback to mac_address field
         mac_address = getattr(account, 'mac_address', None)
         if mac_address and ',' in mac_address:
             mac_address = mac_address.split(',')[0].strip()
     
-    return mac_address
-
-
-def _create_portal_engine(account, mac_address):
-    """Create UnifiedPortalEngine for account using GLOBAL engine setting."""
-    from apps.m3u.unified_portal_engine import UnifiedPortalEngine, PortalEngine
+    if not mac_address:
+        logger.error(f"No MAC address for account {account.name}")
+        return None, None
     
-    props = account.custom_properties or {}
-    engine_pref = "auto"
-    
-    # Get engine from GLOBAL settings only
+    # Do handshake to get token
     try:
-        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
-        settings = MACPortalGlobalSettings.get_settings()
-        global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+        client = MacPortalClient(
+            base_url=account.server_url,
+            mac=mac_address,
+            proxy=None
+        )
         
-        if global_engine == 'fastest':
-            fastest_engine = props.get("fastest_engine")
-            if fastest_engine:
-                engine_pref = fastest_engine
-                logger.info(f"VOD: FASTEST mode using '{engine_pref}'")
-            else:
-                engine_pref = "auto"
-                logger.info("VOD: FASTEST but no benchmark, using auto")
-        elif global_engine == 'auto':
-            engine_pref = "auto"
-            logger.info("VOD: AUTO mode")
-        else:
-            engine_pref = global_engine
-            logger.info(f"VOD: Using selected engine '{engine_pref}'")
-    except Exception:
-        logger.info("VOD: Using default engine 'auto'")
+        if not client.token:
+            client.handshake()
+        
+        if not client.token:
+            logger.error(f"Handshake failed for account {account.name}")
+            return None, None
+        
+        return mac_address, client.token
+        
+    except Exception as e:
+        logger.error(f"Error getting token for {account.name}: {e}")
+        return None, None
+
+
+def _save_category(account, cat_id: str, title: str, 
+                   group_type: str, prefix: str) -> str:
+    """
+    Save category as ChannelGroup - wie MacReplayXC INSERT OR REPLACE.
+    
+    Returns: 'created', 'updated', 'skipped', or 'error'
+    """
+    # Skip "All" category (id = "*") - same as MacReplayXC
+    if cat_id == "*" or not cat_id:
+        return 'skipped'
+    
+    group_name = f"{prefix} - {title}"
     
     try:
-        selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO
-    except ValueError:
-        selected_engine = PortalEngine.AUTO
-    
-    return UnifiedPortalEngine(
-        portal_url=account.server_url,
-        mac=mac_address,
-        engine=selected_engine,
-    )
+        # Get or create ChannelGroup
+        group, created = ChannelGroup.objects.get_or_create(
+            name=group_name,
+            defaults={
+                'group_type': group_type,
+                'custom_properties': {
+                    'portal_category_id': cat_id,
+                    'portal_category_name': title,
+                    'is_vod_category': True,
+                }
+            }
+        )
+        
+        if not created:
+            # Update if needed
+            needs_save = False
+            if group.group_type != group_type:
+                group.group_type = group_type
+                needs_save = True
+            
+            props = group.custom_properties or {}
+            if props.get('portal_category_id') != cat_id:
+                group.custom_properties = {
+                    'portal_category_id': cat_id,
+                    'portal_category_name': title,
+                    'is_vod_category': True,
+                }
+                needs_save = True
+            
+            if needs_save:
+                group.save()
+        
+        # Auto-enable setting
+        account_props = account.custom_properties or {}
+        auto_enable = account_props.get('auto_enable_new_groups_vod', True)
+        
+        # Create/update M3U account relation
+        ChannelGroupM3UAccount.objects.update_or_create(
+            channel_group=group,
+            m3u_account=account,
+            defaults={
+                'enabled': auto_enable,
+                'custom_properties': {
+                    'portal_category_id': cat_id,
+                    'portal_category_name': title,
+                    'is_vod_category': True,
+                    'vod_type': group_type,
+                }
+            }
+        )
+        
+        return 'created' if created else 'updated'
+        
+    except Exception as e:
+        logger.error(f"Error saving category {cat_id}: {e}")
+        return 'error'
 
 
-def _create_channel_groups_for_categories(account, categories, prefix, group_type):
-    """Create ChannelGroups for VOD/Series categories.
-    
-    Basiert auf MacReplayXC-Ansatz: Einfach und direkt.
-    
-    Portal categories haben typischerweise:
-    - 'id' und 'title' Felder (wie in MacReplayXC)
-    
-    WICHTIG: Diese Funktion funktioniert für ALLE Engines (MacReplay, iSTB, BoxPirate, etc.)
+# =============================================================================
+# Celery Tasks
+# =============================================================================
+
+@shared_task
+def refresh_mac_portal_categories(account_id):
     """
-    if not categories:
-        logger.warning(f"No categories provided for {prefix}")
-        return 0
+    Load VOD/Series categories for MAC account.
     
-    logger.info(f"Processing {len(categories)} {prefix} categories for account {account.name}")
+    Basiert auf MacReplayXC /api/portal/<id>/load_vod_categories
+    """
+    from apps.m3u.tasks import send_m3u_update
     
-    # Log sample data like MacReplayXC does
-    if categories:
-        first_cat = categories[0]
-        logger.info(f"Category fields: {list(first_cat.keys()) if isinstance(first_cat, dict) else 'NOT A DICT'}")
-        logger.info(f"First category: {first_cat}")
+    try:
+        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            return "Not a MAC account"
+        
+        # Check if VOD enabled
+        props = account.custom_properties or {}
+        if not props.get('enable_vod', False):
+            logger.info(f"VOD disabled for {account.name}")
+            return "VOD disabled"
+        
+        logger.info(f"=== Starting VOD refresh for {account.name} ===")
+        start_time = timezone.now()
+        
+        send_m3u_update(account_id, "category_refresh", 0, status="processing")
+        
+        # Get MAC and token
+        mac_address, token = _get_mac_and_token(account)
+        if not mac_address or not token:
+            send_m3u_update(account_id, "category_refresh", 100, status="error",
+                          message="Could not authenticate")
+            return "Authentication failed"
+        
+        # Create VOD client
+        vod_client = MACVodClient(
+            portal_url=account.server_url,
+            mac=mac_address,
+            token=token
+        )
+        
+        stats = {"vod": 0, "series": 0, "created": 0, "updated": 0, "errors": 0}
+        
+        # === VOD Categories ===
+        logger.info("Loading VOD categories...")
+        vod_cats = vod_client.get_vod_categories()
+        
+        if vod_cats:
+            stats["vod"] = len(vod_cats)
+            # Log first category like MacReplayXC
+            logger.info(f"VOD category fields: {list(vod_cats[0].keys())}")
+            logger.info(f"First VOD category: {vod_cats[0]}")
+            
+            for cat in vod_cats:
+                result = _save_category(
+                    account=account,
+                    cat_id=str(cat.get('id', '')),
+                    title=cat.get('title', ''),
+                    group_type='vod_movie',
+                    prefix='VOD - Movies'
+                )
+                if result == 'created':
+                    stats["created"] += 1
+                elif result == 'updated':
+                    stats["updated"] += 1
+                elif result == 'error':
+                    stats["errors"] += 1
+        
+        # === Series Categories ===
+        logger.info("Loading Series categories...")
+        series_cats = vod_client.get_series_categories()
+        
+        if series_cats:
+            stats["series"] = len(series_cats)
+            # Log first category
+            logger.info(f"Series category fields: {list(series_cats[0].keys())}")
+            logger.info(f"First Series category: {series_cats[0]}")
+            
+            for cat in series_cats:
+                result = _save_category(
+                    account=account,
+                    cat_id=str(cat.get('id', '')),
+                    title=cat.get('title', ''),
+                    group_type='vod_series',
+                    prefix='VOD - Series'
+                )
+                if result == 'created':
+                    stats["created"] += 1
+                elif result == 'updated':
+                    stats["updated"] += 1
+                elif result == 'error':
+                    stats["errors"] += 1
+        
+        # Done
+        duration = (timezone.now() - start_time).total_seconds()
+        total = stats["vod"] + stats["series"]
+        
+        logger.info(f"=== VOD refresh completed for {account.name} ===")
+        logger.info(f"VOD: {stats['vod']}, Series: {stats['series']}, Total: {total}")
+        logger.info(f"Created: {stats['created']}, Updated: {stats['updated']}, Errors: {stats['errors']}")
+        logger.info(f"Duration: {duration:.2f}s")
+        
+        send_m3u_update(account_id, "category_refresh", 100, status="success",
+                       message=f"Loaded {total} categories ({stats['created']} new)")
+        
+        return f"Success: {total} categories"
+        
+    except M3UAccount.DoesNotExist:
+        return "Account not found"
+    except Exception as e:
+        logger.error(f"VOD refresh failed: {e}", exc_info=True)
+        send_m3u_update(account_id, "category_refresh", 100, status="error",
+                       message=str(e))
+        return f"Error: {e}"
+
+
+@shared_task
+def refresh_mac_portal_selected_vod(account_id):
+    """
+    Import VOD content for selected categories.
     
-    created_count = 0
-    updated_count = 0
-    skipped_count = 0
-    error_count = 0
-    
-    # Get auto-enable setting
-    account_props = account.custom_properties or {}
-    auto_enable = account_props.get("auto_enable_new_groups_vod", True)
-    
-    for cat in categories:
-        try:
-            # MacReplayXC style: cat.get('id', '') and cat.get('title', '')
-            if not isinstance(cat, dict):
-                skipped_count += 1
-                continue
-            
-            cat_id = str(cat.get('id', ''))
-            title = cat.get('title', '')
-            
-            # Skip "all" category (id = "*") - same as MacReplayXC
-            if cat_id == "*" or not cat_id:
-                skipped_count += 1
-                continue
-            
-            # Create group name with prefix
-            group_name = f"{prefix} - {title}"
-            
-            # Use get_or_create for simplicity (like INSERT OR REPLACE)
-            group, created = ChannelGroup.objects.get_or_create(
-                name=group_name,
-                defaults={
-                    'group_type': group_type,
-                    'custom_properties': {
-                        'portal_category_id': cat_id,
-                        'portal_category_name': title,
-                        'is_vod_category': True,
-                    }
-                }
-            )
-            
-            if created:
-                created_count += 1
-                logger.debug(f"Created VOD group: {group_name}")
-            else:
-                # Update existing group if needed
-                needs_save = False
-                if group.group_type != group_type:
-                    group.group_type = group_type
-                    needs_save = True
-                if not group.custom_properties or group.custom_properties.get('portal_category_id') != cat_id:
-                    group.custom_properties = {
-                        'portal_category_id': cat_id,
-                        'portal_category_name': title,
-                        'is_vod_category': True,
-                    }
-                    needs_save = True
-                if needs_save:
-                    group.save()
-                updated_count += 1
-            
-            # Create or update M3U account relation
-            ChannelGroupM3UAccount.objects.update_or_create(
-                channel_group=group,
-                m3u_account=account,
-                defaults={
-                    'enabled': auto_enable,
-                    'custom_properties': {
-                        'portal_category_id': cat_id,
-                        'portal_category_name': title,
-                        'is_vod_category': True,
-                        'vod_type': group_type,
-                    }
-                }
-            )
-            
-        except Exception as e:
-            error_count += 1
-            logger.error(f"Error creating category group for {cat}: {e}")
-            continue
-    
-    total = created_count + updated_count
-    logger.info(f"VOD categories result: created={created_count}, updated={updated_count}, "
-                f"skipped={skipped_count}, errors={error_count}, total={total}")
-    return total
+    Phase 2: Nach Kategorie-Auswahl im Groups-Tab.
+    """
+    # Placeholder - wird später implementiert
+    logger.info(f"VOD content import for account {account_id} - not yet implemented")
+    return "Not implemented"
