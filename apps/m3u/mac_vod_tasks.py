@@ -362,145 +362,106 @@ def _create_portal_engine(account, mac_address):
 def _create_channel_groups_for_categories(account, categories, prefix, group_type):
     """Create ChannelGroups for VOD/Series categories.
     
-    Note: This function now handles both old models (without group_type/custom_properties)
-    and new models (with these fields) gracefully.
+    Basiert auf MacReplayXC-Ansatz: Einfach und direkt.
     
-    Portal categories can have various field names:
-    - id, category_id, cat_id
-    - title, name, category_name, cat_name
+    Portal categories haben typischerweise:
+    - 'id' und 'title' Felder (wie in MacReplayXC)
     
     WICHTIG: Diese Funktion funktioniert für ALLE Engines (MacReplay, iSTB, BoxPirate, etc.)
     """
-    count = 0
-    updated_count = 0
-    
     if not categories:
         logger.warning(f"No categories provided for {prefix}")
         return 0
     
     logger.info(f"Processing {len(categories)} {prefix} categories for account {account.name}")
     
-    # Log first few categories for debugging
+    # Log sample data like MacReplayXC does
     if categories:
-        logger.info(f"First category data sample: {categories[0]}")
-        logger.info(f"First category type: {type(categories[0])}")
-        logger.info(f"First category keys: {categories[0].keys() if isinstance(categories[0], dict) else 'NOT A DICT'}")
-        if len(categories) > 1:
-            logger.info(f"Second category data sample: {categories[1]}")
-        if len(categories) > 2:
-            logger.info(f"Third category data sample: {categories[2]}")
+        first_cat = categories[0]
+        logger.info(f"Category fields: {list(first_cat.keys()) if isinstance(first_cat, dict) else 'NOT A DICT'}")
+        logger.info(f"First category: {first_cat}")
     
-    skipped_no_id = 0
-    skipped_star_id = 0
-    skipped_not_dict = 0
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    error_count = 0
     
-    for cat_data in categories:
-        # Ensure cat_data is a dict
-        if not isinstance(cat_data, dict):
-            skipped_not_dict += 1
-            logger.warning(f"Category data is not a dict: {type(cat_data)} - {cat_data}")
-            continue
-        
-        # Try multiple field names for category ID
-        cat_id = (
-            cat_data.get('category_id') or 
-            cat_data.get('id') or 
-            cat_data.get('cat_id')
-        )
-        # Try multiple field names for category name
-        cat_name = (
-            cat_data.get('category_name') or 
-            cat_data.get('name') or 
-            cat_data.get('title') or  # Portal often uses 'title'
-            cat_data.get('cat_name') or
-            f"Category {cat_id}"
-        )
-        
-        if not cat_id:
-            skipped_no_id += 1
-            logger.debug(f"Skipping category without ID: {cat_data}")
-            continue
-        
-        # Skip special "All" category with id='*'
-        if str(cat_id) == '*':
-            skipped_star_id += 1
-            logger.debug(f"Skipping 'All' category with id='*': {cat_name}")
-            continue
-        
-        # Create group name with prefix
-        group_name = f"{prefix} - {cat_name}"
-        
+    # Get auto-enable setting
+    account_props = account.custom_properties or {}
+    auto_enable = account_props.get("auto_enable_new_groups_vod", True)
+    
+    for cat in categories:
         try:
-            with transaction.atomic():
-                # First check if group exists and needs group_type update
-                existing_group = ChannelGroup.objects.filter(name=group_name).first()
-                
-                custom_props = {
-                    'portal_category_id': str(cat_id),
-                    'portal_category_name': cat_name,
-                    'is_vod_category': True,
-                }
-                
-                if existing_group:
-                    # Update group_type if it's wrong (e.g., 'live' instead of 'vod_movie')
-                    needs_update = False
-                    if existing_group.group_type != group_type:
-                        existing_group.group_type = group_type
-                        needs_update = True
-                    
-                    # Also update custom_properties if needed
-                    if existing_group.custom_properties != custom_props:
-                        existing_group.custom_properties = custom_props
-                        needs_update = True
-                    
-                    if needs_update:
-                        existing_group.save()
-                        updated_count += 1
-                        logger.info(f"Updated existing VOD category group: {group_name} -> group_type={group_type}")
-                    
-                    group = existing_group
-                else:
-                    # Create new group
-                    group = ChannelGroup.objects.create(
-                        name=group_name,
-                        group_type=group_type,
-                        custom_properties=custom_props
-                    )
-                    count += 1
-                    logger.info(f"Created new VOD category group: {group_name} with type={group_type}")
-                
-                # Get auto-enable setting
-                account_props = account.custom_properties or {}
-                auto_enable = account_props.get("auto_enable_new_groups_vod", True)
-                
-                # Store VOD category info in the relationship's custom_properties
-                rel_custom_props = {
-                    'portal_category_id': str(cat_id),
-                    'portal_category_name': cat_name,
-                    'is_vod_category': True,
-                    'vod_type': group_type,  # 'vod_movie' or 'vod_series'
-                }
-                
-                # Create or update M3U account relation
-                relation, rel_created = ChannelGroupM3UAccount.objects.update_or_create(
-                    channel_group=group,
-                    m3u_account=account,
-                    defaults={
-                        'enabled': auto_enable,
-                        'custom_properties': rel_custom_props
+            # MacReplayXC style: cat.get('id', '') and cat.get('title', '')
+            if not isinstance(cat, dict):
+                skipped_count += 1
+                continue
+            
+            cat_id = str(cat.get('id', ''))
+            title = cat.get('title', '')
+            
+            # Skip "all" category (id = "*") - same as MacReplayXC
+            if cat_id == "*" or not cat_id:
+                skipped_count += 1
+                continue
+            
+            # Create group name with prefix
+            group_name = f"{prefix} - {title}"
+            
+            # Use get_or_create for simplicity (like INSERT OR REPLACE)
+            group, created = ChannelGroup.objects.get_or_create(
+                name=group_name,
+                defaults={
+                    'group_type': group_type,
+                    'custom_properties': {
+                        'portal_category_id': cat_id,
+                        'portal_category_name': title,
+                        'is_vod_category': True,
                     }
-                )
-                
-                if rel_created:
-                    logger.debug(f"Created VOD category relation: {group_name}")
-                
+                }
+            )
+            
+            if created:
+                created_count += 1
+                logger.debug(f"Created VOD group: {group_name}")
+            else:
+                # Update existing group if needed
+                needs_save = False
+                if group.group_type != group_type:
+                    group.group_type = group_type
+                    needs_save = True
+                if not group.custom_properties or group.custom_properties.get('portal_category_id') != cat_id:
+                    group.custom_properties = {
+                        'portal_category_id': cat_id,
+                        'portal_category_name': title,
+                        'is_vod_category': True,
+                    }
+                    needs_save = True
+                if needs_save:
+                    group.save()
+                updated_count += 1
+            
+            # Create or update M3U account relation
+            ChannelGroupM3UAccount.objects.update_or_create(
+                channel_group=group,
+                m3u_account=account,
+                defaults={
+                    'enabled': auto_enable,
+                    'custom_properties': {
+                        'portal_category_id': cat_id,
+                        'portal_category_name': title,
+                        'is_vod_category': True,
+                        'vod_type': group_type,
+                    }
+                }
+            )
+            
         except Exception as e:
-            logger.error(f"Error creating category group {group_name}: {e}", exc_info=True)
+            error_count += 1
+            logger.error(f"Error creating category group for {cat}: {e}")
             continue
     
-    total = count + updated_count
-    logger.info(f"_create_channel_groups_for_categories: processed {len(categories)} categories, "
-                f"created {count} new, updated {updated_count} existing (total: {total}), "
-                f"skipped_no_id={skipped_no_id}, skipped_star_id={skipped_star_id}, "
-                f"skipped_not_dict={skipped_not_dict}")
+    total = created_count + updated_count
+    logger.info(f"VOD categories result: created={created_count}, updated={updated_count}, "
+                f"skipped={skipped_count}, errors={error_count}, total={total}")
     return total
