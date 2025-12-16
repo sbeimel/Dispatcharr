@@ -147,54 +147,56 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         # Check if VOD setting changed and trigger refresh if needed
         new_vod_enabled = request.data.get("enable_vod", old_vod_enabled)
 
-        if (
-            instance.account_type == M3UAccount.Types.XC
-            and not old_vod_enabled
-            and new_vod_enabled
-        ):
-            # Create Uncategorized categories immediately so they're available in the UI
-            from apps.vod.models import VODCategory, M3UVODCategoryRelation
+        if not old_vod_enabled and new_vod_enabled:
+            # VOD was just enabled
+            if instance.account_type == M3UAccount.Types.XC:
+                # Xtream Codes: Create Uncategorized categories and trigger full refresh
+                from apps.vod.models import VODCategory, M3UVODCategoryRelation
 
-            # Create movie Uncategorized category
-            movie_category, _ = VODCategory.objects.get_or_create(
-                name="Uncategorized",
-                category_type="movie",
-                defaults={}
-            )
+                # Create movie Uncategorized category
+                movie_category, _ = VODCategory.objects.get_or_create(
+                    name="Uncategorized",
+                    category_type="movie",
+                    defaults={}
+                )
 
-            # Create series Uncategorized category
-            series_category, _ = VODCategory.objects.get_or_create(
-                name="Uncategorized",
-                category_type="series",
-                defaults={}
-            )
+                # Create series Uncategorized category
+                series_category, _ = VODCategory.objects.get_or_create(
+                    name="Uncategorized",
+                    category_type="series",
+                    defaults={}
+                )
 
-            # Create relations for both categories (disabled by default until first refresh)
-            account_custom_props = instance.custom_properties or {}
-            auto_enable_new = account_custom_props.get("auto_enable_new_groups_vod", True)
+                # Create relations for both categories (disabled by default until first refresh)
+                account_custom_props = instance.custom_properties or {}
+                auto_enable_new = account_custom_props.get("auto_enable_new_groups_vod", True)
 
-            M3UVODCategoryRelation.objects.get_or_create(
-                category=movie_category,
-                m3u_account=instance,
-                defaults={
-                    'enabled': auto_enable_new,
-                    'custom_properties': {}
-                }
-            )
+                M3UVODCategoryRelation.objects.get_or_create(
+                    category=movie_category,
+                    m3u_account=instance,
+                    defaults={
+                        'enabled': auto_enable_new,
+                        'custom_properties': {}
+                    }
+                )
 
-            M3UVODCategoryRelation.objects.get_or_create(
-                category=series_category,
-                m3u_account=instance,
-                defaults={
-                    'enabled': auto_enable_new,
-                    'custom_properties': {}
-                }
-            )
+                M3UVODCategoryRelation.objects.get_or_create(
+                    category=series_category,
+                    m3u_account=instance,
+                    defaults={
+                        'enabled': auto_enable_new,
+                        'custom_properties': {}
+                    }
+                )
 
-            # Trigger full VOD refresh
-            from apps.vod.tasks import refresh_vod_content
-
-            refresh_vod_content.delay(instance.id)
+                # Trigger full VOD refresh for Xtream Codes
+                from apps.vod.tasks import refresh_vod_content
+                refresh_vod_content.delay(instance.id)
+                
+            elif instance.account_type == M3UAccount.Types.MAC:
+                # MAC Portal: Phase 1 - Load only categories first
+                from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                refresh_mac_portal_categories.delay(instance.id)
 
         # After the instance is updated, return the response
         return response
@@ -244,9 +246,29 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         try:
             if account.account_type == M3UAccount.Types.MAC:
-                # Use MAC-specific VOD refresh task
-                from apps.vod.tasks import refresh_mac_vod_content
-                refresh_mac_vod_content.delay(account.id)
+                # Check if this is first-time VOD enable or refresh
+                refresh_type = request.data.get("refresh_type", "full")
+                
+                if refresh_type == "categories_only":
+                    # Phase 1: Load only categories
+                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                    refresh_mac_portal_categories.delay(account.id)
+                    return Response(
+                        {"message": f"VOD categories loading initiated for account {account.name}"},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+                elif refresh_type == "selected_content":
+                    # Phase 2: Import selected categories
+                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_selected_vod
+                    refresh_mac_portal_selected_vod.delay(account.id)
+                    return Response(
+                        {"message": f"VOD content import initiated for selected categories"},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+                else:
+                    # Legacy: Full import (for backward compatibility)
+                    from apps.vod.tasks import refresh_mac_vod_content
+                    refresh_mac_vod_content.delay(account.id)
             else:
                 from apps.vod.tasks import refresh_vod_content
                 refresh_vod_content.delay(account.id)

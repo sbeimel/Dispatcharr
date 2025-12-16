@@ -1145,23 +1145,27 @@ class AllinOneStrategy(BasePortalStrategy):
     """
     AllinOne Best-of-All Strategy - Kombiniert die besten Techniken aus allen Engines.
     
-    Features:
+    Features (Updated with iSTB + MacAttack):
     - Alle Cookies: mac, stb_lang, timezone, adid (EStalker/OB2_2025)
     - Vollständige Metriken: serial_number, device_id, device_id2, signature, hw_version_2, prehash
-    - api_signature: 263 (OB2_2025)
+    - api_signature: 263 (iSTB/OB2_2025) - echte MAG Box Signatur
+    - X-Random Header Support (MacAttack) - für erweiterte Authentifizierung
+    - Portal-Typ-Erkennung via version.js (MacAttack)
     - Prehash-Support für "missing" Responses (EStalker)
     - GET/POST Fallback für alle Operationen
-    - User-Agent Rotation bei Fehlern (limited to 2 attempts for speed)
+    - User-Agent Rotation bei Fehlern
     - Referer Header für create_link (BoxPirate)
+    - metrics JSON mit uid, random (iSTB)
     """
     
     NAME = "allinone"
-    DESCRIPTION = "AllinOne Best-of-All (Kombiniert alle Techniken)"
+    DESCRIPTION = "AllinOne Best-of-All (iSTB + MacAttack + alle anderen Techniken)"
     
     # User-Agent Rotation Pool - MAG254 first (most compatible)
     USER_AGENT_POOL = [
         'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG254 stbapp ver: 2 rev: 369 Safari/533.3',
         'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/533.3',
+        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG322 stbapp ver: 4 rev: 2721 Safari/533.3',
     ]
     
     # Optimized Endpoints - most common first for speed
@@ -1172,22 +1176,34 @@ class AllinOneStrategy(BasePortalStrategy):
         '/c/',
     ]
     
+    # API Signatures - try both (iSTB=263, MacAttack=262)
+    API_SIGNATURES = [263, 262]
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._current_ua_index = 0
         self._failed_attempts = 0
+        self._token_random = None  # MacAttack X-Random support
+        self._detected_portal_type = None  # MacAttack portal detection
+        self._portal_version = "5.3.1"
     
     def _get_cookies(self) -> Dict[str, str]:
-        """AllinOne Cookies - Alle wichtigen Cookies kombiniert."""
-        return {
+        """AllinOne Cookies - Alle wichtigen Cookies kombiniert (inkl. MacAttack)."""
+        cookies = {
             "mac": self.identity.mac,
             "stb_lang": self.identity.lang,
             "timezone": self.identity.timezone,
             "adid": self.identity.adid,  # EStalker/OB2_2025
+            "debug": "1",  # MacAttack
+            "device_id": self.identity.device_id,  # MacAttack
+            "device_id2": self.identity.device_id2,  # MacAttack
+            "hw_version": "1.7-BD-00",  # MacAttack
+            "sn": self.identity.serial_number,  # MacAttack
         }
+        return cookies
     
     def _get_base_headers(self) -> Dict[str, str]:
-        """AllinOne Headers - Erweiterte Headers mit Rotation."""
+        """AllinOne Headers - Erweiterte Headers mit Rotation und X-Random."""
         parsed = urlparse(self.portal_url)
         
         # Rotiere User-Agent bei Fehlern
@@ -1203,48 +1219,108 @@ class AllinOneStrategy(BasePortalStrategy):
         else:
             model = "MAG250"
         
-        return {
+        headers = {
             "Host": parsed.netloc,
             "Accept": "*/*",
             "User-Agent": ua,
-            "Accept-Encoding": "gzip, deflate",
+            "Accept-Encoding": "gzip, deflate, identity",  # MacAttack adds identity
             "X-User-Agent": f"Model: {model}; Link: WiFi",
-            "Connection": "close",
+            "Connection": "keep-alive",  # MacAttack uses keep-alive
             "Pragma": "no-cache",
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Referer": f"{parsed.scheme}://{parsed.netloc}/",
         }
+        
+        # MacAttack X-Random Header wenn verfügbar
+        if self._token_random:
+            headers["X-Random"] = self._token_random
+        
+        return headers
     
     def _rotate_user_agent(self):
         """Rotiere zum nächsten User-Agent."""
         self._current_ua_index = (self._current_ua_index + 1) % len(self.USER_AGENT_POOL)
         logger.debug(f"AllinOne: Rotated to User-Agent index {self._current_ua_index}")
     
+    def _detect_portal_type(self) -> str:
+        """
+        Detect portal type via version.js (MacAttack style).
+        Returns endpoint path.
+        """
+        if self._detected_portal_type:
+            return self._detected_portal_type
+        
+        parsed = urlparse(self.portal_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # Check for type "portal" via /c/version.js
+        try:
+            version_url = f"{base_url}/c/version.js"
+            response = self.session.get(version_url, timeout=5, verify=False)
+            if response.status_code == 200:
+                import re
+                match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
+                if match:
+                    self._portal_version = match.group(1)
+                    self._detected_portal_type = "/portal.php"
+                    logger.debug(f"AllinOne: Detected portal type: PORTAL version: {self._portal_version}")
+                    return self._detected_portal_type
+        except Exception:
+            pass
+        
+        # Check for type "stalker_portal"
+        try:
+            version_url = f"{base_url}/stalker_portal/c/version.js"
+            response = self.session.get(version_url, timeout=5, verify=False)
+            if response.status_code == 200:
+                import re
+                match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
+                if match:
+                    self._portal_version = match.group(1)
+                    self._detected_portal_type = "/stalker_portal/server/load.php"
+                    logger.debug(f"AllinOne: Detected portal type: STALKER_PORTAL version: {self._portal_version}")
+                    return self._detected_portal_type
+        except Exception:
+            pass
+        
+        # Default
+        self._detected_portal_type = "/portal.php"
+        return self._detected_portal_type
+    
     def perform_handshake(self) -> HandshakeResult:
         """
-        AllinOne Handshake - Kombiniert alle Techniken.
+        AllinOne Handshake - Kombiniert alle Techniken (inkl. iSTB + MacAttack).
         
-        1. Standard Handshake versuchen
-        2. Bei "missing" Response: Prehash-Methode (EStalker)
-        3. Bei Fehler: User-Agent rotieren und erneut versuchen
+        1. Portal-Typ-Erkennung via version.js (MacAttack)
+        2. Standard Handshake versuchen
+        3. Bei token_random: X-Random Header für get_profile (MacAttack)
+        4. Bei "missing" Response: Prehash-Methode (EStalker)
+        5. Bei Fehler: User-Agent rotieren und erneut versuchen
         """
+        # Detect portal type first (MacAttack style)
+        detected_endpoint = self._detect_portal_type()
+        
+        # Prioritize detected endpoint
+        endpoints_to_try = [detected_endpoint] + [e for e in self.ENDPOINTS if e != detected_endpoint]
+        
         max_ua_attempts = len(self.USER_AGENT_POOL)
         
         for ua_attempt in range(max_ua_attempts):
             headers = self._get_base_headers()
             cookies = self._get_cookies()
             
-            for endpoint in self.ENDPOINTS:
+            for endpoint in endpoints_to_try:
                 url = f"{self.portal_url}{endpoint}"
                 params = {
                     "type": "stb",
                     "action": "handshake",
+                    "token": "",
                     "JsHttpRequest": "1-xml",
                 }
                 
                 try:
-                    # Versuche POST zuerst (wie EStalker)
-                    response = self.session.post(
+                    # Versuche GET zuerst (wie MacAttack)
+                    response = self.session.get(
                         url,
                         params=params,
                         headers=headers,
@@ -1267,16 +1343,28 @@ class AllinOneStrategy(BasePortalStrategy):
                         
                         token = js.get("token")
                         if token:
+                            # Store token_random for X-Random header (MacAttack)
+                            self._token_random = js.get("random", "")
+                            
+                            # If we have token_random, do extended get_profile (MacAttack/iSTB)
+                            if self._token_random:
+                                self._extended_get_profile(url, token, headers, cookies)
+                            
                             return HandshakeResult(
                                 success=True,
                                 token=token,
-                                token_random=js.get("random", ""),
+                                token_random=self._token_random,
                                 portal_type="stalker",
+                                portal_version=self._portal_version,
                                 engine_used=self.NAME,
+                                extra_data={
+                                    "has_x_random": bool(self._token_random),
+                                    "detected_endpoint": endpoint,
+                                }
                             )
                     
-                    # Fallback: GET (wie MacReplay)
-                    response = self.session.get(
+                    # Fallback: POST (wie EStalker)
+                    response = self.session.post(
                         url,
                         params=params,
                         headers=headers,
@@ -1297,11 +1385,17 @@ class AllinOneStrategy(BasePortalStrategy):
                         
                         token = js.get("token")
                         if token:
+                            self._token_random = js.get("random", "")
+                            
+                            if self._token_random:
+                                self._extended_get_profile(url, token, headers, cookies)
+                            
                             return HandshakeResult(
                                 success=True,
                                 token=token,
-                                token_random=js.get("random", ""),
+                                token_random=self._token_random,
                                 portal_type="stalker",
+                                portal_version=self._portal_version,
                                 engine_used=self.NAME,
                             )
                             
@@ -1315,6 +1409,77 @@ class AllinOneStrategy(BasePortalStrategy):
                 logger.info(f"AllinOne: Rotating User-Agent, attempt {ua_attempt + 2}/{max_ua_attempts}")
         
         return HandshakeResult(success=False, error="All endpoints and User-Agents failed", engine_used=self.NAME)
+    
+    def _extended_get_profile(self, url: str, token: str, headers: Dict[str, str], cookies: Dict[str, str]):
+        """
+        Extended get_profile with X-Random header (MacAttack/iSTB style).
+        This validates the token with extended authentication.
+        """
+        try:
+            import hashlib
+            import urllib.parse
+            
+            # Compute signature from token_random (MacAttack)
+            sig = hashlib.sha256(self._token_random.encode()).hexdigest().upper()
+            
+            # Build metrics (iSTB style)
+            metrics = {
+                "mac": self.identity.mac,
+                "sn": self.identity.serial_number,
+                "type": "STB",
+                "model": "MAG254",
+                "uid": self.identity.device_id,
+                "random": self._token_random,
+            }
+            metrics_encoded = urllib.parse.quote(json.dumps(metrics))
+            
+            # Extended headers with X-Random (MacAttack)
+            ext_headers = headers.copy()
+            ext_headers["Authorization"] = f"Bearer {token}"
+            ext_headers["X-Random"] = self._token_random
+            
+            # Try both api_signatures (263 for iSTB, 262 for MacAttack)
+            for api_sig in self.API_SIGNATURES:
+                profile_params = {
+                    "type": "stb",
+                    "action": "get_profile",
+                    "hd": "1",
+                    "ver": f"ImageDescription: 0.2.18-r23-250; ImageDate: Wed Aug 29 10:49:53 EEST 2018; PORTAL version: {self._portal_version}",
+                    "num_banks": "2",
+                    "sn": self.identity.serial_number,
+                    "stb_type": "MAG254",
+                    "client_type": "STB",
+                    "image_version": "218",
+                    "video_out": "hdmi",
+                    "device_id": self.identity.device_id,
+                    "device_id2": self.identity.device_id2,
+                    "sig": sig,
+                    "auth_second_step": "1",  # MacAttack uses 1
+                    "hw_version": "1.7-BD-00",
+                    "not_valid_token": "0",
+                    "metrics": metrics_encoded,
+                    "hw_version_2": self.identity.hw_version_2,
+                    "timestamp": str(int(time.time())),
+                    "api_sig": str(api_sig),
+                    "prehash": self.identity.prehash,
+                    "JsHttpRequest": "1-xml",
+                }
+                
+                response = self.session.get(
+                    url,
+                    params=profile_params,
+                    headers=ext_headers,
+                    cookies=cookies,
+                    timeout=self.timeout,
+                    verify=False
+                )
+                
+                if response.status_code == 200:
+                    logger.debug(f"AllinOne: Extended get_profile successful with api_sig={api_sig}")
+                    return
+                    
+        except Exception as e:
+            logger.debug(f"AllinOne: Extended get_profile failed: {e}")
     
     def _prehash_handshake(self, url: str, headers: Dict[str, str], 
                            cookies: Dict[str, str]) -> HandshakeResult:
@@ -1590,7 +1755,7 @@ class UnifiedPortalEngine:
         PortalEngine.MACATTACK: None,  # Lazy-loaded to avoid circular imports
     }
     
-    # Optimized order for AUTO mode - fastest strategies first, skip allinone (redundant)
+    # Optimized order for AUTO mode - fastest strategies first, AllinOne as last resort
     AUTO_STRATEGY_ORDER = [
         PortalEngine.MACREPLAY,   # Fastest, most common
         PortalEngine.OB2_2025,    # Fast, good compatibility
@@ -1598,7 +1763,7 @@ class UnifiedPortalEngine:
         PortalEngine.BOXPIRATE,   # Medium speed
         PortalEngine.ISTB,        # iSTB iOS Emulator - extended validation
         PortalEngine.MACATTACK,   # MacAttack v4.7.6 - X-Random header support
-        # AllinOne skipped in AUTO - it's redundant and slow
+        PortalEngine.ALLINONE,    # Last resort - combines ALL techniques (iSTB + MacAttack + all others)
     ]
     
     # Cache für erfolgreiche Strategien pro Portal

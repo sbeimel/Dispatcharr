@@ -993,12 +993,13 @@ export default class API {
       errorNotification('Failed to refresh all M3U accounts', e);
     }
   }
-  static async refreshVODContent(accountId) {
+  static async refreshVODContent(accountId, refreshType = 'full') {
     try {
       const response = await request(
         `${host}/api/m3u/accounts/${accountId}/refresh-vod/`,
         {
           method: 'POST',
+          body: { refresh_type: refreshType },
         }
       );
       return response;

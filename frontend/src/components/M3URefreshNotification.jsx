@@ -132,6 +132,14 @@ export default function M3URefreshNotification() {
       case 'vod_refresh':
         message = 'VOD content refresh';
         break;
+      
+      case 'category_refresh':
+        message = 'VOD categories loading';
+        break;
+      
+      case 'vod_import':
+        message = 'VOD content import';
+        break;
     }
 
     if (taskProgress == 0) {
@@ -153,6 +161,14 @@ export default function M3URefreshNotification() {
         // VOD refresh completed, trigger VOD categories refresh
         fetchPlaylists(); // Refresh playlist data to show updated VOD info
         fetchCategories(); // Refresh VOD categories to make them visible
+      } else if (data.action == 'category_refresh') {
+        // VOD categories loaded, refresh channel groups to show them
+        fetchChannelGroups(); // Refresh to show new VOD category groups
+        fetchPlaylists(); // Refresh playlist data
+      } else if (data.action == 'vod_import') {
+        // VOD content import completed
+        fetchPlaylists(); // Refresh playlist data
+        fetchCategories(); // Refresh VOD categories
       }
     }
 
