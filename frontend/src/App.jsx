@@ -20,7 +20,6 @@ import LogosPage from './pages/Logos';
 import VODsPage from './pages/VODs';
 import { FailoverTestPage } from './components/failover-test';
 import MACPortalPage from './pages/MACPortalPage';
-import PredictiveFailoverPage from './pages/PredictiveFailoverPage';
 import useAuthStore from './store/auth';
 import useLogosStore from './store/logos';
 import FloatingVideo from './components/FloatingVideo';
@@ -158,7 +157,6 @@ const App = () => {
                         <Route path="/vods" element={<VODsPage />} />
                         <Route path="/failover-test" element={<FailoverTestPage />} />
                         <Route path="/mac-portal" element={<MACPortalPage />} />
-                        <Route path="/predictive-failover" element={<PredictiveFailoverPage />} />
                       </>
                     ) : (
                       <Route path="/login" element={<Login needsSuperuser />} />

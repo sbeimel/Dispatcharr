@@ -3,8 +3,6 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from rest_framework.permissions import AllowAny
 
-# Import predictive failover URLs
-from apps.proxy.ts_proxy.predictive.api import get_predictive_failover_urls
 # Import Engine Benchmark API (simple APIView)
 from apps.m3u.api.engine_benchmark_api import get_engine_benchmark_urls
 
@@ -32,9 +30,6 @@ urlpatterns = [
     path('core/', include(('core.api_urls', 'core'), namespace='core')),
     path('plugins/', include(('apps.plugins.api_urls', 'plugins'), namespace='plugins')),
     path('vod/', include(('apps.vod.api_urls', 'vod'), namespace='vod')),
-    
-    # Predictive Failover API
-    path('', include(get_predictive_failover_urls())),
     
     # Engine Benchmark API (simple APIView - works reliably)
     path('', include(get_engine_benchmark_urls())),

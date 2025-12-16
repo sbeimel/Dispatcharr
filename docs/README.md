@@ -9,8 +9,6 @@ Diese Dokumentation beschreibt die erweiterten Features von Dispatcharr.
 | Datei | Beschreibung |
 |-------|--------------|
 | [FAILOVER_TEST_PAGE.md](FAILOVER_TEST_PAGE.md) | Anleitung zur Failover Test Page |
-| [MAC_PORTAL_IMPROVEMENTS.md](MAC_PORTAL_IMPROVEMENTS.md) | MAC Portal Verbesserungen |
-| [PREDICTIVE_FAILOVER.md](PREDICTIVE_FAILOVER.md) | Predictive Failover System |
 
 ## Specs
 
@@ -18,7 +16,6 @@ Die technischen Spezifikationen befinden sich in `.kiro/specs/`:
 
 - `failover-test-page/` - Failover Test Page Spec
 - `mac-portal-improvements/` - MAC Portal Improvements Spec
-- `predictive-failover/` - Predictive Failover Spec
 
 ## Quick Links
 

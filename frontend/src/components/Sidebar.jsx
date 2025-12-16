@@ -17,7 +17,6 @@ import {
   FileImage,
   FlaskConical,
   Router,
-  BrainCircuit,
 } from 'lucide-react';
 import {
   Avatar,
@@ -170,13 +169,7 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
             icon: <Router size={20} />,
             path: '/mac-portal',
           },
-          {
-            label: 'Predictive Failover',
-            icon: <BrainCircuit size={20} />,
-            path: '/predictive-failover',
-            disabled: true,
-            tooltip: 'Coming Soon - Not yet implemented',
-          },
+
           {
             label: 'Settings',
             icon: <LucideSettings size={20} />,

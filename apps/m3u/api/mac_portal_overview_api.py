@@ -101,17 +101,17 @@ def _get_failover_counts_by_portal(hours: int = 24) -> Dict[int, int]:
         Dict mapping portal_id -> failover_count
     """
     try:
-        from apps.proxy.ts_proxy.predictive.models import PredictiveFailoverEvent
+        from apps.m3u.mac_portal_models import FailoverEvent
         from django.db.models import Count
         
         since = timezone.now() - timedelta(hours=hours)
         
         # Gruppiere Failover-Events nach m3u_account
         failover_counts = (
-            PredictiveFailoverEvent.objects
+            FailoverEvent.objects
             .filter(
                 timestamp__gte=since,
-                event_type__in=['failover_triggered', 'failover_success', 'stream_switch']
+                failover_type__in=['mac', 'stream']
             )
             .values('m3u_account_id')
             .annotate(count=Count('id'))

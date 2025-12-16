@@ -2964,7 +2964,7 @@ export default class API {
     }
   }
 
-  // Predictive Failover API Methods
+  // Generic API Methods
   static get(url) {
     return request(`${host}${url}`);
   }

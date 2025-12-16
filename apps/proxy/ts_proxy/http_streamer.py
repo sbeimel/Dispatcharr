@@ -25,7 +25,7 @@ class HTTPStreamReader:
         self.pipe_read = None
         self.pipe_write = None
         self.running = False
-        # Predictive failover metrics
+        # Stream metrics
         self.response_time_ms = None  # Time to first byte in milliseconds
         self.connection_error = None  # Error message if connection failed
 

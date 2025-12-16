@@ -18,7 +18,6 @@
 | Channels | `apps/channels/` | Channel Management |
 | EPG | `apps/epg/` | Electronic Program Guide |
 | VOD | `apps/vod/` | Video on Demand |
-| Predictive Failover | `apps/proxy/ts_proxy/predictive/` | ML-basiertes Failover |
 
 ---
 
@@ -102,12 +101,8 @@ stream_manager.py
     │   ├── M3UAccount (models)
     │   ├── M3UAccountProfile (models)
     │   └── M3UAccountMac (models)
-    ├── mac_portal_client.py
-    │   └── cloudscraper (optional)
-    └── predictive/ (optional)
-        ├── metrics_collector.py
-        ├── risk_calculator.py
-        └── pattern_analyzer.py
+    └── mac_portal_client.py
+        └── cloudscraper (optional)
 ```
 
 ### Zirkuläre Import-Risiken
