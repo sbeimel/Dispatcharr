@@ -322,7 +322,7 @@ def _get_mac_and_token(account) -> tuple:
 
 def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> str:
     """
-    Save VOD item as Stream - basierend auf MacReplayXC INSERT OR REPLACE INTO vod_items.
+    Save VOD item as Movie/Series - wie XC Accounts.
     
     Args:
         account: M3UAccount
@@ -332,6 +332,7 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
     
     Returns: 'created', 'updated', 'skipped', or 'error'
     """
+    from apps.vod.models import Movie, Series, VODCategory, M3UMovieRelation, M3USeriesRelation, VODLogo
     from apps.channels.models import Stream
     
     try:
@@ -347,55 +348,154 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
         # Sanitize name
         name = sanitize_name(name)
         
-        # Build stream URL (cmd is usually the stream path)
-        # For MAC portals, cmd is typically like: "/ch/12345" or full URL
+        # Build stream URL
         if cmd.startswith('http'):
             stream_url = cmd
         else:
-            # Build full URL from portal base + cmd
             base_url = account.server_url.rstrip('/')
             if not cmd.startswith('/'):
                 cmd = '/' + cmd
             stream_url = f"{base_url}{cmd}"
         
         # Extract metadata
-        logo_url = item.get('screenshot') or item.get('poster') or item.get('logo') or ''
+        logo_url = item.get('screenshot') or item.get('screenshot_uri') or item.get('poster') or item.get('logo') or ''
         description = item.get('description') or item.get('desc') or ''
-        year = item.get('year') or item.get('releasedate') or ''
-        genre = item.get('genre') or ''
+        year_str = item.get('year') or item.get('releasedate') or ''
+        genre = item.get('genre') or item.get('genre_str') or ''
         rating = item.get('rating') or item.get('rating_imdb') or ''
-        duration = item.get('duration') or item.get('length') or ''
+        duration_str = item.get('time') or item.get('duration') or item.get('length') or ''
         
-        # Custom properties for VOD metadata
-        custom_props = {
-            'is_vod': True,
-            'vod_type': vod_type,
-            'portal_item_id': item_id,
-            'portal_category_id': group.custom_properties.get('portal_category_id'),
-            'description': description,
-            'year': year,
-            'genre': genre,
-            'rating': rating,
-            'duration': duration,
-        }
+        # Parse year
+        year = None
+        if year_str:
+            try:
+                year = int(str(year_str)[:4])  # Extract first 4 digits
+            except (ValueError, TypeError):
+                pass
         
-        # Create or update Stream
-        stream, created = Stream.objects.update_or_create(
-            m3u_account=account,
-            url=stream_url,
+        # Parse duration (convert to seconds)
+        duration_secs = None
+        if duration_str:
+            try:
+                # Duration can be in format "HH:MM:SS" or just seconds
+                if ':' in str(duration_str):
+                    parts = str(duration_str).split(':')
+                    if len(parts) == 3:
+                        duration_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    elif len(parts) == 2:
+                        duration_secs = int(parts[0]) * 60 + int(parts[1])
+                else:
+                    duration_secs = int(duration_str)
+            except (ValueError, TypeError):
+                pass
+        
+        # Get or create logo
+        logo = None
+        if logo_url:
+            logo, _ = VODLogo.objects.get_or_create(
+                url=logo_url,
+                defaults={'name': name}
+            )
+        
+        # Get or create VOD category (from ChannelGroup)
+        portal_category_id = group.custom_properties.get('portal_category_id')
+        category, _ = VODCategory.objects.get_or_create(
+            name=group.name,
             defaults={
-                'name': name,
-                'logo_url': logo_url,
-                'channel_group': group,
-                'custom_properties': custom_props,
-                'last_seen': timezone.now(),
+                'category_type': 'movie' if vod_type == 'vod_movie' else 'series',
+                'custom_properties': {
+                    'portal_category_id': portal_category_id,
+                    'is_mac_category': True,
+                }
             }
         )
+        
+        # Custom properties
+        custom_props = {
+            'portal_item_id': item_id,
+            'portal_category_id': portal_category_id,
+            'stream_url': stream_url,
+            'cmd': cmd,
+            'is_mac_vod': True,
+        }
+        
+        # Create Movie or Series
+        if vod_type == 'vod_series' or group.group_type == 'vod_series':
+            # Create Series
+            series, created = Series.objects.update_or_create(
+                name=name,
+                year=year,
+                defaults={
+                    'description': description,
+                    'rating': rating,
+                    'genre': genre,
+                    'logo': logo,
+                    'custom_properties': custom_props,
+                }
+            )
+            
+            # Create relation to M3U account and category
+            M3USeriesRelation.objects.get_or_create(
+                series=series,
+                m3u_account=account,
+                category=category,
+                defaults={'custom_properties': {}}
+            )
+            
+            # Also create a Stream for playback
+            Stream.objects.update_or_create(
+                m3u_account=account,
+                url=stream_url,
+                defaults={
+                    'name': name,
+                    'logo_url': logo_url,
+                    'channel_group': group,
+                    'custom_properties': {'vod_series_id': series.id, **custom_props},
+                    'last_seen': timezone.now(),
+                }
+            )
+        else:
+            # Create Movie
+            movie, created = Movie.objects.update_or_create(
+                name=name,
+                year=year,
+                defaults={
+                    'description': description,
+                    'rating': rating,
+                    'genre': genre,
+                    'duration_secs': duration_secs,
+                    'logo': logo,
+                    'custom_properties': custom_props,
+                }
+            )
+            
+            # Create relation to M3U account and category
+            M3UMovieRelation.objects.get_or_create(
+                movie=movie,
+                m3u_account=account,
+                category=category,
+                defaults={'custom_properties': {}}
+            )
+            
+            # Also create a Stream for playback
+            Stream.objects.update_or_create(
+                m3u_account=account,
+                url=stream_url,
+                defaults={
+                    'name': name,
+                    'logo_url': logo_url,
+                    'channel_group': group,
+                    'custom_properties': {'vod_movie_id': movie.id, **custom_props},
+                    'last_seen': timezone.now(),
+                }
+            )
         
         return 'created' if created else 'updated'
         
     except Exception as e:
         logger.error(f"Error saving VOD item {item.get('id')}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return 'error'
 
 
@@ -697,12 +797,11 @@ def refresh_mac_portal_selected_vod(account_id):
             stats["categories"] += 1
             logger.info(f"Importing VOD items for category {category_id} ({group.name})")
             
-            # Get VOD items from portal (with pagination)
+            # Get VOD items from portal (with pagination) - wie MacReplayXC
             page = 1
-            max_pages = 10  # Safety limit
             category_items = 0
             
-            while page <= max_pages:
+            while True:
                 # Get items based on type
                 if vod_type == 'vod_series' or group.group_type == 'vod_series':
                     items = vod_client.get_series_items(category_id, page)
@@ -729,11 +828,18 @@ def refresh_mac_portal_selected_vod(account_id):
                 
                 stats["items"] += len(items)
                 
-                # Check if there are more pages
-                if len(items) < 14:  # MacReplayXC uses 14 items per page
+                # Check if there are more pages (wie MacReplayXC)
+                # Stop if: less than 14 items (last page) or no items at all
+                if len(items) < 14:
+                    logger.debug(f"Last page reached for category {group.name}: {len(items)} items")
                     break
                 
                 page += 1
+                
+                # Safety limit to prevent infinite loops (very high limit)
+                if page > 1000:
+                    logger.warning(f"Safety limit reached for category {group.name} at page {page}")
+                    break
             
             logger.info(f"Imported {category_items} items for category {group.name}")
         
