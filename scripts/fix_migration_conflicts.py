@@ -10,10 +10,16 @@ Run this BEFORE `python manage.py migrate` to prevent conflicts.
 """
 import os
 import sys
-import django
+
+# Ensure /app is in the Python path (for Docker environment)
+app_path = '/app'
+if app_path not in sys.path:
+    sys.path.insert(0, app_path)
 
 # Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
+
+import django
 django.setup()
 
 from django.db import connection
