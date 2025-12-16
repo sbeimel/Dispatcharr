@@ -165,8 +165,14 @@ const PortalCard = ({ portal, onRefresh }) => {
     if (!portal.id) return;
     setBenchmarking(true);
     try {
-      // New simple benchmark API
-      const response = await API.post(`/api/m3u/benchmark/${portal.id}/run/`);
+      // New simple benchmark API with extended timeout (benchmark can take 2+ minutes)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
+      
+      const response = await API.post(`/api/m3u/benchmark/${portal.id}/run/`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
       if (response.data?.fastest) {
         setFastestEngine({
           engine: response.data.fastest,
@@ -186,11 +192,21 @@ const PortalCard = ({ portal, onRefresh }) => {
         });
       }
     } catch (error) {
-      notifications.show({
-        title: 'Benchmark Failed',
-        message: error.response?.data?.error || 'Failed to run benchmark',
-        color: 'red',
-      });
+      if (error.name === 'AbortError') {
+        notifications.show({
+          title: 'Benchmark Timeout',
+          message: 'Benchmark took too long. Results may still be saved - try refreshing.',
+          color: 'yellow',
+        });
+        // Try to load cached result anyway
+        loadCachedBenchmark();
+      } else {
+        notifications.show({
+          title: 'Benchmark Failed',
+          message: error.response?.data?.error || error.message || 'Failed to run benchmark',
+          color: 'red',
+        });
+      }
     } finally {
       setBenchmarking(false);
     }
