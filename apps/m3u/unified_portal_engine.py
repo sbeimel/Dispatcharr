@@ -44,6 +44,7 @@ class PortalEngine(Enum):
     BOXPIRATE = "boxpirate"          # BoxPirate Dreambox
     ALLINONE = "allinone"            # Best-of-All kombiniert
     ISTB = "istb"                    # iSTB iOS Emulator Style
+    MACATTACK = "macattack"          # MacAttack v4.7.6 Style (X-Random, api_sig 262)
     AUTO = "auto"                    # Automatische Erkennung (versucht alle Strategien)
 
 
@@ -1586,6 +1587,7 @@ class UnifiedPortalEngine:
         PortalEngine.OB2_2025: OB2_2025Strategy,
         PortalEngine.ALLINONE: AllinOneStrategy,
         PortalEngine.ISTB: None,  # Lazy-loaded to avoid circular imports
+        PortalEngine.MACATTACK: None,  # Lazy-loaded to avoid circular imports
     }
     
     # Optimized order for AUTO mode - fastest strategies first, skip allinone (redundant)
@@ -1595,6 +1597,7 @@ class UnifiedPortalEngine:
         PortalEngine.ESTALKER,    # Medium speed
         PortalEngine.BOXPIRATE,   # Medium speed
         PortalEngine.ISTB,        # iSTB iOS Emulator - extended validation
+        PortalEngine.MACATTACK,   # MacAttack v4.7.6 - X-Random header support
         # AllinOne skipped in AUTO - it's redundant and slow
     ]
     
@@ -1653,6 +1656,12 @@ class UnifiedPortalEngine:
             from apps.m3u.portal_engines.istb import iSTBStrategy
             strategy_class = iSTBStrategy
             self.STRATEGIES[PortalEngine.ISTB] = iSTBStrategy
+        
+        # Lazy-load MacAttackStrategy to avoid circular imports
+        if engine == PortalEngine.MACATTACK and strategy_class is None:
+            from apps.m3u.portal_engines.macattack import MacAttackStrategy
+            strategy_class = MacAttackStrategy
+            self.STRATEGIES[PortalEngine.MACATTACK] = MacAttackStrategy
         
         if not strategy_class:
             raise ValueError(f"Unknown engine: {engine}")
@@ -1918,12 +1927,33 @@ class UnifiedPortalEngine:
             },
         ]
         
+        # Lazy-loaded strategy info for engines not yet imported
+        lazy_loaded_info = {
+            PortalEngine.ISTB: {
+                "name": "ISTB",
+                "description": "iSTB iOS Emulator Style - Extended STB validation with prehash, metrics, hw_version_2"
+            },
+            PortalEngine.MACATTACK: {
+                "name": "MACATTACK",
+                "description": "MacAttack v4.7.6 Style - X-Random header, api_sig 262, auth_second_step 1"
+            },
+        }
+        
         for engine, strategy_class in cls.STRATEGIES.items():
-            engines.append({
-                "id": engine.value,
-                "name": strategy_class.NAME.upper(),
-                "description": strategy_class.DESCRIPTION
-            })
+            if strategy_class is None:
+                # Use lazy-loaded info
+                info = lazy_loaded_info.get(engine, {"name": engine.value.upper(), "description": "Lazy-loaded strategy"})
+                engines.append({
+                    "id": engine.value,
+                    "name": info["name"],
+                    "description": info["description"]
+                })
+            else:
+                engines.append({
+                    "id": engine.value,
+                    "name": strategy_class.NAME.upper(),
+                    "description": strategy_class.DESCRIPTION
+                })
         
         return engines
     

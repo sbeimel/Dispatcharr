@@ -134,6 +134,7 @@ class MACPortalGlobalSettings(models.Model):
         ('boxpirate', 'BoxPirate (Dreambox Style)'),
         ('ob2_2025', 'OB2_2025 (Extended Metrics)'),
         ('istb', 'iSTB (iOS Emulator Style)'),
+        ('macattack', 'MacAttack (X-Random, api_sig 262)'),
     ]
     portal_engine = models.CharField(
         max_length=20,

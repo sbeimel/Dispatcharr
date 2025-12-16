@@ -83,6 +83,14 @@ const PORTAL_ENGINES = [
     color: 'pink',
     badge: 'New',
   },
+  {
+    value: 'macattack',
+    label: 'MacAttack (X-Random)',
+    description: 'MacAttack v4.7.6 style with X-Random header, api_sig 262, auth_second_step 1',
+    icon: IconFlask,
+    color: 'red',
+    badge: 'New',
+  },
 ];
 
 const PortalEngineSelector = ({ value, onChange, disabled = false }) => {
@@ -148,6 +156,12 @@ const PortalEngineSelector = ({ value, onChange, disabled = false }) => {
         </Text>
         <Text size="xs">
           • <strong>OB2_2025:</strong> Experimental, uses api_signature 263
+        </Text>
+        <Text size="xs">
+          • <strong>iSTB:</strong> iOS Emulator style, api_signature 263, prehash, metrics
+        </Text>
+        <Text size="xs">
+          • <strong>MacAttack:</strong> X-Random header, api_sig 262, auth_second_step 1
         </Text>
       </Alert>
     </Stack>
