@@ -167,6 +167,8 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     auto_enable_new_groups_live = serializers.BooleanField(required=False, write_only=True)
     auto_enable_new_groups_vod = serializers.BooleanField(required=False, write_only=True)
     auto_enable_new_groups_series = serializers.BooleanField(required=False, write_only=True)
+    # Allow unlimited MAC addresses (TextField in model)
+    mac_address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = M3UAccount

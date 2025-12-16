@@ -110,8 +110,7 @@ class M3UAccount(models.Model):
         default=0,
         help_text="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content.",
     )
-    mac_address = models.CharField(
-        max_length=255,
+    mac_address = models.TextField(
         blank=True,
         null=True,
         help_text="MAC address(es) for STB/MAC portal accounts. Multiple MACs can be separated by spaces or commas.",
