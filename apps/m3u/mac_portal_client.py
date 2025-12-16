@@ -1699,6 +1699,11 @@ class UnifiedMacPortalClient:
                 )
                 
                 # Step 5: Detect Portal Type (only on first successful engine)
+                # Based on ob2_2025 scripts analysis:
+                # - XUI: Uses GET, /c/ path, PORTAL version in profile
+                # - Xtream: Uses POST, has player_api.php, live.php in stream URLs, can extract login/password
+                # - Stalker: Uses GET, /stalker_portal/c/ path, traditional middleware
+                # - NXT: Newer Xtream variant
                 if result['full_success'] and portal_info['portal_type'] == 'unknown':
                     try:
                         # First check if engine detected portal type/version
@@ -1708,38 +1713,95 @@ class UnifiedMacPortalClient:
                         if hasattr(client, 'portal_version') and client.portal_version:
                             portal_info['portal_version'] = client.portal_version
                         
-                        # Try to detect portal type from channel data
+                        # Detect from URL patterns (most reliable)
+                        url_lower = portal_url.lower()
+                        if portal_info['portal_type'] == 'unknown':
+                            if '/stalker_portal/' in url_lower:
+                                portal_info['portal_type'] = 'stalker'
+                                portal_info['detected_by'] = 'url_pattern'
+                            elif '/c/' in url_lower and 'stalker' not in url_lower:
+                                # XUI typically uses /c/ path without stalker_portal
+                                portal_info['portal_type'] = 'xui'
+                                portal_info['detected_by'] = 'url_pattern'
+                            elif 'nxt' in url_lower:
+                                portal_info['portal_type'] = 'nxt'
+                                portal_info['detected_by'] = 'url_pattern'
+                        
+                        # Detect from stream URL pattern (from create_link result)
+                        if portal_info['portal_type'] == 'unknown' and result.get('stream_link_ok'):
+                            # Get the actual stream link if available
+                            stream_link = None
+                            if test_cmd:
+                                try:
+                                    stream_link = client.create_link(test_cmd)
+                                except Exception:
+                                    pass
+                            
+                            if stream_link:
+                                stream_lower = stream_link.lower()
+                                # Xtream pattern: /live/username/password/channel.ts or live.php
+                                if 'live.php' in stream_lower:
+                                    portal_info['portal_type'] = 'xtream'
+                                    portal_info['detected_by'] = 'stream_url'
+                                elif re.search(r'/live/[^/]+/[^/]+/', stream_lower):
+                                    portal_info['portal_type'] = 'xtream'
+                                    portal_info['detected_by'] = 'stream_url'
+                                # XUI pattern: direct stream without /live/ path
+                                elif re.search(r':\d+/[^/]+\.(ts|m3u8)', stream_lower):
+                                    portal_info['portal_type'] = 'xui'
+                                    portal_info['detected_by'] = 'stream_url'
+                        
+                        # Detect from channel cmd pattern
                         if channels and len(channels) > 0 and portal_info['portal_type'] == 'unknown':
                             first_ch = channels[0]
                             cmd = first_ch.get('cmd', '')
                             
-                            # Detect from stream URL pattern
-                            if '/live/' in cmd and re.search(r'/live/[^/]+/[^/]+/', cmd):
-                                portal_info['portal_type'] = 'xtream'
-                                portal_info['detected_by'] = engine_name
-                            elif 'ffmpeg' in cmd.lower() or 'http://localhost' in cmd:
+                            # Stalker pattern: ffmpeg http://localhost/ch/ID_
+                            if 'ffmpeg' in cmd.lower() or 'http://localhost' in cmd:
                                 portal_info['portal_type'] = 'stalker'
-                                portal_info['detected_by'] = engine_name
+                                portal_info['detected_by'] = 'cmd_pattern'
+                            # Xtream pattern: /live/ in cmd
+                            elif '/live/' in cmd and re.search(r'/live/[^/]+/[^/]+/', cmd):
+                                portal_info['portal_type'] = 'xtream'
+                                portal_info['detected_by'] = 'cmd_pattern'
                         
-                        # Try to get profile for more info (version, XUI detection)
-                        if hasattr(client, 'get_profile') and not portal_info.get('portal_version'):
+                        # Try to get profile for version and additional detection
+                        if hasattr(client, 'get_profile'):
                             try:
                                 profile = client.get_profile(token) if token else None
                                 if profile:
                                     js = profile.get('js', {})
-                                    # XUI detection
-                                    if js.get('phone') and 'exp' in str(js.get('phone', '')).lower():
-                                        portal_info['portal_type'] = 'xui'
-                                        portal_info['detected_by'] = engine_name
-                                    # Version detection
-                                    if js.get('portal_version'):
-                                        portal_info['portal_version'] = js.get('portal_version')
-                                    elif js.get('version'):
-                                        portal_info['portal_version'] = js.get('version')
+                                    
+                                    # Version detection from profile
+                                    if not portal_info.get('portal_version'):
+                                        for key in ['portal_version', 'version', 'PORTAL version']:
+                                            if js.get(key):
+                                                portal_info['portal_version'] = js.get(key)
+                                                break
+                                    
+                                    # XUI detection: has login/password in profile (Xtream-based)
+                                    if portal_info['portal_type'] == 'unknown':
+                                        if js.get('login') and js.get('password'):
+                                            # Has credentials = Xtream-based (XUI or Xtream)
+                                            # Check if it's XUI by URL pattern
+                                            if '/c/' in url_lower:
+                                                portal_info['portal_type'] = 'xui'
+                                            else:
+                                                portal_info['portal_type'] = 'xtream'
+                                            portal_info['detected_by'] = 'profile_credentials'
+                                        elif js.get('ls'):
+                                            # Has ls (license server) = traditional Stalker
+                                            portal_info['portal_type'] = 'stalker'
+                                            portal_info['detected_by'] = 'profile_ls'
                             except Exception:
                                 pass
                         
-                        logger.debug(f"  Portal Type: {portal_info['portal_type']}, Version: {portal_info.get('portal_version')}")
+                        # Final fallback based on URL
+                        if portal_info['portal_type'] == 'unknown':
+                            portal_info['portal_type'] = 'stalker'  # Most MAC portals are Stalker-based
+                            portal_info['detected_by'] = 'default'
+                        
+                        logger.debug(f"  Portal Type: {portal_info['portal_type']} (detected by: {portal_info.get('detected_by')}), Version: {portal_info.get('portal_version')}")
                     except Exception as e:
                         logger.debug(f"  Portal type detection failed: {e}")
                 
@@ -2018,8 +2080,28 @@ class UnifiedMacPortalClient:
                             title = g.get('title') or g.get('name')
                             if gid and title:
                                 genres_map[str(gid)] = title
-            except Exception:
-                pass
+                        logger.info(f"Loaded {len(genres_map)} genres for group mapping")
+            except Exception as e:
+                logger.warning(f"Could not load genres for group mapping: {e}")
+        
+        # If no genres loaded, try to build map from channel data itself
+        if not genres_map:
+            logger.info("Building genres map from channel data...")
+            for ch in raw_channels:
+                # Try to extract genre info from channel
+                genre_id = ch.get('tv_genre_id') or ch.get('genre_id')
+                genre_title = (
+                    ch.get('tv_genre_title') or 
+                    ch.get('genre_title') or 
+                    ch.get('category_name') or
+                    ch.get('cat_name') or
+                    ch.get('group_name') or
+                    ch.get('group_title')
+                )
+                if genre_id and genre_title:
+                    genres_map[str(genre_id)] = genre_title
+            if genres_map:
+                logger.info(f"Built genres map with {len(genres_map)} entries from channel data")
         
         for ch in raw_channels:
             ch_id = ch.get('id')
@@ -2029,15 +2111,29 @@ class UnifiedMacPortalClient:
             if not cmd:
                 continue
             
-            # Detect group title
-            group_title = (
-                ch.get('tv_genre_title') or
-                ch.get('genre_title') or
-                ch.get('category_name') or
-                genres_map.get(str(ch.get('tv_genre_id', ''))) or
-                genres_map.get(str(ch.get('genre_id', ''))) or
-                'MAC'
-            )
+            # Detect group title - try multiple sources
+            group_title = None
+            
+            # First try direct title fields
+            for key in ['tv_genre_title', 'genre_title', 'category_name', 'cat_name', 
+                        'group_name', 'group_title', 'genre_name']:
+                val = ch.get(key)
+                if val and isinstance(val, str) and val.strip():
+                    group_title = val.strip()
+                    break
+            
+            # If no direct title, try to look up by ID
+            if not group_title:
+                genre_id = ch.get('tv_genre_id') or ch.get('genre_id') or ch.get('cat_id')
+                if genre_id:
+                    group_title = genres_map.get(str(genre_id))
+                    if not group_title:
+                        # Use numeric ID as fallback group name
+                        group_title = f"Group {genre_id}"
+            
+            # Final fallback
+            if not group_title:
+                group_title = 'MAC'
             
             # Create mac:// URL
             proxy_str = self.proxy or ""
@@ -2054,6 +2150,15 @@ class UnifiedMacPortalClient:
                 'cmd': cmd,
                 'raw': ch,
             })
+        
+        # Log group distribution for debugging
+        group_counts = {}
+        for ch in normalized:
+            g = ch.get('group', 'Unknown')
+            group_counts[g] = group_counts.get(g, 0) + 1
+        logger.info(f"Normalized {len(normalized)} channels into {len(group_counts)} groups")
+        if len(group_counts) <= 5:
+            logger.info(f"Group distribution: {group_counts}")
         
         return normalized
     

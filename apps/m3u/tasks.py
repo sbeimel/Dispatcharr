@@ -529,6 +529,24 @@ def process_groups(account, groups):
         for group in ChannelGroup.objects.filter(name__in=groups.keys())
     }
     logger.info(f"Currently {len(existing_groups)} existing groups")
+    
+    # Get count of ALL existing relationships for this account (for safety check)
+    total_existing_relationships = ChannelGroupM3UAccount.objects.filter(
+        m3u_account=account
+    ).count()
+    
+    # SAFETY CHECK: If we have many existing groups but very few new groups,
+    # this likely indicates a problem with group extraction (e.g., all channels
+    # got assigned to a single fallback group like "MAC" or "Default Group")
+    # In this case, skip the orphan deletion to prevent data loss
+    skip_orphan_deletion = False
+    if total_existing_relationships > 10 and len(groups) <= 3:
+        logger.warning(
+            f"SAFETY CHECK: Account {account.id} has {total_existing_relationships} existing group relationships "
+            f"but only {len(groups)} groups were returned. This may indicate a group extraction problem. "
+            f"Skipping orphan deletion to prevent data loss. Groups returned: {list(groups.keys())}"
+        )
+        skip_orphan_deletion = True
 
     # Check if we should auto-enable new groups based on account settings
     account_custom_props = account.custom_properties or {}
@@ -636,8 +654,8 @@ def process_groups(account, groups):
         ChannelGroupM3UAccount.objects.bulk_update(relations_to_update, ['custom_properties'])
         logger.info(f"Updated {len(relations_to_update)} existing group relationships with new xc_id values for account {account.id}")
 
-    # Delete orphaned relationships
-    if relations_to_delete:
+    # Delete orphaned relationships (unless safety check triggered)
+    if relations_to_delete and not skip_orphan_deletion:
         ChannelGroupM3UAccount.objects.filter(
             id__in=[rel.id for rel in relations_to_delete]
         ).delete()
@@ -666,6 +684,8 @@ def process_groups(account, groups):
             deleted_groups = list(ChannelGroup.objects.filter(id__in=orphaned_group_ids).values_list('name', flat=True))
             ChannelGroup.objects.filter(id__in=orphaned_group_ids).delete()
             logger.info(f"Deleted {len(orphaned_group_ids)} orphaned groups that had no remaining associations: {deleted_groups}")
+    elif relations_to_delete and skip_orphan_deletion:
+        logger.warning(f"SKIPPED deletion of {len(relations_to_delete)} group relationships due to safety check")
 
 
 def collect_xc_streams(account_id, enabled_groups):

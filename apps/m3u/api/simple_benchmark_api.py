@@ -19,6 +19,62 @@ from rest_framework.response import Response
 logger = logging.getLogger(__name__)
 
 
+def _detect_portal_type_from_url(portal_url: str) -> str:
+    """
+    Detect portal type from URL patterns.
+    
+    Portal Types (based on ob2_2025 scripts analysis):
+    - stalker: Traditional Stalker portal (/stalker_portal/, ministra)
+    - xui: XUI One panel (uses /c/ path, GET requests, PORTAL version in profile)
+    - xtream: Xtream Codes panel (uses POST, has player_api.php, live.php in streams)
+    - nxt: NXT panel (newer Xtream variant)
+    - unknown: Could not determine
+    
+    Key differences from ob2_2025:
+    - XUI: GET requests, /c/ path, PORTAL version in get_profile
+    - Xtream: POST requests, has player_api.php, can extract login/password
+    - Stalker: GET requests, /stalker_portal/c/ path
+    """
+    if not portal_url:
+        return 'unknown'
+    
+    url_lower = portal_url.lower()
+    
+    # Check for Stalker patterns (most specific first)
+    # Stalker uses /stalker_portal/ path
+    if '/stalker_portal/' in url_lower or 'ministra' in url_lower:
+        return 'stalker'
+    
+    # Check for NXT patterns
+    if 'nxt' in url_lower:
+        return 'nxt'
+    
+    # Check for Xtream patterns
+    # Xtream has player_api.php or get.php endpoints
+    if 'player_api' in url_lower or 'get.php' in url_lower or 'live.php' in url_lower:
+        return 'xtream'
+    
+    # Check for XUI patterns
+    # XUI One uses /c/ path without stalker_portal
+    if '/c/' in url_lower and 'stalker' not in url_lower:
+        return 'xui'
+    
+    # Check for explicit xui in URL
+    if 'xui' in url_lower:
+        return 'xui'
+    
+    # Default - cannot determine from URL alone
+    # The benchmark will detect from stream patterns
+    return 'unknown'
+
+
+def _format_time_seconds(time_ms: float) -> str:
+    """Convert milliseconds to formatted seconds string."""
+    if time_ms is None:
+        return None
+    return round(time_ms / 1000, 2)
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -30,6 +86,10 @@ def run_benchmark(request, account_id):
     Tests: Handshake → Genres → Channels → Stream Link → Portal Type
     
     Returns the fastest working engine and portal type information.
+    
+    OPTIMIZATION: Only uses the FIRST valid/available MAC address for benchmark.
+    This is faster and sufficient since all MACs on the same portal should
+    have similar performance characteristics.
     """
     from apps.m3u.models import M3UAccount
     
@@ -41,8 +101,11 @@ def run_benchmark(request, account_id):
     if account.account_type != 'MAC':
         return Response({'error': 'Not a MAC portal account'}, status=400)
     
-    # Get first available MAC
+    # Get FIRST available MAC only (optimization - no need to test all MACs)
+    # Priority: valid > unknown > any
     mac = account.macs.filter(status='valid').first()
+    if not mac:
+        mac = account.macs.filter(status='unknown').first()
     if not mac:
         mac = account.macs.first()
     
@@ -81,13 +144,19 @@ def run_benchmark(request, account_id):
         
         if results.get('portal_info'):
             portal_info = results['portal_info']
-            if portal_info.get('portal_type') and portal_info['portal_type'] != 'unknown':
-                custom_props['portal_type'] = portal_info['portal_type']
+            # Detect portal type from URL patterns if not detected
+            portal_type = portal_info.get('portal_type', 'unknown')
+            if portal_type == 'unknown':
+                portal_type = _detect_portal_type_from_url(account.server_url)
+            
+            if portal_type and portal_type != 'unknown':
+                custom_props['portal_type'] = portal_type
             if portal_info.get('portal_version'):
                 custom_props['portal_version'] = portal_info['portal_version']
             if portal_info.get('detected_by'):
                 custom_props['portal_detected_by'] = portal_info['detected_by']
         
+        # Save benchmark timestamp
         custom_props['benchmark_date'] = timezone.now().isoformat()
         account.custom_properties = custom_props
         account.save(update_fields=['custom_properties'])

@@ -98,6 +98,35 @@ def refresh_mac_portal_categories(account_id):
         return f"MAC category refresh failed: {str(e)}"
 
 
+def _get_vod_category_id(group_rel):
+    """Get portal_category_id from either ChannelGroup or relationship custom_properties."""
+    # First try relationship's custom_properties (always available)
+    rel_props = group_rel.custom_properties or {}
+    cat_id = rel_props.get('portal_category_id')
+    if cat_id:
+        return cat_id
+    
+    # Then try ChannelGroup's custom_properties (if model has the field)
+    if hasattr(group_rel.channel_group, 'custom_properties'):
+        group_props = group_rel.channel_group.custom_properties or {}
+        cat_id = group_props.get('portal_category_id')
+        if cat_id:
+            return cat_id
+    
+    return None
+
+
+def _get_vod_type(group_rel):
+    """Get VOD type (vod_movie or vod_series) from either ChannelGroup or relationship."""
+    # First try ChannelGroup's group_type (if model has the field)
+    if hasattr(group_rel.channel_group, 'group_type'):
+        return group_rel.channel_group.group_type
+    
+    # Then try relationship's custom_properties
+    rel_props = group_rel.custom_properties or {}
+    return rel_props.get('vod_type')
+
+
 @shared_task
 def refresh_mac_portal_selected_vod(account_id):
     """
@@ -120,12 +149,23 @@ def refresh_mac_portal_selected_vod(account_id):
         # Send start notification
         send_m3u_update(account_id, "vod_import", 0, status="processing")
         
-        # Get enabled VOD category groups
-        enabled_groups = ChannelGroupM3UAccount.objects.filter(
-            m3u_account=account,
-            enabled=True,
-            channel_group__group_type__in=['vod_movie', 'vod_series']
-        ).select_related('channel_group')
+        # Get enabled VOD category groups - check both new and old model structures
+        has_group_type = hasattr(ChannelGroup, 'group_type')
+        
+        if has_group_type:
+            # New model with group_type field
+            enabled_groups = ChannelGroupM3UAccount.objects.filter(
+                m3u_account=account,
+                enabled=True,
+                channel_group__group_type__in=['vod_movie', 'vod_series']
+            ).select_related('channel_group')
+        else:
+            # Old model - filter by relationship's custom_properties
+            enabled_groups = ChannelGroupM3UAccount.objects.filter(
+                m3u_account=account,
+                enabled=True,
+                custom_properties__is_vod_category=True
+            ).select_related('channel_group')
         
         if not enabled_groups.exists():
             logger.info(f"No VOD categories selected for account {account.name}")
@@ -154,9 +194,9 @@ def refresh_mac_portal_selected_vod(account_id):
         total_movies = 0
         total_series = 0
         
-        # Separate movie and series groups
-        movie_groups = [g for g in enabled_groups if g.channel_group.group_type == 'vod_movie']
-        series_groups = [g for g in enabled_groups if g.channel_group.group_type == 'vod_series']
+        # Separate movie and series groups using helper function
+        movie_groups = [g for g in enabled_groups if _get_vod_type(g) == 'vod_movie']
+        series_groups = [g for g in enabled_groups if _get_vod_type(g) == 'vod_series']
         
         # Process movie categories
         if movie_groups:
@@ -168,7 +208,7 @@ def refresh_mac_portal_selected_vod(account_id):
                 movie_category_map = batch_create_categories(vod_categories, 'movie', account)
                 
                 for group_rel in movie_groups:
-                    cat_id = group_rel.channel_group.custom_properties.get('portal_category_id')
+                    cat_id = _get_vod_category_id(group_rel)
                     if not cat_id:
                         continue
                     
@@ -196,7 +236,7 @@ def refresh_mac_portal_selected_vod(account_id):
                 series_category_map = batch_create_categories(series_categories, 'series', account)
                 
                 for group_rel in series_groups:
-                    cat_id = group_rel.channel_group.custom_properties.get('portal_category_id')
+                    cat_id = _get_vod_category_id(group_rel)
                     if not cat_id:
                         continue
                     
@@ -282,7 +322,11 @@ def _create_portal_engine(account, mac_address):
 
 
 def _create_channel_groups_for_categories(account, categories, prefix, group_type):
-    """Create ChannelGroups for VOD/Series categories."""
+    """Create ChannelGroups for VOD/Series categories.
+    
+    Note: This function now handles both old models (without group_type/custom_properties)
+    and new models (with these fields) gracefully.
+    """
     count = 0
     
     for cat_data in categories:
@@ -297,30 +341,47 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
         
         try:
             with transaction.atomic():
-                # Create or update ChannelGroup
-                group, created = ChannelGroup.objects.update_or_create(
-                    name=group_name,
-                    defaults={
-                        'group_type': group_type,
-                        'custom_properties': {
-                            'portal_category_id': str(cat_id),
-                            'portal_category_name': cat_name,
-                            'is_vod_category': True,
+                # Check if ChannelGroup model has the new fields
+                has_new_fields = hasattr(ChannelGroup, 'group_type') and hasattr(ChannelGroup, 'custom_properties')
+                
+                if has_new_fields:
+                    # New model with group_type and custom_properties
+                    group, created = ChannelGroup.objects.update_or_create(
+                        name=group_name,
+                        defaults={
+                            'group_type': group_type,
+                            'custom_properties': {
+                                'portal_category_id': str(cat_id),
+                                'portal_category_name': cat_name,
+                                'is_vod_category': True,
+                            }
                         }
-                    }
-                )
+                    )
+                else:
+                    # Old model without new fields - just create by name
+                    group, created = ChannelGroup.objects.get_or_create(
+                        name=group_name
+                    )
                 
                 # Get auto-enable setting
                 account_props = account.custom_properties or {}
                 auto_enable = account_props.get("auto_enable_new_groups_vod", True)
+                
+                # Store VOD category info in the relationship's custom_properties
+                rel_custom_props = {
+                    'portal_category_id': str(cat_id),
+                    'portal_category_name': cat_name,
+                    'is_vod_category': True,
+                    'vod_type': group_type,  # 'vod_movie' or 'vod_series'
+                }
                 
                 # Create or update M3U account relation
                 relation, rel_created = ChannelGroupM3UAccount.objects.update_or_create(
                     channel_group=group,
                     m3u_account=account,
                     defaults={
-                        'enabled': auto_enable,  # Use auto-enable setting
-                        'custom_properties': {}
+                        'enabled': auto_enable,
+                        'custom_properties': rel_custom_props
                     }
                 )
                 

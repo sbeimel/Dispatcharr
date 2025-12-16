@@ -29,7 +29,29 @@ def get_total_viewers(channel_id):
 
 
 class ChannelGroup(models.Model):
+    """Channel group model for organizing streams and VOD content."""
+    
+    # Group type choices for distinguishing live TV from VOD categories
+    class GroupType(models.TextChoices):
+        LIVE = 'live', 'Live TV'
+        VOD_MOVIE = 'vod_movie', 'VOD Movies'
+        VOD_SERIES = 'vod_series', 'VOD Series'
+        OTHER = 'other', 'Other'
+    
     name = models.TextField(unique=True, db_index=True)
+    group_type = models.CharField(
+        max_length=20,
+        choices=GroupType.choices,
+        default=GroupType.LIVE,
+        db_index=True,
+        help_text="Type of content in this group (live TV, VOD movies, VOD series)"
+    )
+    custom_properties = models.JSONField(
+        default=dict,
+        blank=True,
+        null=True,
+        help_text="Custom properties for this group (portal_category_id, etc.)"
+    )
 
     def related_channels(self):
         # local import if needed to avoid cyc. Usually fine in a single file though

@@ -178,14 +178,17 @@ const PortalCard = ({ portal, onRefresh }) => {
       });
       clearTimeout(timeoutId);
       if (response.data?.fastest) {
+        const timeMs = response.data.summary?.fastest_time_ms;
+        const timeSec = timeMs ? (timeMs / 1000).toFixed(2) : '?';
         setFastestEngine({
           engine: response.data.fastest,
-          time_ms: response.data.summary?.fastest_time_ms,
+          time_ms: timeMs,
           stream_link_ok: response.data.summary?.fastest_has_stream_link,
         });
+        const portalType = response.data.portal_info?.portal_type || 'unknown';
         notifications.show({
           title: 'Benchmark Complete',
-          message: `Fastest engine: ${response.data.fastest} (${response.data.summary?.fastest_time_ms}ms)${response.data.summary?.fastest_has_stream_link ? ' ✓' : ''}`,
+          message: `Fastest: ${response.data.fastest} (${timeSec}s)${response.data.summary?.fastest_has_stream_link ? ' ✓' : ''} | Portal: ${portalType.toUpperCase()}`,
           color: 'green',
         });
       } else {
@@ -228,8 +231,13 @@ const PortalCard = ({ portal, onRefresh }) => {
           <Badge 
             size="sm" 
             variant="outline"
-            color={(!portal.portal_type || portal.portal_type === 'unknown') ? 'gray' : 'blue'}
-            title={(!portal.portal_type || portal.portal_type === 'unknown') ? 'Run Benchmark to detect portal type' : ''}
+            color={(!portal.portal_type || portal.portal_type === 'unknown') ? 'gray' : 
+                   portal.portal_type === 'xui' ? 'violet' :
+                   portal.portal_type === 'xtream' ? 'cyan' :
+                   portal.portal_type === 'nxt' ? 'teal' : 'blue'}
+            title={(!portal.portal_type || portal.portal_type === 'unknown') 
+              ? 'Run Benchmark to detect portal type' 
+              : `Portal Type: ${portal.portal_type.toUpperCase()}${portal.benchmark_date ? ` (detected ${new Date(portal.benchmark_date).toLocaleDateString()})` : ''}`}
           >
             {portal.portal_type && portal.portal_type !== 'unknown' 
               ? portal.portal_type.toUpperCase() 
@@ -246,9 +254,9 @@ const PortalCard = ({ portal, onRefresh }) => {
               variant="light" 
               color={fastestEngine.stream_link_ok ? "green" : "yellow"} 
               leftSection={<IconBolt size={12} />}
-              title={fastestEngine.stream_link_ok ? "Stream Link OK" : "Stream Link not tested"}
+              title={`${fastestEngine.stream_link_ok ? "Stream Link OK" : "Stream Link not tested"}${portal.benchmark_date ? ` | Benchmark: ${new Date(portal.benchmark_date).toLocaleDateString()}` : ''}`}
             >
-              {fastestEngine.engine} ({fastestEngine.time_ms}ms)
+              {fastestEngine.engine} ({(fastestEngine.time_ms / 1000).toFixed(2)}s)
               {fastestEngine.stream_link_ok && " ✓"}
             </Badge>
           )}
