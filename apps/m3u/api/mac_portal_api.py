@@ -905,7 +905,7 @@ def get_mac_portal_urls():
 
 def get_mac_management_urls():
     """Get URL patterns for MAC Management API."""
-    from django.urls import path, re_path
+    from django.urls import re_path
     from rest_framework.routers import DefaultRouter
     
     router = DefaultRouter()

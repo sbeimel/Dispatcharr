@@ -5,6 +5,8 @@ from rest_framework.permissions import AllowAny
 
 # Import predictive failover URLs
 from apps.proxy.ts_proxy.predictive.api import get_predictive_failover_urls
+# Import MAC management URLs (for engine-benchmark etc.)
+from apps.m3u.api.mac_portal_api import get_mac_management_urls
 
 app_name = 'api'
 
@@ -37,6 +39,10 @@ urlpatterns = [
     
     # Predictive Failover API
     path('', include(get_predictive_failover_urls())),
+    
+    # MAC Management URLs (engine-benchmark, health, batch, etc.)
+    # These need to be at /api/m3u-accounts/{id}/... level
+    path('', include(get_mac_management_urls())),
 
     # Swagger Documentation api_urls
     re_path(r'^swagger/?$', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
