@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('channels', '0030_alter_stream_url'),
+        ('dispatcharr_channels', '0030_alter_stream_url'),
     ]
 
     operations = [
