@@ -231,17 +231,16 @@ const PortalCard = ({ portal, onRefresh }) => {
           <Badge 
             size="sm" 
             variant="outline"
-            color={(!portal.portal_type || portal.portal_type === 'unknown') ? 'gray' : 
-                   portal.portal_type === 'xui' ? 'violet' :
-                   portal.portal_type === 'xtream' ? 'cyan' :
-                   portal.portal_type === 'nxt' ? 'teal' : 'blue'}
-            title={(!portal.portal_type || portal.portal_type === 'unknown') 
-              ? 'Run Benchmark to detect portal type' 
-              : `Portal Type: ${portal.portal_type.toUpperCase()}${portal.benchmark_date ? ` (detected ${new Date(portal.benchmark_date).toLocaleDateString()})` : ''}`}
+            color={
+              portal.portal_type === 'XUI' ? 'violet' :
+              portal.portal_type === 'XTREAM' ? 'cyan' :
+              portal.portal_type === 'MAGLOAD' ? 'orange' :
+              portal.portal_type === 'WP' ? 'teal' :
+              'blue'  // STALKER default
+            }
+            title={`Portal Type: ${portal.portal_type || 'STALKER'}${portal.benchmark_date ? ` | Benchmark: ${new Date(portal.benchmark_date).toLocaleDateString()}` : ' | Run Benchmark to detect'}`}
           >
-            {portal.portal_type && portal.portal_type !== 'unknown' 
-              ? portal.portal_type.toUpperCase() 
-              : 'Run Benchmark'}
+            {portal.portal_type || 'STALKER'}
           </Badge>
           {portal.portal_version && portal.portal_version !== 'unknown' && (
             <Badge size="sm" variant="light" color="blue">

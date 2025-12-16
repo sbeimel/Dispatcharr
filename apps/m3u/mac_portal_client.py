@@ -1698,111 +1698,102 @@ class UnifiedMacPortalClient:
                     result['steps']['stream_link']['success']
                 )
                 
-                # Step 5: Detect Portal Type (only on first successful engine)
-                # Based on ob2_2025 scripts analysis:
-                # - XUI: Uses GET, /c/ path, PORTAL version in profile
-                # - Xtream: Uses POST, has player_api.php, live.php in stream URLs, can extract login/password
-                # - Stalker: Uses GET, /stalker_portal/c/ path, traditional middleware
-                # - NXT: Newer Xtream variant
+                # Step 5: Detect Portal Type and Version
+                # Based on ob2_2025 analysis:
+                # - STALKER: GET requests, /stalker_portal/, ffmpeg http://localhost/ch/
+                # - XUI: GET requests, /c/ path, PORTAL version in profile
+                # - XTREAM: POST requests, player_api.php, live.php, /live/user/pass/
+                # - MAGLOAD: /magLoad.php endpoint
+                # - WP: Hybrid (POST, /c/, player_api.php)
                 if result['full_success'] and portal_info['portal_type'] == 'unknown':
                     try:
-                        # First check if engine detected portal type/version
-                        if hasattr(client, 'portal_type') and client.portal_type:
-                            portal_info['portal_type'] = client.portal_type.lower()
-                            portal_info['detected_by'] = engine_name
-                        if hasattr(client, 'portal_version') and client.portal_version:
-                            portal_info['portal_version'] = client.portal_version
+                        detected_type = 'STALKER'  # Default
+                        detection_method = 'default'
                         
-                        # Detect from URL patterns (most reliable)
+                        # 1. Check URL patterns first
                         url_lower = portal_url.lower()
-                        if portal_info['portal_type'] == 'unknown':
-                            if '/stalker_portal/' in url_lower:
-                                portal_info['portal_type'] = 'stalker'
-                                portal_info['detected_by'] = 'url_pattern'
-                            elif '/c/' in url_lower and 'stalker' not in url_lower:
-                                # XUI typically uses /c/ path without stalker_portal
-                                portal_info['portal_type'] = 'xui'
-                                portal_info['detected_by'] = 'url_pattern'
-                            elif 'nxt' in url_lower:
-                                portal_info['portal_type'] = 'nxt'
-                                portal_info['detected_by'] = 'url_pattern'
+                        if '/magload.php' in url_lower or '/client/' in url_lower:
+                            detected_type = 'MAGLOAD'
+                            detection_method = 'url_pattern'
+                        elif '/stalker_portal/' in url_lower:
+                            detected_type = 'STALKER'
+                            detection_method = 'url_pattern'
                         
-                        # Detect from stream URL pattern (from create_link result)
-                        if portal_info['portal_type'] == 'unknown' and result.get('stream_link_ok'):
-                            # Get the actual stream link if available
-                            stream_link = None
-                            if test_cmd:
-                                try:
-                                    stream_link = client.create_link(test_cmd)
-                                except Exception:
-                                    pass
-                            
-                            if stream_link:
-                                stream_lower = stream_link.lower()
-                                # Xtream pattern: /live/username/password/channel.ts or live.php
-                                if 'live.php' in stream_lower:
-                                    portal_info['portal_type'] = 'xtream'
-                                    portal_info['detected_by'] = 'stream_url'
-                                elif re.search(r'/live/[^/]+/[^/]+/', stream_lower):
-                                    portal_info['portal_type'] = 'xtream'
-                                    portal_info['detected_by'] = 'stream_url'
-                                # XUI pattern: direct stream without /live/ path
-                                elif re.search(r':\d+/[^/]+\.(ts|m3u8)', stream_lower):
-                                    portal_info['portal_type'] = 'xui'
-                                    portal_info['detected_by'] = 'stream_url'
-                        
-                        # Detect from channel cmd pattern
-                        if channels and len(channels) > 0 and portal_info['portal_type'] == 'unknown':
-                            first_ch = channels[0]
-                            cmd = first_ch.get('cmd', '')
-                            
-                            # Stalker pattern: ffmpeg http://localhost/ch/ID_
-                            if 'ffmpeg' in cmd.lower() or 'http://localhost' in cmd:
-                                portal_info['portal_type'] = 'stalker'
-                                portal_info['detected_by'] = 'cmd_pattern'
-                            # Xtream pattern: /live/ in cmd
-                            elif '/live/' in cmd and re.search(r'/live/[^/]+/[^/]+/', cmd):
-                                portal_info['portal_type'] = 'xtream'
-                                portal_info['detected_by'] = 'cmd_pattern'
-                        
-                        # Try to get profile for version and additional detection
-                        if hasattr(client, 'get_profile'):
+                        # 2. Check stream URL pattern (most reliable for XUI vs XTREAM)
+                        stream_link = None
+                        if test_cmd and result.get('stream_link_ok'):
                             try:
-                                profile = client.get_profile(token) if token else None
-                                if profile:
-                                    js = profile.get('js', {})
-                                    
-                                    # Version detection from profile
-                                    if not portal_info.get('portal_version'):
-                                        for key in ['portal_version', 'version', 'PORTAL version']:
-                                            if js.get(key):
-                                                portal_info['portal_version'] = js.get(key)
-                                                break
-                                    
-                                    # XUI detection: has login/password in profile (Xtream-based)
-                                    if portal_info['portal_type'] == 'unknown':
-                                        if js.get('login') and js.get('password'):
-                                            # Has credentials = Xtream-based (XUI or Xtream)
-                                            # Check if it's XUI by URL pattern
-                                            if '/c/' in url_lower:
-                                                portal_info['portal_type'] = 'xui'
-                                            else:
-                                                portal_info['portal_type'] = 'xtream'
-                                            portal_info['detected_by'] = 'profile_credentials'
-                                        elif js.get('ls'):
-                                            # Has ls (license server) = traditional Stalker
-                                            portal_info['portal_type'] = 'stalker'
-                                            portal_info['detected_by'] = 'profile_ls'
+                                stream_link = client.create_link(test_cmd)
                             except Exception:
                                 pass
                         
-                        # Final fallback based on URL
-                        if portal_info['portal_type'] == 'unknown':
-                            portal_info['portal_type'] = 'stalker'  # Most MAC portals are Stalker-based
-                            portal_info['detected_by'] = 'default'
+                        if stream_link:
+                            stream_lower = stream_link.lower()
+                            # XTREAM: has live.php or /live/user/pass/ pattern
+                            if 'live.php' in stream_lower:
+                                detected_type = 'XTREAM'
+                                detection_method = 'stream_url'
+                            elif re.search(r'/live/[^/]+/[^/]+/', stream_lower):
+                                detected_type = 'XTREAM'
+                                detection_method = 'stream_url'
+                            # XUI: direct stream without /live/ path
+                            elif '/c/' in url_lower and 'live.php' not in stream_lower:
+                                detected_type = 'XUI'
+                                detection_method = 'stream_url'
                         
-                        logger.debug(f"  Portal Type: {portal_info['portal_type']} (detected by: {portal_info.get('detected_by')}), Version: {portal_info.get('portal_version')}")
+                        # 3. Check channel cmd pattern
+                        if detected_type == 'STALKER' and channels and len(channels) > 0:
+                            first_ch = channels[0]
+                            cmd = first_ch.get('cmd', '')
+                            # STALKER: ffmpeg http://localhost/ch/ID_
+                            if 'ffmpeg' in cmd.lower() and 'http://localhost' in cmd:
+                                detected_type = 'STALKER'
+                                detection_method = 'cmd_pattern'
+                            # XTREAM: /live/ in cmd
+                            elif '/live/' in cmd:
+                                detected_type = 'XTREAM'
+                                detection_method = 'cmd_pattern'
+                        
+                        # 4. Check profile for additional info
+                        profile_data = None
+                        if hasattr(client, 'get_profile'):
+                            try:
+                                profile_data = client.get_profile(token) if token else None
+                            except Exception:
+                                pass
+                        
+                        if profile_data:
+                            js = profile_data.get('js', {})
+                            
+                            # Version detection
+                            if not portal_info.get('portal_version'):
+                                for key in ['portal_version', 'version', 'PORTAL version']:
+                                    if js.get(key):
+                                        portal_info['portal_version'] = js.get(key)
+                                        break
+                            
+                            # XTREAM detection: has login/password in profile
+                            if js.get('login') and js.get('password'):
+                                # Has credentials = likely XTREAM-based
+                                if detected_type not in ('XTREAM', 'MAGLOAD'):
+                                    if '/c/' in url_lower:
+                                        detected_type = 'XUI'  # XUI with credentials
+                                    else:
+                                        detected_type = 'XTREAM'
+                                    detection_method = 'profile_credentials'
+                        
+                        # 5. Final URL-based refinement
+                        if detected_type == 'STALKER' and '/c/' in url_lower and '/stalker_portal/' not in url_lower:
+                            detected_type = 'XUI'
+                            detection_method = 'url_pattern'
+                        
+                        portal_info['portal_type'] = detected_type
+                        portal_info['detected_by'] = detection_method
+                        
+                        logger.debug(f"  Portal Type: {detected_type} (detected by: {detection_method}), Version: {portal_info.get('portal_version')}")
                     except Exception as e:
+                        portal_info['portal_type'] = 'STALKER'
+                        portal_info['detected_by'] = 'error_fallback'
                         logger.debug(f"  Portal type detection failed: {e}")
                 
                 # Track fastest - PRIORITIZE engines with stream_link success!

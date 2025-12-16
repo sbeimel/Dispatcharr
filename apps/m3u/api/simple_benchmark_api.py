@@ -23,49 +23,34 @@ def _detect_portal_type_from_url(portal_url: str) -> str:
     """
     Detect portal type from URL patterns.
     
-    Portal Types (based on ob2_2025 scripts analysis):
-    - stalker: Traditional Stalker portal (/stalker_portal/, ministra)
-    - xui: XUI One panel (uses /c/ path, GET requests, PORTAL version in profile)
-    - xtream: Xtream Codes panel (uses POST, has player_api.php, live.php in streams)
-    - nxt: NXT panel (newer Xtream variant)
-    - unknown: Could not determine
-    
-    Key differences from ob2_2025:
-    - XUI: GET requests, /c/ path, PORTAL version in get_profile
-    - Xtream: POST requests, has player_api.php, can extract login/password
-    - Stalker: GET requests, /stalker_portal/c/ path
+    Portal Types (based on ob2_2025 analysis):
+    - STALKER: Traditional Stalker portal (/stalker_portal/, GET requests)
+    - XUI: XUI panel (/c/ path, GET requests, PORTAL version)
+    - XTREAM: Xtream Codes (POST requests, player_api.php, live.php)
+    - MAGLOAD: MagLoad portal (/magLoad.php endpoint)
+    - WP: Hybrid Xtream/XUI (POST, /c/, player_api.php)
     """
     if not portal_url:
-        return 'unknown'
+        return 'STALKER'
     
     url_lower = portal_url.lower()
     
-    # Check for Stalker patterns (most specific first)
-    # Stalker uses /stalker_portal/ path
-    if '/stalker_portal/' in url_lower or 'ministra' in url_lower:
-        return 'stalker'
+    # MAGLOAD: Uses /magLoad.php endpoint
+    if '/magload.php' in url_lower or '/client/' in url_lower:
+        return 'MAGLOAD'
     
-    # Check for NXT patterns
-    if 'nxt' in url_lower:
-        return 'nxt'
+    # STALKER: Traditional /stalker_portal/ path
+    if '/stalker_portal/' in url_lower:
+        return 'STALKER'
     
-    # Check for Xtream patterns
-    # Xtream has player_api.php or get.php endpoints
-    if 'player_api' in url_lower or 'get.php' in url_lower or 'live.php' in url_lower:
-        return 'xtream'
+    # XUI/XTREAM detection needs more context (from benchmark)
+    # Default based on URL patterns
+    if '/c/' in url_lower:
+        # Could be XUI or XTREAM-WP - will be refined by benchmark
+        return 'XUI'
     
-    # Check for XUI patterns
-    # XUI One uses /c/ path without stalker_portal
-    if '/c/' in url_lower and 'stalker' not in url_lower:
-        return 'xui'
-    
-    # Check for explicit xui in URL
-    if 'xui' in url_lower:
-        return 'xui'
-    
-    # Default - cannot determine from URL alone
-    # The benchmark will detect from stream patterns
-    return 'unknown'
+    # Default to STALKER for MAC portals
+    return 'STALKER'
 
 
 def _format_time_seconds(time_ms: float) -> str:
