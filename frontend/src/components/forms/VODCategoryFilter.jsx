@@ -30,11 +30,31 @@ const VODCategoryFilter = ({
   const [filter, setFilter] = useState('');
 
   useEffect(() => {
-    if (Object.keys(categories).length === 0) {
+    // For MAC accounts, use the vod_movie_categories or vod_series_categories from playlist
+    if (playlist?.account_type === 'MAC') {
+      const vodCategories = type === 'movie' 
+        ? (playlist.vod_movie_categories || [])
+        : (playlist.vod_series_categories || []);
+      
+      setCategoryStates(
+        vodCategories.map((cat) => ({
+          id: cat.channel_group,
+          name: cat.group_name || cat.portal_category_name || `Category ${cat.portal_category_id || cat.channel_group}`,
+          portal_category_id: cat.portal_category_id,
+          portal_category_name: cat.portal_category_name,
+          enabled: cat.enabled || false,
+          original_enabled: cat.enabled,
+          channel_group: cat.channel_group,
+          custom_properties: cat.custom_properties || {},
+        }))
+      );
       return;
     }
 
-    console.log(categories);
+    // For XC accounts, use the VOD store categories
+    if (Object.keys(categories).length === 0) {
+      return;
+    }
 
     setCategoryStates(
       Object.values(categories)
@@ -56,7 +76,7 @@ const VODCategoryFilter = ({
           }
         })
     );
-  }, [categories, playlist.id, setCategoryStates, type]);
+  }, [categories, playlist, setCategoryStates, type]);
 
   const toggleEnabled = (id) => {
     setCategoryStates(

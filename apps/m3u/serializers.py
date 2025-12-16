@@ -3,12 +3,11 @@ from rest_framework import serializers, status
 from rest_framework.response import Response
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
 from core.models import UserAgent
-from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
+from apps.channels.models import ChannelGroupM3UAccount
 from apps.channels.serializers import (
     ChannelGroupM3UAccountSerializer,
 )
 import logging
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -153,10 +152,10 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     profiles = M3UAccountProfileSerializer(many=True, read_only=True)
     macs = M3UAccountMacSerializer(many=True, read_only=True)
     read_only_fields = ["locked", "created_at", "updated_at"]
-    # channel_groups = serializers.SerializerMethodField()
-    channel_groups = ChannelGroupM3UAccountSerializer(
-        source="channel_group", many=True, required=False
-    )
+    # Separate channel groups by type: live TV vs VOD categories
+    channel_groups = serializers.SerializerMethodField()
+    vod_movie_categories = serializers.SerializerMethodField()
+    vod_series_categories = serializers.SerializerMethodField()
     server_url = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -188,6 +187,8 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "macs",
             "locked",
             "channel_groups",
+            "vod_movie_categories",
+            "vod_series_categories",
             "refresh_interval",
             "custom_properties",
             "account_type",
@@ -329,6 +330,40 @@ class M3UAccountSerializer(serializers.ModelSerializer):
     def get_filters(self, obj):
         filters = obj.filters.order_by("order")
         return M3UFilterSerializer(filters, many=True).data
+
+    def get_channel_groups(self, obj):
+        """Get only Live TV groups (not VOD categories)."""
+        from django.db.models import Q
+        
+        # Filter to only include Live TV groups (group_type = 'live' or NULL/empty for backward compatibility)
+        live_groups = obj.channel_group.filter(
+            Q(channel_group__group_type='live') | 
+            Q(channel_group__group_type='') | 
+            Q(channel_group__group_type__isnull=True)
+        ).select_related('channel_group')
+        
+        # Also exclude groups that have VOD-related names (for backward compatibility with old data)
+        live_groups = live_groups.exclude(
+            channel_group__name__startswith='VOD - '
+        )
+        
+        return ChannelGroupM3UAccountSerializer(live_groups.distinct(), many=True).data
+
+    def get_vod_movie_categories(self, obj):
+        """Get only VOD Movie categories."""
+        vod_movie_groups = obj.channel_group.filter(
+            channel_group__group_type='vod_movie'
+        ).select_related('channel_group')
+        
+        return ChannelGroupM3UAccountSerializer(vod_movie_groups, many=True).data
+
+    def get_vod_series_categories(self, obj):
+        """Get only VOD Series categories."""
+        vod_series_groups = obj.channel_group.filter(
+            channel_group__group_type='vod_series'
+        ).select_related('channel_group')
+        
+        return ChannelGroupM3UAccountSerializer(vod_series_groups, many=True).data
 
 
 class ServerGroupSerializer(serializers.ModelSerializer):

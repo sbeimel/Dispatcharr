@@ -152,15 +152,24 @@ class ChannelGroupM3UAccountSerializer(serializers.ModelSerializer):
     auto_channel_sync = serializers.BooleanField(default=False)
     auto_sync_channel_start = serializers.FloatField(allow_null=True, required=False)
     custom_properties = serializers.JSONField(required=False)
+    # Include group_type from the related ChannelGroup
+    group_type = serializers.CharField(source="channel_group.group_type", read_only=True)
+    group_name = serializers.CharField(source="channel_group.name", read_only=True)
 
     class Meta:
         model = ChannelGroupM3UAccount
-        fields = ["m3u_accounts", "channel_group", "enabled", "auto_channel_sync", "auto_sync_channel_start", "custom_properties"]
+        fields = ["m3u_accounts", "channel_group", "enabled", "auto_channel_sync", "auto_sync_channel_start", "custom_properties", "group_type", "group_name"]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
 
         custom_props = instance.custom_properties or {}
+        
+        # Include portal_category_id and portal_category_name from custom_properties for VOD categories
+        if custom_props.get('portal_category_id'):
+            data['portal_category_id'] = custom_props.get('portal_category_id')
+            data['portal_category_name'] = custom_props.get('portal_category_name', '')
+            data['is_vod_category'] = custom_props.get('is_vod_category', False)
 
         return data
 

@@ -560,14 +560,15 @@ def process_groups(account, groups):
         if group_name in existing_groups:
             existing_group_objs.append(existing_groups[group_name])
         else:
-            groups_to_create.append(ChannelGroup(name=group_name))
+            # Create new Live TV group with group_type='live'
+            groups_to_create.append(ChannelGroup(name=group_name, group_type='live'))
 
     # Create new groups and fetch them back with IDs
     newly_created_group_objs = []
     if groups_to_create:
-        logger.info(f"Creating {len(groups_to_create)} new groups for account {account.id}")
+        logger.info(f"Creating {len(groups_to_create)} new Live TV groups for account {account.id}")
         newly_created_group_objs = list(ChannelGroup.bulk_create_and_fetch(groups_to_create))
-        logger.debug(f"Successfully created {len(newly_created_group_objs)} new groups")
+        logger.debug(f"Successfully created {len(newly_created_group_objs)} new Live TV groups")
 
     # Combine all groups
     all_group_objs = existing_group_objs + newly_created_group_objs
@@ -594,9 +595,26 @@ def process_groups(account, groups):
     relations_to_delete = []
 
     # Find orphaned relationships (groups that no longer exist in the source)
+    # IMPORTANT: Only delete Live TV groups, NOT VOD categories
     current_group_names = set(groups.keys())
     for group_name, rel in all_existing_relationships.items():
         if group_name not in current_group_names:
+            # Check if this is a VOD category - don't delete those during Live TV refresh
+            is_vod_category = False
+            rel_props = rel.custom_properties or {}
+            if rel_props.get('is_vod_category') or rel_props.get('vod_type'):
+                is_vod_category = True
+            # Also check group_type on the ChannelGroup itself
+            if hasattr(rel.channel_group, 'group_type') and rel.channel_group.group_type in ['vod_movie', 'vod_series']:
+                is_vod_category = True
+            # Also check by name pattern for backward compatibility
+            if group_name.startswith('VOD - '):
+                is_vod_category = True
+            
+            if is_vod_category:
+                logger.debug(f"Skipping deletion of VOD category group '{group_name}' during Live TV refresh for account {account.id}")
+                continue
+            
             relations_to_delete.append(rel)
             logger.debug(f"Marking relationship for deletion: group '{group_name}' no longer exists in source for account {account.id}")
 

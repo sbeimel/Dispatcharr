@@ -20,6 +20,7 @@ def refresh_mac_portal_categories(account_id):
     """
     Phase 1: Lade nur VOD/Series Kategorien für MAC Portal Account.
     Erstellt ChannelGroups für VOD-Movies und VOD-Series Kategorien.
+    Only runs if enable_vod is True in account custom_properties.
     """
     from apps.m3u.tasks import send_m3u_update
     
@@ -29,6 +30,12 @@ def refresh_mac_portal_categories(account_id):
         if account.account_type != M3UAccount.Types.MAC:
             logger.warning(f"MAC category refresh called for non-MAC account {account_id}")
             return "MAC category refresh only available for MAC/STB accounts"
+        
+        # Check if VOD scanning is enabled for this account
+        account_props = account.custom_properties or {}
+        if not account_props.get('enable_vod', False):
+            logger.info(f"VOD scanning is disabled for MAC account {account.name}, skipping category refresh")
+            return "VOD scanning is disabled for this account"
         
         logger.info(f"Starting MAC category refresh for account {account.name}")
         start_time = timezone.now()
