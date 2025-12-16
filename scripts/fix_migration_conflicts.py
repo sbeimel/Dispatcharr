@@ -7,132 +7,161 @@ corresponding migration files on disk. This commonly happens when migrations are
 renamed or reorganized.
 
 Run this BEFORE `python manage.py migrate` to prevent conflicts.
+
+NOTE: This script does NOT use Django to avoid Redis/cache dependencies.
+It connects directly to PostgreSQL.
 """
 import os
 import sys
-
-# Ensure /app is in the Python path (for Docker environment)
-app_path = '/app'
-if app_path not in sys.path:
-    sys.path.insert(0, app_path)
-
-# Setup Django
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
-
-import django
-django.setup()
-
-from django.db import connection
-from django.conf import settings
 from pathlib import Path
 
+# Get database connection info from environment
+POSTGRES_HOST = os.environ.get('POSTGRES_HOST', 'localhost')
+POSTGRES_PORT = os.environ.get('POSTGRES_PORT', '5432')
+POSTGRES_DB = os.environ.get('POSTGRES_DB', 'dispatcharr')
+POSTGRES_USER = os.environ.get('POSTGRES_USER', 'dispatch')
+POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD', 'secret')
 
-def get_migration_files(app_name: str) -> set:
+# App directory (in Docker container)
+APP_DIR = Path('/app')
+
+
+def get_migration_files_for_app(app_path: Path) -> set:
     """Get all migration file names (without .py) for an app."""
     migrations = set()
+    migrations_dir = app_path / 'migrations'
     
-    # Find the app's migrations directory
-    for app_config in django.apps.get_app_configs():
-        if app_config.label == app_name:
-            migrations_dir = Path(app_config.path) / 'migrations'
-            if migrations_dir.exists():
-                for f in migrations_dir.glob('*.py'):
-                    if f.name != '__init__.py':
-                        migrations.add(f.stem)  # filename without .py
-            break
+    if migrations_dir.exists():
+        for f in migrations_dir.glob('*.py'):
+            if f.name != '__init__.py':
+                migrations.add(f.stem)
     
     return migrations
 
 
-def get_db_migrations(app_name: str) -> list:
-    """Get all migration names recorded in the database for an app."""
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT id, name FROM django_migrations WHERE app = %s",
-            [app_name]
-        )
-        return cursor.fetchall()
+def find_all_app_migrations() -> dict:
+    """Find all migration files for all Django apps."""
+    app_migrations = {}
+    
+    # Check apps directory
+    apps_dir = APP_DIR / 'apps'
+    if apps_dir.exists():
+        for app_dir in apps_dir.iterdir():
+            if app_dir.is_dir():
+                migrations = get_migration_files_for_app(app_dir)
+                if migrations:
+                    app_migrations[app_dir.name] = migrations
+    
+    # Check core directory
+    core_dir = APP_DIR / 'core'
+    if core_dir.exists():
+        migrations = get_migration_files_for_app(core_dir)
+        if migrations:
+            app_migrations['core'] = migrations
+    
+    # Check plugins directory
+    plugins_dir = APP_DIR / 'plugins'
+    if plugins_dir.exists():
+        for plugin_dir in plugins_dir.iterdir():
+            if plugin_dir.is_dir():
+                migrations = get_migration_files_for_app(plugin_dir)
+                if migrations:
+                    app_migrations[plugin_dir.name] = migrations
+    
+    return app_migrations
 
 
 def fix_ghost_migrations():
-    """Find and remove ghost migration entries."""
+    """Find and remove ghost migration entries using direct PostgreSQL connection."""
+    try:
+        import psycopg2
+    except ImportError:
+        print("⚠️  psycopg2 not available, trying psycopg2-binary...")
+        try:
+            import psycopg2
+        except ImportError:
+            print("❌ psycopg2 not installed - skipping migration fix")
+            return 0
+    
     print("🔍 Checking for ghost migration entries...")
     
-    # Get all apps with migrations in the database
-    with connection.cursor() as cursor:
-        cursor.execute("SELECT DISTINCT app FROM django_migrations")
-        apps = [row[0] for row in cursor.fetchall()]
-    
-    total_removed = 0
-    
-    for app_name in apps:
-        file_migrations = get_migration_files(app_name)
-        db_migrations = get_db_migrations(app_name)
-        
-        for migration_id, migration_name in db_migrations:
-            if migration_name not in file_migrations:
-                print(f"  ⚠️  Ghost migration found: {app_name}.{migration_name}")
-                
-                # Remove the ghost entry
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        "DELETE FROM django_migrations WHERE id = %s",
-                        [migration_id]
-                    )
-                print(f"  ✅ Removed ghost migration: {app_name}.{migration_name}")
-                total_removed += 1
-    
-    if total_removed > 0:
-        print(f"\n🧹 Cleaned up {total_removed} ghost migration(s)")
-    else:
-        print("✅ No ghost migrations found - database is clean")
-    
-    return total_removed
-
-
-def check_migration_graph():
-    """Check for migration graph conflicts (multiple leaf nodes)."""
-    from django.db.migrations.loader import MigrationLoader
-    
-    print("\n🔍 Checking migration graph for conflicts...")
+    # Get all migration files from disk
+    app_migrations = find_all_app_migrations()
+    print(f"   Found migrations for apps: {list(app_migrations.keys())}")
     
     try:
-        loader = MigrationLoader(connection, ignore_no_migrations=True)
-        conflicts = loader.detect_conflicts()
+        # Connect to PostgreSQL
+        conn = psycopg2.connect(
+            host=POSTGRES_HOST,
+            port=POSTGRES_PORT,
+            dbname=POSTGRES_DB,
+            user=POSTGRES_USER,
+            password=POSTGRES_PASSWORD
+        )
+        conn.autocommit = True
+        cursor = conn.cursor()
         
-        if conflicts:
-            print("  ⚠️  Migration conflicts detected:")
-            for app, migrations in conflicts.items():
-                print(f"    {app}: {migrations}")
-            return False
+        # Check if django_migrations table exists
+        cursor.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'django_migrations'
+            )
+        """)
+        if not cursor.fetchone()[0]:
+            print("   ℹ️  django_migrations table doesn't exist yet - fresh install")
+            conn.close()
+            return 0
+        
+        # Get all migrations from database
+        cursor.execute("SELECT id, app, name FROM django_migrations")
+        db_migrations = cursor.fetchall()
+        
+        total_removed = 0
+        
+        for migration_id, app_name, migration_name in db_migrations:
+            # Check if this app has migrations on disk
+            if app_name in app_migrations:
+                # Check if this specific migration exists on disk
+                if migration_name not in app_migrations[app_name]:
+                    print(f"  ⚠️  Ghost migration found: {app_name}.{migration_name}")
+                    cursor.execute(
+                        "DELETE FROM django_migrations WHERE id = %s",
+                        (migration_id,)
+                    )
+                    print(f"  ✅ Removed ghost migration: {app_name}.{migration_name}")
+                    total_removed += 1
+            # If app not found on disk but has DB entries, it might be a third-party app
+            # Don't remove those
+        
+        conn.close()
+        
+        if total_removed > 0:
+            print(f"\n🧹 Cleaned up {total_removed} ghost migration(s)")
         else:
-            print("  ✅ No migration conflicts detected")
-            return True
+            print("✅ No ghost migrations found - database is clean")
+        
+        return total_removed
+        
+    except psycopg2.OperationalError as e:
+        print(f"⚠️  Could not connect to database: {e}")
+        print("   Continuing anyway - migrations may fail")
+        return 0
     except Exception as e:
-        print(f"  ⚠️  Could not check migration graph: {e}")
-        return True  # Continue anyway
+        print(f"⚠️  Error checking migrations: {e}")
+        print("   Continuing anyway - migrations may fail")
+        return 0
 
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("Migration Conflict Fixer")
+    print("Migration Conflict Fixer (Direct DB Access)")
     print("=" * 60)
     
-    try:
-        # First, fix ghost migrations
-        removed = fix_ghost_migrations()
-        
-        # Then check the migration graph
-        graph_ok = check_migration_graph()
-        
-        if removed > 0 or not graph_ok:
-            print("\n💡 Migration issues were found and fixed.")
-            print("   You can now run: python manage.py migrate")
-        
-        print("=" * 60)
-        sys.exit(0)
-        
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        print("   Continuing anyway - migrations may fail")
-        sys.exit(0)  # Don't block startup
+    removed = fix_ghost_migrations()
+    
+    if removed > 0:
+        print("\n💡 Migration issues were found and fixed.")
+    
+    print("=" * 60)
+    sys.exit(0)
