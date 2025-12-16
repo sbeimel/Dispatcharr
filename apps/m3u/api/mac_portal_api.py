@@ -656,6 +656,123 @@ class FailoverStatisticsViewSet(viewsets.ViewSet):
         return Response(serializer.data)
 
 
+class EngineBenchmarkViewSet(viewsets.ViewSet):
+    """
+    API endpoint for engine benchmarking.
+    
+    Allows testing all portal engines and finding the fastest one.
+    """
+    authentication_classes = [JWTAuthentication, CsrfExemptSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+    
+    def list(self, request, account_pk=None):
+        """GET /api/m3u-accounts/{id}/engine-benchmark/ - Get cached benchmark results."""
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        
+        from ..mac_portal_client import UnifiedMacPortalClient
+        
+        fastest_data = UnifiedMacPortalClient.get_fastest_engine(account.server_url)
+        cached_engine = UnifiedMacPortalClient.get_cached_engine(account.server_url)
+        
+        return Response({
+            'account_id': account.id,
+            'portal_url': account.server_url,
+            'fastest_engine': fastest_data,
+            'cached_auto_engine': cached_engine,
+            'has_benchmark': fastest_data is not None,
+        })
+    
+    @action(detail=False, methods=['post'])
+    def run(self, request, account_pk=None):
+        """POST /api/m3u-accounts/{id}/engine-benchmark/run/ - Run benchmark for all engines."""
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        
+        # Get first available MAC
+        mac = account.macs.filter(status='valid').first()
+        if not mac:
+            mac = account.macs.first()
+        
+        if not mac:
+            return Response(
+                {'error': 'No MAC addresses available for this account'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        from ..mac_portal_client import UnifiedMacPortalClient
+        
+        try:
+            results = UnifiedMacPortalClient.benchmark_all_engines(
+                portal_url=account.server_url,
+                mac=mac.address,
+                proxy=account.proxy_url
+            )
+            
+            # Save portal_info to account's custom_properties
+            if results.get('portal_info'):
+                portal_info = results['portal_info']
+                custom_props = account.custom_properties or {}
+                if portal_info.get('portal_type') and portal_info['portal_type'] != 'unknown':
+                    custom_props['portal_type'] = portal_info['portal_type']
+                if portal_info.get('portal_version'):
+                    custom_props['portal_version'] = portal_info['portal_version']
+                if portal_info.get('detected_by'):
+                    custom_props['portal_detected_by'] = portal_info['detected_by']
+                account.custom_properties = custom_props
+                account.save(update_fields=['custom_properties'])
+                logger.info(f"Saved portal_info for account {account_pk}: {portal_info}")
+            
+            return Response({
+                'account_id': account.id,
+                'portal_url': account.server_url,
+                'mac_used': mac.address,
+                **results
+            })
+        except Exception as e:
+            logger.error(f"Benchmark failed for account {account_pk}: {e}")
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    @action(detail=False, methods=['delete'])
+    def clear(self, request, account_pk=None):
+        """DELETE /api/m3u-accounts/{id}/engine-benchmark/clear/ - Clear ALL engine caches."""
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        
+        from ..mac_portal_client import UnifiedMacPortalClient
+        from django.core.cache import cache
+        
+        # Clear fastest engine cache (benchmark results)
+        fastest_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(account.server_url)
+        cache.delete(fastest_key)
+        
+        # Clear auto engine cache
+        auto_key = UnifiedMacPortalClient._get_engine_cache_key(account.server_url)
+        cache.delete(auto_key)
+        
+        return Response({
+            'status': 'all_cleared',
+            'account_id': account.id,
+            'cleared': ['fastest_engine', 'auto_engine'],
+        })
+    
+    @action(detail=False, methods=['delete'])
+    def clear_auto(self, request, account_pk=None):
+        """DELETE /api/m3u-accounts/{id}/engine-benchmark/clear_auto/ - Clear only AUTO engine cache (refresh)."""
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        
+        from ..mac_portal_client import UnifiedMacPortalClient
+        
+        # Only clear auto engine cache - forces re-detection on next request
+        UnifiedMacPortalClient.clear_cached_engine(account.server_url)
+        
+        return Response({
+            'status': 'auto_cleared',
+            'account_id': account.id,
+            'message': 'Auto engine cache cleared. Next request will re-detect the best engine.',
+        })
+
+
 class VODSeriesAPIViewSet(viewsets.ViewSet):
     """
     API endpoint for VOD and Series.
@@ -836,6 +953,11 @@ def get_mac_management_urls():
         r'm3u-accounts/(?P<account_pk>\d+)/vod-series',
         VODSeriesAPIViewSet,
         basename='vod-series'
+    )
+    router.register(
+        r'm3u-accounts/(?P<account_pk>\d+)/engine-benchmark',
+        EngineBenchmarkViewSet,
+        basename='engine-benchmark'
     )
     
     return router.urls

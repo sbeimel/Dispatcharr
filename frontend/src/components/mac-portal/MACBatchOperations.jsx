@@ -331,10 +331,10 @@ const MACBatchOperations = () => {
                     </Table.Td>
                     <Table.Td>
                       <Progress 
-                        value={mac.health_score || 100} 
+                        value={mac.health_score ?? 0} 
                         size="sm" 
                         w={60}
-                        color={(mac.health_score || 100) >= 80 ? 'green' : (mac.health_score || 100) >= 50 ? 'yellow' : 'red'}
+                        color={(mac.health_score ?? 0) >= 80 ? 'green' : (mac.health_score ?? 0) >= 50 ? 'yellow' : 'red'}
                       />
                     </Table.Td>
                   </Table.Tr>

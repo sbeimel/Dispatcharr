@@ -127,8 +127,9 @@ class MACPortalGlobalSettings(models.Model):
     # Unified Portal Engine Selection (Requirement 100.1)
     # Note: 'unified' was removed as it was identical to 'auto'
     PORTAL_ENGINE_CHOICES = [
-        ('auto', 'Auto-Detect (Recommended)'),
-        ('allinone', 'AllinOne Best-of-All (Empfohlen)'),
+        ('auto', 'Auto-Detect (First Working)'),
+        ('fastest', 'Fastest (Benchmarked per Portal)'),
+        ('allinone', 'AllinOne Best-of-All'),
         ('macreplay', 'MacReplayXC (Standard)'),
         ('estalker', 'EStalker (Enigma2 Style)'),
         ('boxpirate', 'BoxPirate (Dreambox Style)'),
@@ -140,7 +141,7 @@ class MACPortalGlobalSettings(models.Model):
         max_length=20,
         choices=PORTAL_ENGINE_CHOICES,
         default='auto',
-        help_text="Portal authentication engine to use"
+        help_text="Portal authentication engine to use. 'Fastest' uses benchmarked results per portal."
     )
     
     # Parental Control PIN (from migration 0025)
@@ -466,8 +467,18 @@ class MACHealthRecord(models.Model):
     
     @classmethod
     def get_health_score(cls, mac, hours=24):
-        """Calculate health score for a MAC based on recent events."""
+        """Calculate health score for a MAC based on recent events and status."""
         from django.db.models import Count
+        
+        # Check MAC status first - defective MACs get low scores regardless of history
+        if hasattr(mac, 'status'):
+            if mac.status in ['error', 'expired']:
+                return 0  # Completely broken MACs
+            elif mac.status == 'unknown':
+                return 10  # Unknown status MACs (untested but suspicious)
+            elif mac.status == 'blocked':
+                return 5   # Blocked MACs
+        
         since = timezone.now() - timezone.timedelta(hours=hours)
         
         events = cls.objects.filter(
@@ -486,7 +497,11 @@ class MACHealthRecord(models.Model):
         
         total = success_count + failure_count
         if total == 0:
-            return 50  # Default score for MACs with no history
+            # No history - return score based on status
+            if hasattr(mac, 'status') and mac.status == 'valid':
+                return 50  # Valid but untested MACs get neutral score
+            else:
+                return 25  # Unknown status with no history gets lower score
         
         return int((success_count / total) * 100)
 

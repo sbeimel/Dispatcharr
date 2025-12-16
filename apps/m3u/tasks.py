@@ -3082,23 +3082,14 @@ def _refresh_mac_account_with_groups(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
-                # Only use UnifiedPortalEngine for other engines (estalker, boxpirate, ob2_2025)
-                if portal_engine in ('auto', 'macreplay', '', None):
-                    # Fast path: Direct MacPortalClient (original MacReplay behavior)
-                    client = MacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_obj.address,
-                        proxy=getattr(account, 'proxy', None)
-                    )
-                else:
-                    # Slow path: UnifiedPortalEngine for other engines
-                    from .mac_portal_client import UnifiedMacPortalClient
-                    client = UnifiedMacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_obj.address,
-                        proxy=getattr(account, 'proxy', None)
-                    )
+                # Use UnifiedMacPortalClient for all engines including 'auto'
+                # AUTO mode will try all engines in priority order
+                from .mac_portal_client import UnifiedMacPortalClient
+                client = UnifiedMacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None)
+                )
                 
                 # Test connection and get channels
                 channels = client.get_channels()
@@ -3281,20 +3272,13 @@ def _refresh_mac_account_direct(account_id):
             try:
                 logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
-                # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
-                if portal_engine in ('auto', 'macreplay', '', None):
-                    client = MacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_obj.address,
-                        proxy=getattr(account, 'proxy', None)
-                    )
-                else:
-                    from .mac_portal_client import UnifiedMacPortalClient
-                    client = UnifiedMacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_obj.address,
-                        proxy=getattr(account, 'proxy', None)
-                    )
+                # Use UnifiedMacPortalClient for all engines including 'auto'
+                from .mac_portal_client import UnifiedMacPortalClient
+                client = UnifiedMacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None)
+                )
                 
                 # Test connection and get channels
                 channels = client.get_channels()
@@ -3421,20 +3405,13 @@ def check_mac_expiry(account_id=None):
             
             for mac_obj in macs:
                 try:
-                    # Use direct MacPortalClient for 'auto' and 'macreplay' (fast path)
-                    if portal_engine in ('auto', 'macreplay', '', None):
-                        client = MacPortalClient(
-                            base_url=account.server_url,
-                            mac=mac_obj.address,
-                            proxy=getattr(account, 'proxy', None)
-                        )
-                    else:
-                        from .mac_portal_client import UnifiedMacPortalClient
-                        client = UnifiedMacPortalClient(
-                            base_url=account.server_url,
-                            mac=mac_obj.address,
-                            proxy=getattr(account, 'proxy', None)
-                        )
+                    # Use UnifiedMacPortalClient for all engines including 'auto'
+                    from .mac_portal_client import UnifiedMacPortalClient
+                    client = UnifiedMacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None)
+                    )
                     
                     expires_text = client.get_expires()
                     
@@ -3669,3 +3646,8 @@ def cleanup_old_cooldowns():
     except Exception as e:
         logger.error(f"Error cleaning up cooldown records: {e}")
         return {"error": str(e)}
+
+
+# Import mac_vod_tasks to register them with Celery
+# This is needed because Celery autodiscover only finds tasks.py, not mac_vod_tasks.py
+from . import mac_vod_tasks  # noqa: F401

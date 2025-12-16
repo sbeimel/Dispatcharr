@@ -236,12 +236,12 @@ const MACHealthDashboard = () => {
                             <Table.Td>
                               <Group gap="xs">
                                 <Progress 
-                                  value={mac.health_score || 100} 
-                                  color={getHealthColor(mac.health_score || 100)}
+                                  value={mac.health_score ?? 0} 
+                                  color={getHealthColor(mac.health_score ?? 0)}
                                   size="sm"
                                   w={60}
                                 />
-                                <Text size="xs">{mac.health_score || 100}%</Text>
+                                <Text size="xs">{mac.health_score ?? 0}%</Text>
                               </Group>
                             </Table.Td>
                             <Table.Td>

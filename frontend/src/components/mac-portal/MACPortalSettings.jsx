@@ -121,11 +121,17 @@ const MACPortalSettings = () => {
               </Text>
               
               <Paper withBorder p="md">
-                <Title order={4} mb="sm">Default User-Agent</Title>
-                <Text size="sm" c="dimmed">
-                  The default User-Agent preset used for portal connections.
-                  Individual accounts can override this setting.
+                <Title order={4} mb="sm">About MAC Portal Settings</Title>
+                <Text size="sm" c="dimmed" mb="sm">
+                  These global settings control how Dispatcharr connects to MAC/STB portals.
+                  Changes here affect all MAC portal accounts.
                 </Text>
+                <Stack gap="xs">
+                  <Text size="sm">• <strong>Timeouts & Retries:</strong> Connection and read timeouts, retry behavior</Text>
+                  <Text size="sm">• <strong>Cooldowns:</strong> How long to wait after failures before retrying</Text>
+                  <Text size="sm">• <strong>Features:</strong> Enable/disable VOD, Series, EPG, Cloudscraper, etc.</Text>
+                  <Text size="sm">• <strong>Portal Engine:</strong> Select authentication strategy (Auto, Fastest, specific engines)</Text>
+                </Stack>
               </Paper>
             </Stack>
           </Tabs.Panel>

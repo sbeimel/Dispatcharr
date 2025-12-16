@@ -104,9 +104,10 @@ class MACRotationManager:
                 if self._is_in_cooldown(mac):
                     logger.debug(f"MAC {mac.address} is in cooldown, skipping")
                     continue
-                if mac.status in ['expired', 'error']:
+                if mac.status in ['expired', 'error', 'blocked']:
                     logger.debug(f"MAC {mac.address} has status {mac.status}, skipping")
                     continue
+                # Allow 'unknown' and 'valid' status MACs, but they'll get appropriate health scores
                 available.append(mac)
             
             if not available:

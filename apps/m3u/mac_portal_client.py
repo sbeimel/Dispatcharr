@@ -1422,14 +1422,378 @@ def get_portal_client(base_url: str, mac: str, proxy: Optional[str] = None):
 class UnifiedMacPortalClient:
     """
     Wrapper class that provides MacPortalClient-compatible interface
-    but uses UnifiedPortalEngine internally when configured.
+    but uses portal_engines internally when configured.
     
     This allows existing code to use the same interface while benefiting
     from the engine selection feature.
     
-    NOTE: For 'auto' and 'macreplay' engines, this class just delegates to
-    MacPortalClient directly for maximum performance.
+    For 'auto' engine: Tries all engines in priority order until one succeeds:
+    MacAttack → iSTB → OB2_2025 → BoxPirate → EStalker → MacReplay → AllinOne
+    
+    ENGINE CACHING:
+    - AUTO mode remembers which engine worked for each portal URL
+    - Cached for 24 hours to avoid re-testing on every request
+    - Cache key: "portal_engine:{portal_url_hash}"
+    
+    ARCHITEKTUR:
+    - Jede Engine ist in einer eigenen Datei unter portal_engines/
+    - Die Registry in portal_engines/__init__.py verwaltet alle Engines
+    - UnifiedMacPortalClient ist der einheitliche Einstiegspunkt
     """
+    
+    # Engine priority order for AUTO mode (best performers first)
+    AUTO_ENGINE_ORDER = [
+        'macattack',   # Best: Fast, reliable, 14k+ channels
+        'istb',        # Good: iOS emulator style
+        'ob2_2025',    # Good: Alternative handshake
+        'boxpirate',   # Good: Dreambox style (optimized timeout)
+        'estalker',    # Good: Enigma2 style (optimized timeout)
+        'macreplay',   # Standard: Original MacReplay
+        'allinone',    # Fallback: Tries everything
+    ]
+    
+    # Cache timeout for successful engine - UNLIMITED (until manual refresh)
+    # None means no expiration in Django cache
+    ENGINE_CACHE_TIMEOUT = None
+    
+    # Cache timeout for fastest engine benchmark - UNLIMITED (until new benchmark)
+    FASTEST_ENGINE_CACHE_TIMEOUT = None
+    
+    @staticmethod
+    def _get_engine_cache_key(portal_url: str) -> str:
+        """Generate cache key for portal engine."""
+        import hashlib
+        url_hash = hashlib.md5(portal_url.encode()).hexdigest()[:16]
+        return f"portal_engine:{url_hash}"
+    
+    @staticmethod
+    def _get_fastest_engine_cache_key(portal_url: str) -> str:
+        """Generate cache key for fastest benchmarked engine."""
+        import hashlib
+        url_hash = hashlib.md5(portal_url.encode()).hexdigest()[:16]
+        return f"fastest_engine:{url_hash}"
+    
+    @staticmethod
+    def get_cached_engine(portal_url: str) -> Optional[str]:
+        """Get cached successful engine for portal URL."""
+        cache_key = UnifiedMacPortalClient._get_engine_cache_key(portal_url)
+        return cache.get(cache_key)
+    
+    @staticmethod
+    def set_cached_engine(portal_url: str, engine_name: str):
+        """Cache successful engine for portal URL (unlimited duration until manual refresh)."""
+        cache_key = UnifiedMacPortalClient._get_engine_cache_key(portal_url)
+        # None = unlimited cache duration (until manually cleared)
+        cache.set(cache_key, engine_name, UnifiedMacPortalClient.ENGINE_CACHE_TIMEOUT)
+        logger.info(f"Cached engine '{engine_name}' for portal {portal_url[:50]}... (unlimited)")
+    
+    @staticmethod
+    def clear_cached_engine(portal_url: str):
+        """Clear cached engine for portal URL (e.g., when it stops working)."""
+        cache_key = UnifiedMacPortalClient._get_engine_cache_key(portal_url)
+        cache.delete(cache_key)
+        logger.info(f"Cleared cached engine for portal {portal_url[:50]}...")
+    
+    @staticmethod
+    def get_fastest_engine(portal_url: str) -> Optional[Dict[str, Any]]:
+        """Get fastest benchmarked engine for portal URL.
+        
+        Returns:
+            Dict with 'engine', 'time_ms', 'channels', 'tested_at' or None
+        """
+        cache_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(portal_url)
+        return cache.get(cache_key)
+    
+    @staticmethod
+    def set_fastest_engine(portal_url: str, engine_name: str, time_ms: float, channels: int,
+                          stream_link_ok: bool = False, full_success: bool = False):
+        """Cache fastest benchmarked engine for portal URL (unlimited duration until new benchmark)."""
+        from django.utils import timezone
+        
+        cache_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(portal_url)
+        data = {
+            'engine': engine_name,
+            'time_ms': time_ms,
+            'channels': channels,
+            'stream_link_ok': stream_link_ok,
+            'full_success': full_success,
+            'tested_at': timezone.now().isoformat(),
+        }
+        # None = unlimited cache duration (until manually cleared or new benchmark)
+        cache.set(cache_key, data, UnifiedMacPortalClient.FASTEST_ENGINE_CACHE_TIMEOUT)
+        logger.info(f"Cached fastest engine '{engine_name}' ({time_ms:.0f}ms, {channels} ch, link={stream_link_ok}) for portal {portal_url[:50]}...")
+    
+    @staticmethod
+    def benchmark_all_engines(portal_url: str, mac: str, proxy: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Comprehensive benchmark of ALL engines for a portal.
+        
+        Tests each engine through the COMPLETE workflow:
+        1. Handshake (token acquisition)
+        2. Get Genres/Groups
+        3. Get All Channels
+        4. Create Stream Link (MOST IMPORTANT for failover!)
+        5. Detect Portal Type (XUI, Xtream, Stalker, etc.)
+        
+        The engine that completes ALL steps fastest wins.
+        Stream link creation is prioritized - engines that fail this step are penalized.
+        
+        Returns:
+            Dict with 'results' (list of engine results), 'fastest' (best engine), 'summary', 'portal_info'
+        """
+        from apps.m3u.portal_engines import create_engine
+        import time
+        
+        results = []
+        fastest_engine = None
+        fastest_time = float('inf')
+        portal_info = {
+            'portal_type': 'unknown',
+            'portal_version': None,
+            'detected_by': None,
+        }
+        
+        logger.info(f"Starting COMPREHENSIVE engine benchmark for {portal_url[:50]}...")
+        logger.info("Testing: Handshake → Genres → Channels → Stream Link → Portal Type")
+        
+        for engine_name in UnifiedMacPortalClient.AUTO_ENGINE_ORDER:
+            result = {
+                'engine': engine_name,
+                'success': False,
+                'full_success': False,  # All 4 steps passed
+                'time_ms': 0,
+                'channels': 0,
+                'genres': 0,
+                'stream_link_ok': False,
+                'steps': {
+                    'handshake': {'success': False, 'time_ms': 0, 'error': None},
+                    'genres': {'success': False, 'time_ms': 0, 'count': 0, 'error': None},
+                    'channels': {'success': False, 'time_ms': 0, 'count': 0, 'error': None},
+                    'stream_link': {'success': False, 'time_ms': 0, 'error': None},
+                },
+                'error': None,
+            }
+            
+            try:
+                logger.info(f"Benchmark: Testing engine '{engine_name}'...")
+                
+                client = create_engine(
+                    engine_name=engine_name,
+                    portal_url=portal_url,
+                    mac=mac,
+                    proxy=proxy
+                )
+                
+                if not client:
+                    result['error'] = 'Engine not found'
+                    results.append(result)
+                    continue
+                
+                total_start = time.time()
+                token = None
+                channels = []
+                test_cmd = None
+                
+                # Step 1: Handshake
+                step_start = time.time()
+                try:
+                    handshake_result = client.perform_handshake()
+                    step_time = (time.time() - step_start) * 1000
+                    result['steps']['handshake']['time_ms'] = round(step_time, 1)
+                    
+                    if handshake_result and handshake_result.success:
+                        result['steps']['handshake']['success'] = True
+                        token = handshake_result.token
+                        logger.debug(f"  Handshake OK ({step_time:.0f}ms)")
+                    else:
+                        result['steps']['handshake']['error'] = 'No token received'
+                        result['error'] = 'Handshake failed'
+                        results.append(result)
+                        continue
+                except Exception as e:
+                    result['steps']['handshake']['error'] = str(e)[:50]
+                    result['error'] = f'Handshake: {str(e)[:50]}'
+                    results.append(result)
+                    continue
+                
+                # Step 2: Get Genres
+                step_start = time.time()
+                try:
+                    genres = client.get_genres()
+                    step_time = (time.time() - step_start) * 1000
+                    result['steps']['genres']['time_ms'] = round(step_time, 1)
+                    
+                    if genres and len(genres) > 0:
+                        result['steps']['genres']['success'] = True
+                        result['steps']['genres']['count'] = len(genres)
+                        result['genres'] = len(genres)
+                        logger.debug(f"  Genres OK: {len(genres)} ({step_time:.0f}ms)")
+                    else:
+                        # Genres optional - some portals don't have them
+                        result['steps']['genres']['error'] = 'No genres'
+                        logger.debug(f"  Genres: None ({step_time:.0f}ms)")
+                except Exception as e:
+                    result['steps']['genres']['error'] = str(e)[:50]
+                    logger.debug(f"  Genres failed: {e}")
+                
+                # Step 3: Get Channels (REQUIRED)
+                step_start = time.time()
+                try:
+                    channels = client.get_all_channels()
+                    step_time = (time.time() - step_start) * 1000
+                    result['steps']['channels']['time_ms'] = round(step_time, 1)
+                    
+                    if channels and len(channels) > 0:
+                        result['steps']['channels']['success'] = True
+                        result['steps']['channels']['count'] = len(channels)
+                        result['channels'] = len(channels)
+                        # Get a test cmd for stream link test
+                        for ch in channels:
+                            cmd = ch.get('cmd')
+                            if cmd:
+                                test_cmd = cmd
+                                break
+                        logger.debug(f"  Channels OK: {len(channels)} ({step_time:.0f}ms)")
+                    else:
+                        result['steps']['channels']['error'] = 'No channels'
+                        result['error'] = 'No channels returned'
+                        results.append(result)
+                        continue
+                except Exception as e:
+                    result['steps']['channels']['error'] = str(e)[:50]
+                    result['error'] = f'Channels: {str(e)[:50]}'
+                    results.append(result)
+                    continue
+                
+                # Step 4: Create Stream Link (MOST IMPORTANT!)
+                step_start = time.time()
+                if test_cmd:
+                    try:
+                        stream_link = client.create_link(test_cmd)
+                        step_time = (time.time() - step_start) * 1000
+                        result['steps']['stream_link']['time_ms'] = round(step_time, 1)
+                        
+                        if stream_link and len(stream_link) > 10:
+                            result['steps']['stream_link']['success'] = True
+                            result['stream_link_ok'] = True
+                            logger.debug(f"  Stream Link OK ({step_time:.0f}ms)")
+                        else:
+                            result['steps']['stream_link']['error'] = 'Invalid link'
+                            logger.debug(f"  Stream Link: Invalid ({step_time:.0f}ms)")
+                    except Exception as e:
+                        result['steps']['stream_link']['error'] = str(e)[:50]
+                        logger.debug(f"  Stream Link failed: {e}")
+                else:
+                    result['steps']['stream_link']['error'] = 'No cmd to test'
+                
+                # Calculate total time
+                total_time = (time.time() - total_start) * 1000
+                result['time_ms'] = round(total_time, 1)
+                
+                # Determine success level
+                result['success'] = result['steps']['channels']['success']
+                result['full_success'] = (
+                    result['steps']['handshake']['success'] and
+                    result['steps']['channels']['success'] and
+                    result['steps']['stream_link']['success']
+                )
+                
+                # Step 5: Detect Portal Type (only on first successful engine)
+                if result['full_success'] and portal_info['portal_type'] == 'unknown':
+                    try:
+                        # Try to detect portal type from channel data
+                        if channels and len(channels) > 0:
+                            first_ch = channels[0]
+                            cmd = first_ch.get('cmd', '')
+                            
+                            # Detect from stream URL pattern
+                            if '/live/' in cmd and re.search(r'/live/[^/]+/[^/]+/', cmd):
+                                portal_info['portal_type'] = 'xtream'
+                                portal_info['detected_by'] = engine_name
+                            elif 'ffmpeg' in cmd.lower() or 'http://localhost' in cmd:
+                                portal_info['portal_type'] = 'stalker'
+                                portal_info['detected_by'] = engine_name
+                            
+                            # Try to get profile for more info
+                            if hasattr(client, 'get_profile'):
+                                try:
+                                    profile = client.get_profile(token) if token else None
+                                    if profile:
+                                        js = profile.get('js', {})
+                                        # XUI detection
+                                        if js.get('phone') and 'exp' in str(js.get('phone', '')).lower():
+                                            portal_info['portal_type'] = 'xui'
+                                            portal_info['detected_by'] = engine_name
+                                        # Version detection
+                                        if js.get('portal_version'):
+                                            portal_info['portal_version'] = js.get('portal_version')
+                                        elif js.get('version'):
+                                            portal_info['portal_version'] = js.get('version')
+                                except Exception:
+                                    pass
+                            
+                            logger.debug(f"  Portal Type: {portal_info['portal_type']}")
+                    except Exception as e:
+                        logger.debug(f"  Portal type detection failed: {e}")
+                
+                # Track fastest - PRIORITIZE engines with stream_link success!
+                # Engines with stream_link get a 50% time bonus (lower is better)
+                effective_time = total_time
+                if not result['stream_link_ok']:
+                    # Penalize engines that can't create stream links
+                    effective_time = total_time * 2
+                
+                if result['success'] and effective_time < fastest_time:
+                    fastest_time = effective_time
+                    fastest_engine = engine_name
+                
+                status = "FULL SUCCESS" if result['full_success'] else "PARTIAL"
+                logger.info(f"Benchmark: '{engine_name}' {status} - {len(channels)} ch, link={result['stream_link_ok']}, {total_time:.0f}ms")
+                    
+            except Exception as e:
+                result['error'] = str(e)[:100]
+                logger.warning(f"Benchmark: '{engine_name}' failed: {e}")
+            
+            results.append(result)
+        
+        # Save fastest engine if found
+        if fastest_engine:
+            fastest_result = next(r for r in results if r['engine'] == fastest_engine)
+            UnifiedMacPortalClient.set_fastest_engine(
+                portal_url, 
+                fastest_engine, 
+                fastest_result['time_ms'],
+                fastest_result['channels'],
+                fastest_result.get('stream_link_ok', False),
+                fastest_result.get('full_success', False)
+            )
+        
+        # Build summary
+        successful = [r for r in results if r['success']]
+        full_success = [r for r in results if r.get('full_success', False)]
+        with_stream_link = [r for r in results if r.get('stream_link_ok', False)]
+        
+        summary = {
+            'total_tested': len(results),
+            'successful': len(successful),
+            'full_success': len(full_success),
+            'with_stream_link': len(with_stream_link),
+            'failed': len(results) - len(successful),
+            'fastest_engine': fastest_engine,
+            'fastest_time_ms': round(fastest_time, 1) if fastest_engine and fastest_time != float('inf') else None,
+            'fastest_has_stream_link': fastest_result.get('stream_link_ok', False) if fastest_engine else False,
+        }
+        
+        logger.info(f"Benchmark complete: {summary['successful']}/{summary['total_tested']} engines worked, "
+                   f"{summary['with_stream_link']} with stream link, fastest: {fastest_engine}, "
+                   f"portal_type: {portal_info['portal_type']}")
+        
+        return {
+            'results': results,
+            'fastest': fastest_engine,
+            'summary': summary,
+            'portal_info': portal_info,
+        }
     
     def __init__(self, base_url: str, mac: str, proxy: Optional[str] = None,
                  timezone: str = "Europe/London"):
@@ -1447,23 +1811,52 @@ class UnifiedMacPortalClient:
             self.portal_engine = 'auto'
         
         # Create the appropriate client
-        self._unified_client = None
+        self._engine_client = None  # New: Uses portal_engines registry
         self._mac_client = None
+        self._successful_engine = None  # Track which engine worked
+        self._original_engine_mode = self.portal_engine  # Remember original setting
+        self._is_fastest_mode = False  # Track if we're using fastest mode
         
-        # Only use UnifiedPortalEngine for non-macreplay engines (estalker, boxpirate, ob2_2025)
-        # For 'auto', 'macreplay', '', None - use fast MacPortalClient directly
-        if self.portal_engine and self.portal_engine not in ('auto', 'macreplay', 'unified', '', None):
+        # Handle "fastest" mode - use benchmarked engine if available, else fall back to auto
+        if self.portal_engine == 'fastest':
+            self._is_fastest_mode = True
+            fastest_data = self.get_fastest_engine(base_url)
+            if fastest_data:
+                # Use the benchmarked fastest engine
+                self.portal_engine = fastest_data['engine']
+                logger.info(f"FASTEST mode: Using benchmarked engine '{self.portal_engine}' for {base_url[:50]}...")
+            else:
+                # No benchmark data - fall back to auto
+                self.portal_engine = 'auto'
+                logger.info(f"FASTEST mode: No benchmark data for {base_url[:50]}..., falling back to auto")
+        
+        # For specific engines (not auto), create engine from registry
+        if self.portal_engine and self.portal_engine not in ('auto', '', None):
             try:
-                from apps.m3u.unified_portal_engine import create_portal_client
-                self._unified_client = create_portal_client(
+                from apps.m3u.portal_engines import create_engine
+                self._engine_client = create_engine(
+                    engine_name=self.portal_engine,
                     portal_url=base_url,
                     mac=mac,
-                    engine=self.portal_engine,
                     proxy=proxy
                 )
-                logger.info(f"UnifiedMacPortalClient using engine: {self.portal_engine}")
+                if self._engine_client:
+                    logger.info(f"UnifiedMacPortalClient using engine: {self.portal_engine}")
+                else:
+                    logger.warning(f"Engine '{self.portal_engine}' not found in registry")
             except Exception as e:
-                logger.warning(f"Failed to create UnifiedPortalEngine: {e}")
+                logger.warning(f"Failed to create engine from registry: {e}")
+                # Fallback to unified_portal_engine for backwards compatibility
+                try:
+                    from apps.m3u.unified_portal_engine import create_portal_client
+                    self._engine_client = create_portal_client(
+                        portal_url=base_url,
+                        mac=mac,
+                        engine=self.portal_engine,
+                        proxy=proxy
+                    )
+                except Exception as e2:
+                    logger.warning(f"Fallback to unified_portal_engine also failed: {e2}")
         
         # Always create MacPortalClient as fallback
         self._mac_client = MacPortalClient(
@@ -1474,18 +1867,127 @@ class UnifiedMacPortalClient:
         )
     
     def get_channels(self) -> List[Dict[str, Any]]:
-        """Get all channels using the configured engine."""
-        if self._unified_client:
+        """Get all channels using the configured engine.
+        
+        For AUTO mode: Tries all engines in priority order until one succeeds.
+        For FASTEST mode: Uses benchmarked engine, falls back to AUTO if it fails.
+        """
+        # AUTO mode: Try all engines in order
+        if self.portal_engine in ('auto', '', None):
+            return self._get_channels_auto_mode()
+        
+        # Specific engine mode (including fastest mode with resolved engine)
+        if self._engine_client:
             try:
-                raw_channels = self._unified_client.get_all_channels()
+                raw_channels = self._engine_client.get_all_channels()
                 if raw_channels:
-                    # Normalize to MacPortalClient format
+                    self._successful_engine = self.portal_engine
+                    logger.info(f"Engine {self.portal_engine} returned {len(raw_channels)} channels")
                     return self._normalize_channels(raw_channels)
+                else:
+                    logger.warning(f"Engine {self.portal_engine} returned no channels")
             except Exception as e:
-                logger.warning(f"UnifiedPortalEngine.get_all_channels failed: {e}")
+                logger.warning(f"Engine.get_all_channels failed: {e}")
+            
+            # FASTEST mode fallback: If benchmarked engine fails, try AUTO mode
+            if self._is_fastest_mode:
+                logger.warning(f"FASTEST mode: Benchmarked engine '{self.portal_engine}' failed, falling back to AUTO mode")
+                return self._get_channels_auto_mode()
         
         # Fallback to MacPortalClient
         return self._mac_client.get_channels()
+    
+    def _get_channels_auto_mode(self) -> List[Dict[str, Any]]:
+        """AUTO mode: Try all engines in priority order until one succeeds.
+        
+        ENGINE CACHING:
+        - First checks if we have a cached successful engine for this portal
+        - If cached engine works, use it directly (fast path)
+        - If cached engine fails, clear cache and try all engines
+        - Successful engine is cached INDEFINITELY until manual refresh
+        
+        Uses the new portal_engines registry for cleaner architecture.
+        """
+        from apps.m3u.portal_engines import create_engine
+        
+        # Check for cached successful engine first (fast path)
+        cached_engine = self.get_cached_engine(self.base_url)
+        if cached_engine:
+            logger.info(f"AUTO: Using cached engine '{cached_engine}' for {self.base_url[:50]}...")
+            try:
+                client = create_engine(
+                    engine_name=cached_engine,
+                    portal_url=self.base_url,
+                    mac=self.mac,
+                    proxy=self.proxy
+                )
+                if client:
+                    raw_channels = client.get_all_channels()
+                    if raw_channels and len(raw_channels) > 0:
+                        self._successful_engine = cached_engine
+                        self._engine_client = client
+                        logger.info(f"AUTO: Cached engine '{cached_engine}' SUCCESS - {len(raw_channels)} channels")
+                        return self._normalize_channels(raw_channels)
+                    else:
+                        logger.warning(f"AUTO: Cached engine '{cached_engine}' returned no channels, clearing cache")
+                        self.clear_cached_engine(self.base_url)
+            except Exception as e:
+                logger.warning(f"AUTO: Cached engine '{cached_engine}' failed: {e}, clearing cache")
+                self.clear_cached_engine(self.base_url)
+        
+        # No cache or cache failed - try all engines in order
+        logger.info(f"AUTO mode: Trying engines in order: {self.AUTO_ENGINE_ORDER}")
+        
+        for engine_name in self.AUTO_ENGINE_ORDER:
+            try:
+                logger.info(f"AUTO: Trying engine '{engine_name}'...")
+                
+                # Create client from new registry
+                client = create_engine(
+                    engine_name=engine_name,
+                    portal_url=self.base_url,
+                    mac=self.mac,
+                    proxy=self.proxy
+                )
+                
+                if not client:
+                    logger.warning(f"AUTO: Engine '{engine_name}' not found in registry")
+                    continue
+                
+                # Try to get channels
+                raw_channels = client.get_all_channels()
+                
+                if raw_channels and len(raw_channels) > 0:
+                    self._successful_engine = engine_name
+                    self._engine_client = client  # Keep for later use (genres, expiry)
+                    
+                    # Cache successful engine for future requests
+                    self.set_cached_engine(self.base_url, engine_name)
+                    
+                    logger.info(f"AUTO: Engine '{engine_name}' SUCCESS - {len(raw_channels)} channels")
+                    return self._normalize_channels(raw_channels)
+                else:
+                    logger.warning(f"AUTO: Engine '{engine_name}' returned no channels")
+                    
+            except Exception as e:
+                logger.warning(f"AUTO: Engine '{engine_name}' failed: {e}")
+                continue
+        
+        # All engines failed - try MacPortalClient as last resort
+        logger.warning("AUTO: All engines failed, trying MacPortalClient fallback")
+        try:
+            channels = self._mac_client.get_channels()
+            if channels:
+                self._successful_engine = 'macreplay_fallback'
+                # Cache the fallback too
+                self.set_cached_engine(self.base_url, 'macreplay')
+                logger.info(f"AUTO: MacPortalClient fallback SUCCESS - {len(channels)} channels")
+                return channels
+        except Exception as e:
+            logger.error(f"AUTO: MacPortalClient fallback also failed: {e}")
+        
+        logger.error("AUTO: All engines and fallback failed - no channels retrieved")
+        return []
     
     def _normalize_channels(self, raw_channels: List[Dict]) -> List[Dict]:
         """Normalize raw channel data to MacPortalClient format."""
@@ -1494,15 +1996,17 @@ class UnifiedMacPortalClient:
         
         # Get genres map for group names
         genres_map = {}
-        if self._unified_client:
+        if self._engine_client:
             try:
-                genres = self._unified_client.get_genres()
-                if genres:
-                    for g in genres:
-                        gid = g.get('id')
-                        title = g.get('title') or g.get('name')
-                        if gid and title:
-                            genres_map[str(gid)] = title
+                # Try get_genres method (available on most engines)
+                if hasattr(self._engine_client, 'get_genres'):
+                    genres = self._engine_client.get_genres()
+                    if genres:
+                        for g in genres:
+                            gid = g.get('id')
+                            title = g.get('title') or g.get('name')
+                            if gid and title:
+                                genres_map[str(gid)] = title
             except Exception:
                 pass
         
@@ -1544,11 +2048,20 @@ class UnifiedMacPortalClient:
     
     def get_expires(self) -> Optional[str]:
         """Get account expiry info."""
-        if self._unified_client:
+        if self._engine_client:
             try:
-                info = self._unified_client.get_account_info()
-                if info:
-                    return info.get('phone') or info.get('tariff_expired_date')
+                # Try get_account_info if available (unified_portal_engine style)
+                if hasattr(self._engine_client, 'get_account_info'):
+                    info = self._engine_client.get_account_info()
+                    if info:
+                        return info.get('phone') or info.get('tariff_expired_date')
+                # Try get_profile for portal_engines style
+                elif hasattr(self._engine_client, 'get_profile') and hasattr(self._engine_client, 'identity'):
+                    if self._engine_client.identity.token:
+                        profile = self._engine_client.get_profile(self._engine_client.identity.token)
+                        if profile:
+                            js = profile.get('js', {})
+                            return js.get('phone') or js.get('tariff_expired_date')
             except Exception:
                 pass
         
@@ -1556,21 +2069,21 @@ class UnifiedMacPortalClient:
     
     def create_link(self, cmd: str) -> str:
         """Create stream link for a channel command."""
-        if self._unified_client:
+        if self._engine_client:
             try:
-                link = self._unified_client.create_link(cmd)
+                link = self._engine_client.create_link(cmd)
                 if link:
                     return link
             except Exception as e:
-                logger.warning(f"UnifiedPortalEngine.create_link failed: {e}")
+                logger.warning(f"Engine.create_link failed: {e}")
         
         return self._mac_client.create_link(cmd)
     
     def handshake(self) -> str:
         """Perform handshake and get token."""
-        if self._unified_client:
+        if self._engine_client:
             try:
-                result = self._unified_client.perform_handshake()
+                result = self._engine_client.perform_handshake()
                 if result.success:
                     return result.token
             except Exception:
@@ -1580,12 +2093,13 @@ class UnifiedMacPortalClient:
     
     def get_genres_map(self) -> Dict[str, str]:
         """Get genre ID to name mapping."""
-        if self._unified_client:
+        if self._engine_client:
             try:
-                genres = self._unified_client.get_genres()
-                if genres:
-                    return {str(g.get('id')): g.get('title') or g.get('name') 
-                            for g in genres if g.get('id')}
+                if hasattr(self._engine_client, 'get_genres'):
+                    genres = self._engine_client.get_genres()
+                    if genres:
+                        return {str(g.get('id')): g.get('title') or g.get('name') 
+                                for g in genres if g.get('id')}
             except Exception:
                 pass
         

@@ -235,6 +235,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         
         portal_data = {
             'id': portal.id,
+            'account_id': portal.id,  # Alias for consistency with other APIs
             'name': portal.name,
             'url': portal.server_url or '',
             'type': 'MAC/STB Portal',

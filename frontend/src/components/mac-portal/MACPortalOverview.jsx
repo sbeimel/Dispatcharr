@@ -42,7 +42,9 @@ import {
   IconActivity,
   IconDeviceTv,
   IconHeartbeat,
+  IconBolt,
 } from '@tabler/icons-react';
+import { notifications } from '@mantine/notifications';
 import API from '../../api';
 
 // API Base URL
@@ -128,8 +130,56 @@ const ExpiryCountdown = ({ days }) => {
  */
 const PortalCard = ({ portal, onRefresh }) => {
   const [expanded, setExpanded] = useState(false);
+  const [benchmarking, setBenchmarking] = useState(false);
+  const [fastestEngine, setFastestEngine] = useState(null);
 
   const isOnline = portal.status === 'online';
+
+  // Load cached benchmark on mount
+  useEffect(() => {
+    if (portal.id) {
+      loadCachedBenchmark();
+    }
+  }, [portal.id]);
+
+  const loadCachedBenchmark = async () => {
+    if (!portal.id) return;
+    try {
+      const response = await API.get(`/api/m3u-accounts/${portal.id}/engine-benchmark/`);
+      if (response.data?.fastest_engine) {
+        setFastestEngine(response.data.fastest_engine);
+      }
+    } catch (error) {
+      // Ignore errors - benchmark may not exist
+    }
+  };
+
+  const runBenchmark = async () => {
+    if (!portal.id) return;
+    setBenchmarking(true);
+    try {
+      const response = await API.post(`/api/m3u-accounts/${portal.id}/engine-benchmark/run/`);
+      if (response.data?.fastest) {
+        setFastestEngine({
+          engine: response.data.fastest,
+          time_ms: response.data.summary?.fastest_time_ms,
+        });
+        notifications.show({
+          title: 'Benchmark Complete',
+          message: `Fastest engine: ${response.data.fastest} (${response.data.summary?.fastest_time_ms}ms)`,
+          color: 'green',
+        });
+      }
+    } catch (error) {
+      notifications.show({
+        title: 'Benchmark Failed',
+        message: error.response?.data?.error || 'Failed to run benchmark',
+        color: 'red',
+      });
+    } finally {
+      setBenchmarking(false);
+    }
+  };
 
   return (
     <Card shadow="sm" p="md" mb="md" withBorder>
@@ -146,6 +196,18 @@ const PortalCard = ({ portal, onRefresh }) => {
           {portal.portal_version && portal.portal_version !== 'unknown' && (
             <Badge size="sm" variant="light" color="blue">
               v{portal.portal_version}
+            </Badge>
+          )}
+          {fastestEngine && (
+            <Badge 
+              size="sm" 
+              variant="light" 
+              color={fastestEngine.stream_link_ok ? "green" : "yellow"} 
+              leftSection={<IconBolt size={12} />}
+              title={fastestEngine.stream_link_ok ? "Stream Link OK" : "Stream Link not tested"}
+            >
+              {fastestEngine.engine} ({fastestEngine.time_ms}ms)
+              {fastestEngine.stream_link_ok && " ✓"}
             </Badge>
           )}
         </Group>
@@ -168,6 +230,15 @@ const PortalCard = ({ portal, onRefresh }) => {
               Max {portal.max_connections} Streams
             </Badge>
           )}
+          <ActionIcon 
+            variant="subtle" 
+            color="yellow"
+            onClick={runBenchmark}
+            loading={benchmarking}
+            title="Run Engine Benchmark"
+          >
+            <IconBolt size={16} />
+          </ActionIcon>
           <ActionIcon variant="subtle" onClick={() => setExpanded(!expanded)}>
             {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
           </ActionIcon>

@@ -114,6 +114,9 @@ class BasePortalStrategy(ABC):
         '/stalker_portal/server/load.php',
     ]
     
+    # Alias for compatibility
+    ENDPOINTS = PORTAL_ENDPOINTS
+    
     def __init__(self, portal_url: str, identity: PortalIdentity, 
                  user_agent: str = 'MAG250', timeout: int = 10,
                  proxy: Optional[str] = None, use_cloudscraper: Optional[bool] = None):
@@ -201,6 +204,76 @@ class BasePortalStrategy(ABC):
         """
         pass
     
+    def _make_request(self, params: Dict[str, Any], token: str, 
+                       method: str = "GET") -> Optional[Dict[str, Any]]:
+        """
+        Make a request to the portal with proper headers/cookies for this engine.
+        
+        Args:
+            params: Request parameters (type, action, etc.)
+            token: Authentication token
+            method: HTTP method (GET or POST)
+            
+        Returns:
+            JSON response or None
+        """
+        headers = self._get_base_headers()
+        headers["Authorization"] = f"Bearer {token}"
+        cookies = self._get_cookies()
+        proxies = self._get_proxies()
+        
+        params["JsHttpRequest"] = "1-xml"
+        
+        for endpoint in self.PORTAL_ENDPOINTS:
+            url = f"{self.portal_url}{endpoint}"
+            
+            try:
+                if method.upper() == "GET":
+                    response = self.session.get(
+                        url, params=params, headers=headers,
+                        cookies=cookies, proxies=proxies,
+                        timeout=self.timeout, verify=False
+                    )
+                else:
+                    response = self.session.post(
+                        url, data=params, headers=headers,
+                        cookies=cookies, proxies=proxies,
+                        timeout=self.timeout, verify=False
+                    )
+                
+                if response.status_code == 200:
+                    try:
+                        return response.json()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug(f"{self.NAME}: Request failed for {endpoint}: {e}")
+        
+        return None
+    
+    def _get_base_headers(self) -> Dict[str, str]:
+        """Basis-Headers für alle Requests."""
+        from urllib.parse import urlparse
+        parsed = urlparse(self.portal_url)
+        return {
+            "Host": parsed.netloc,
+            "Accept": "*/*",
+            "User-Agent": self.user_agent,
+            "Accept-Encoding": "gzip, deflate",
+            "X-User-Agent": "Model: MAG250; Link: WiFi",
+            "Connection": "close",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+        }
+    
+    def _get_cookies(self) -> Dict[str, str]:
+        """Standard-Cookies."""
+        return {
+            "mac": self.identity.mac,
+            "stb_lang": self.identity.lang,
+            "timezone": self.identity.timezone,
+        }
+    
     @abstractmethod
     def create_link(self, cmd: str) -> Optional[str]:
         """
@@ -223,3 +296,69 @@ class BasePortalStrategy(ABC):
             Liste von Kanal-Dictionaries
         """
         pass
+    
+    def _create_link_base(self, cmd: str) -> Optional[str]:
+        """
+        Base implementation for create_link.
+        Can be used by subclasses that don't need custom logic.
+        """
+        if not self.identity.token:
+            result = self.perform_handshake()
+            if not result.success:
+                return None
+            self.identity.token = result.token
+        
+        params = {
+            "type": "itv",
+            "action": "create_link",
+            "cmd": cmd,
+            "series": "0",
+            "forced_storage": "false",
+            "disable_ad": "false",
+            "download": "false",
+            "force_ch_link_check": "false",
+        }
+        
+        # Try GET first, then POST
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, self.identity.token, method)
+            if data:
+                try:
+                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    if link and (link.startswith("http://") or link.startswith("https://")):
+                        logger.info(f"{self.NAME}: create_link successful via {method}")
+                        return link
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: create_link parse failed: {e}")
+        
+        return None
+    
+    def _get_all_channels_base(self) -> list:
+        """
+        Base implementation for get_all_channels.
+        Can be used by subclasses that don't need custom logic.
+        """
+        if not self.identity.token:
+            result = self.perform_handshake()
+            if not result.success:
+                return []
+            self.identity.token = result.token
+        
+        params = {
+            "type": "itv",
+            "action": "get_all_channels",
+            "force_ch_link_check": "",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, self.identity.token, method)
+            if data:
+                try:
+                    channels = data.get("js", {}).get("data", [])
+                    if channels:
+                        logger.info(f"{self.NAME}: Got {len(channels)} channels via {method}")
+                        return channels
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_all_channels parse failed: {e}")
+        
+        return []
