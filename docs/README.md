@@ -8,6 +8,7 @@ Diese Dokumentation beschreibt die erweiterten Features von Dispatcharr.
 
 | Datei | Beschreibung |
 |-------|--------------|
+| [FAILOVER_SYSTEM.md](FAILOVER_SYSTEM.md) | Failover-System Erklärung mit Beispielen |
 | [FAILOVER_TEST_PAGE.md](FAILOVER_TEST_PAGE.md) | Anleitung zur Failover Test Page |
 
 ## Specs

@@ -198,6 +198,9 @@ urlpatterns = [
     path('overview/', overview_viewset, name='overview'),
     path('overview/statistics/', overview_statistics, name='overview-statistics'),
     
+    # NOTE: Benchmark endpoints moved to /api/m3u/benchmark/<id>/run/ and /api/m3u/benchmark/<id>/result/
+    # See apps/m3u/api/simple_benchmark_api.py
+    
     # Zusätzliche benutzerdefinierte Endpunkte
     path('portals/<int:pk>/refresh/', views.MACPortalViewSet.as_view({'post': 'refresh'}), name='portal-refresh'),
     path('mac-addresses/bulk-refresh/', views.MACAddressViewSet.as_view({'post': 'bulk_refresh'}), name='mac-bulk-refresh'),

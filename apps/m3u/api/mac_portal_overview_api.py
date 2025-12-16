@@ -358,3 +358,6 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         if overview.status_code == 200:
             return Response(overview.data.get('statistics', {}))
         return overview
+
+    # NOTE: Benchmark endpoints moved to /api/m3u/benchmark/<id>/run/ and /api/m3u/benchmark/<id>/result/
+    # See apps/m3u/api/simple_benchmark_api.py for the new implementation

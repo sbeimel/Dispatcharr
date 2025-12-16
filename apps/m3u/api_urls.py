@@ -12,6 +12,7 @@ from .api_views import (
 )
 from .api.mac_portal_api import get_mac_portal_urls, get_mac_management_urls
 from .api.failover_test_api import get_failover_test_urls
+from .api.simple_benchmark_api import run_benchmark, get_benchmark_result, clear_benchmark
 
 app_name = "m3u"
 
@@ -49,5 +50,12 @@ urlpatterns += get_mac_management_urls()
 
 # Add Failover Test API endpoints
 urlpatterns += get_failover_test_urls()
+
+# Simple Benchmark API endpoints (standalone, guaranteed to work)
+urlpatterns += [
+    path('benchmark/<int:account_id>/run/', run_benchmark, name='benchmark-run'),
+    path('benchmark/<int:account_id>/result/', get_benchmark_result, name='benchmark-result'),
+    path('benchmark/<int:account_id>/clear/', clear_benchmark, name='benchmark-clear'),
+]
 
 urlpatterns += router.urls

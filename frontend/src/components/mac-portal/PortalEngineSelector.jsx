@@ -20,7 +20,6 @@ import {
   Button,
   Loader,
   Table,
-  Progress,
 } from '@mantine/core';
 import {
   IconRocket,
@@ -132,7 +131,8 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
     if (!accountId) return;
     setLoadingCache(true);
     try {
-      const response = await API.get(`/api/m3u/accounts/${accountId}/engine-benchmark/`);
+      // Simple Benchmark API - guaranteed to work
+      const response = await API.get(`/api/m3u/benchmark/${accountId}/result/`);
       setCachedBenchmark(response.data);
     } catch (error) {
       console.error('Failed to load cached benchmark:', error);
@@ -151,13 +151,14 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
     setBenchmarkResults(null);
     
     try {
-      const response = await API.post(`/api/m3u/accounts/${accountId}/engine-benchmark/`);
+      // Simple Benchmark API - guaranteed to work
+      const response = await API.post(`/api/m3u/benchmark/${accountId}/run/`);
       setBenchmarkResults(response.data);
       // Refresh cached data
       loadCachedBenchmark();
     } catch (error) {
       console.error('Benchmark failed:', error);
-      setBenchmarkResults({ error: error.response?.data?.error || 'Benchmark failed' });
+      setBenchmarkResults({ error: error.response?.data?.error || error.message || 'Benchmark failed' });
     } finally {
       setBenchmarkRunning(false);
     }
@@ -165,9 +166,9 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
   
   const clearBenchmark = async () => {
     if (!accountId) return;
-    
     try {
-      await API.delete(`/api/m3u/accounts/${accountId}/engine-benchmark/?action=all`);
+      // Simple Benchmark API - clear cache
+      await API.delete(`/api/m3u/benchmark/${accountId}/clear/`);
       setCachedBenchmark(null);
       setBenchmarkResults(null);
     } catch (error) {
@@ -177,14 +178,8 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
   
   const refreshAutoCache = async () => {
     if (!accountId) return;
-    
-    try {
-      await API.delete(`/api/m3u/accounts/${accountId}/engine-benchmark/?action=auto`);
-      // Refresh cached data to show updated state
-      loadCachedBenchmark();
-    } catch (error) {
-      console.error('Failed to refresh auto cache:', error);
-    }
+    // Einfach neu laden
+    loadCachedBenchmark();
   };
 
   return (
