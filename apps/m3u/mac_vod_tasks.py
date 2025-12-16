@@ -333,14 +333,41 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
     
     Note: This function now handles both old models (without group_type/custom_properties)
     and new models (with these fields) gracefully.
+    
+    Portal categories can have various field names:
+    - id, category_id, cat_id
+    - title, name, category_name, cat_name
     """
     count = 0
     
+    if not categories:
+        logger.warning(f"No categories provided for {prefix}")
+        return 0
+    
+    logger.info(f"Processing {len(categories)} {prefix} categories for account {account.name}")
+    
+    # Log first category for debugging
+    if categories:
+        logger.info(f"First category data sample: {categories[0]}")
+    
     for cat_data in categories:
-        cat_id = cat_data.get('category_id') or cat_data.get('id')
-        cat_name = cat_data.get('category_name') or cat_data.get('name') or f"Category {cat_id}"
+        # Try multiple field names for category ID
+        cat_id = (
+            cat_data.get('category_id') or 
+            cat_data.get('id') or 
+            cat_data.get('cat_id')
+        )
+        # Try multiple field names for category name
+        cat_name = (
+            cat_data.get('category_name') or 
+            cat_data.get('name') or 
+            cat_data.get('title') or  # Portal often uses 'title'
+            cat_data.get('cat_name') or
+            f"Category {cat_id}"
+        )
         
         if not cat_id:
+            logger.debug(f"Skipping category without ID: {cat_data}")
             continue
         
         # Create group name with prefix
@@ -395,9 +422,12 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
                 if created or rel_created:
                     count += 1
                     logger.debug(f"Created VOD category group: {group_name}")
+                else:
+                    logger.debug(f"VOD category group already exists: {group_name}")
                 
         except Exception as e:
-            logger.warning(f"Error creating category group {group_name}: {e}")
+            logger.warning(f"Error creating category group {group_name}: {e}", exc_info=True)
             continue
     
+    logger.info(f"_create_channel_groups_for_categories: processed {len(categories)} categories, created/updated {count} groups")
     return count
