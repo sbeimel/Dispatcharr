@@ -42,6 +42,40 @@ import { USER_LEVELS } from '../constants';
 import UserForm from './forms/User';
 
 const NavLink = ({ item, isActive, collapsed }) => {
+  // Handle disabled items
+  if (item.disabled) {
+    return (
+      <UnstyledButton
+        key={item.path}
+        className={`navlink navlink-disabled ${collapsed ? 'navlink-collapsed' : ''}`}
+        style={{ opacity: 0.5, cursor: 'not-allowed' }}
+        title={item.tooltip || 'Coming Soon'}
+        onClick={(e) => e.preventDefault()}
+      >
+        {item.icon}
+        {!collapsed && (
+          <Text
+            sx={{
+              opacity: collapsed ? 0 : 1,
+              transition: 'opacity 0.2s ease-in-out',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              minWidth: collapsed ? 0 : 150,
+            }}
+          >
+            {item.label}
+          </Text>
+        )}
+        {!collapsed && (
+          <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+            (Soon)
+          </Text>
+        )}
+      </UnstyledButton>
+    );
+  }
+
   return (
     <UnstyledButton
       key={item.path}
@@ -140,6 +174,8 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
             label: 'Predictive Failover',
             icon: <BrainCircuit size={20} />,
             path: '/predictive-failover',
+            disabled: true,
+            tooltip: 'Coming Soon - Not yet implemented',
           },
           {
             label: 'Settings',

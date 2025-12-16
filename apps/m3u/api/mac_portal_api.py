@@ -904,8 +904,10 @@ def get_mac_portal_urls():
 
 
 def get_mac_management_urls():
-    """Get URL patterns for MAC Management API."""
-    from django.urls import re_path
+    """Get URL patterns for MAC Management API.
+    
+    Note: Engine Benchmark URLs are now in engine_benchmark_api.py
+    """
     from rest_framework.routers import DefaultRouter
     
     router = DefaultRouter()
@@ -942,17 +944,4 @@ def get_mac_management_urls():
         basename='vod-series'
     )
     
-    # Manual URL patterns for EngineBenchmarkViewSet
-    benchmark_list = EngineBenchmarkViewSet.as_view({'get': 'list', 'post': 'create'})
-    benchmark_detail = EngineBenchmarkViewSet.as_view({'delete': 'destroy'})
-    
-    manual_urls = [
-        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/$', benchmark_list, name='engine-benchmark-list'),
-        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/(?P<pk>[^/]+)/$', benchmark_detail, name='engine-benchmark-detail'),
-    ]
-    
-    return router.urls + manual_urls$', benchmark_list, name='engine-benchmark-list'),
-        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/(?P<pk>[^/]+)/$', benchmark_detail, name='engine-benchmark-detail'),
-    ]
-    
-    return router.urls + manual_urls
+    return router.urls
