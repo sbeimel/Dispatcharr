@@ -68,7 +68,16 @@ def refresh_mac_portal_categories(account_id):
         logger.info(f"Fetching VOD categories for account {account.name}")
         vod_categories = engine.get_vod_categories()
         
+        logger.info(f"VOD categories response type: {type(vod_categories)}")
         if vod_categories:
+            logger.info(f"VOD categories count: {len(vod_categories)}")
+            # Check if it's a dict with 'js' key (nested format)
+            if isinstance(vod_categories, dict):
+                logger.info(f"VOD categories is dict with keys: {vod_categories.keys()}")
+                if 'js' in vod_categories:
+                    vod_categories = vod_categories['js']
+                    logger.info(f"Extracted 'js' key, now have {len(vod_categories)} categories")
+            
             vod_count = _create_channel_groups_for_categories(
                 account, vod_categories, "VOD - Movies", "vod_movie"
             )
@@ -79,7 +88,16 @@ def refresh_mac_portal_categories(account_id):
         logger.info(f"Fetching series categories for account {account.name}")
         series_categories = engine.get_series_categories()
         
+        logger.info(f"Series categories response type: {type(series_categories)}")
         if series_categories:
+            logger.info(f"Series categories count: {len(series_categories)}")
+            # Check if it's a dict with 'js' key (nested format)
+            if isinstance(series_categories, dict):
+                logger.info(f"Series categories is dict with keys: {series_categories.keys()}")
+                if 'js' in series_categories:
+                    series_categories = series_categories['js']
+                    logger.info(f"Extracted 'js' key, now have {len(series_categories)} categories")
+            
             series_count = _create_channel_groups_for_categories(
                 account, series_categories, "VOD - Series", "vod_series"
             )
@@ -362,11 +380,27 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
     
     logger.info(f"Processing {len(categories)} {prefix} categories for account {account.name}")
     
-    # Log first category for debugging
+    # Log first few categories for debugging
     if categories:
         logger.info(f"First category data sample: {categories[0]}")
+        logger.info(f"First category type: {type(categories[0])}")
+        logger.info(f"First category keys: {categories[0].keys() if isinstance(categories[0], dict) else 'NOT A DICT'}")
+        if len(categories) > 1:
+            logger.info(f"Second category data sample: {categories[1]}")
+        if len(categories) > 2:
+            logger.info(f"Third category data sample: {categories[2]}")
+    
+    skipped_no_id = 0
+    skipped_star_id = 0
+    skipped_not_dict = 0
     
     for cat_data in categories:
+        # Ensure cat_data is a dict
+        if not isinstance(cat_data, dict):
+            skipped_not_dict += 1
+            logger.warning(f"Category data is not a dict: {type(cat_data)} - {cat_data}")
+            continue
+        
         # Try multiple field names for category ID
         cat_id = (
             cat_data.get('category_id') or 
@@ -383,7 +417,14 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
         )
         
         if not cat_id:
+            skipped_no_id += 1
             logger.debug(f"Skipping category without ID: {cat_data}")
+            continue
+        
+        # Skip special "All" category with id='*'
+        if str(cat_id) == '*':
+            skipped_star_id += 1
+            logger.debug(f"Skipping 'All' category with id='*': {cat_name}")
             continue
         
         # Create group name with prefix
@@ -454,10 +495,12 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
                     logger.debug(f"Created VOD category relation: {group_name}")
                 
         except Exception as e:
-            logger.warning(f"Error creating category group {group_name}: {e}", exc_info=True)
+            logger.error(f"Error creating category group {group_name}: {e}", exc_info=True)
             continue
     
     total = count + updated_count
     logger.info(f"_create_channel_groups_for_categories: processed {len(categories)} categories, "
-                f"created {count} new, updated {updated_count} existing (total: {total})")
+                f"created {count} new, updated {updated_count} existing (total: {total}), "
+                f"skipped_no_id={skipped_no_id}, skipped_star_id={skipped_star_id}, "
+                f"skipped_not_dict={skipped_not_dict}")
     return total

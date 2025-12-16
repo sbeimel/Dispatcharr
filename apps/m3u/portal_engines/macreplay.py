@@ -101,29 +101,184 @@ class MacReplayStrategy(BasePortalStrategy):
             logger.error(f"MacReplayStrategy get_categories failed: {e}")
             return []
     
-    def get_vod_categories(self) -> list:
-        """Hole VOD-Kategorien über MacPortalClient."""
+    def get_vod_categories(self, token: Optional[str] = None) -> list:
+        """Hole VOD-Kategorien.
+        
+        Verwendet die Basis-Implementierung da MacPortalClient keine VOD-Methoden hat.
+        """
         try:
-            client = self._get_client()
-            return client.get_vod_categories()
+            # Ensure we have a token
+            if not token:
+                client = self._get_client()
+                if not client.token:
+                    client.handshake()
+                token = client.token
+            
+            if not token:
+                logger.error("MacReplayStrategy get_vod_categories: No token available")
+                return []
+            
+            params = {
+                "type": "vod",
+                "action": "get_categories",
+            }
+            
+            data = self._make_request(params, token, "GET")
+            if data:
+                categories = data.get("js", [])
+                if categories:
+                    logger.info(f"MacReplayStrategy: Got {len(categories)} VOD categories")
+                    return categories
+            
+            # Try POST if GET failed
+            data = self._make_request(params, token, "POST")
+            if data:
+                categories = data.get("js", [])
+                if categories:
+                    logger.info(f"MacReplayStrategy: Got {len(categories)} VOD categories via POST")
+                    return categories
+            
+            return []
         except Exception as e:
             logger.error(f"MacReplayStrategy get_vod_categories failed: {e}")
             return []
     
-    def get_vod_items(self, category_id: str) -> list:
+    def get_vod_items(self, token: Optional[str] = None, category_id: str = "*",
+                      page: int = 1, sortby: str = "added") -> dict:
         """Hole VOD-Items einer Kategorie."""
         try:
-            client = self._get_client()
-            return client.get_vod_items(category_id)
+            # Ensure we have a token
+            if not token:
+                client = self._get_client()
+                if not client.token:
+                    client.handshake()
+                token = client.token
+            
+            if not token:
+                logger.error("MacReplayStrategy get_vod_items: No token available")
+                return {"data": [], "total_items": 0}
+            
+            params = {
+                "type": "vod",
+                "action": "get_ordered_list",
+                "category": category_id,
+                "p": str(page),
+                "sortby": sortby,
+            }
+            
+            for method in ["GET", "POST"]:
+                data = self._make_request(params, token, method)
+                if data:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    if items:
+                        logger.info(f"MacReplayStrategy: Got {len(items)} VOD items via {method}")
+                        return {"data": items, "total_items": total}
+            
+            return {"data": [], "total_items": 0}
         except Exception as e:
             logger.error(f"MacReplayStrategy get_vod_items failed: {e}")
-            return []
+            return {"data": [], "total_items": 0}
     
-    def get_series_categories(self) -> list:
-        """Hole Serien-Kategorien über MacPortalClient."""
+    def get_series_categories(self, token: Optional[str] = None) -> list:
+        """Hole Serien-Kategorien."""
         try:
-            client = self._get_client()
-            return client.get_series_categories()
+            # Ensure we have a token
+            if not token:
+                client = self._get_client()
+                if not client.token:
+                    client.handshake()
+                token = client.token
+            
+            if not token:
+                logger.error("MacReplayStrategy get_series_categories: No token available")
+                return []
+            
+            params = {
+                "type": "series",
+                "action": "get_categories",
+            }
+            
+            for method in ["GET", "POST"]:
+                data = self._make_request(params, token, method)
+                if data:
+                    categories = data.get("js", [])
+                    if categories:
+                        logger.info(f"MacReplayStrategy: Got {len(categories)} series categories via {method}")
+                        return categories
+            
+            return []
         except Exception as e:
             logger.error(f"MacReplayStrategy get_series_categories failed: {e}")
+            return []
+    
+    def get_series_items(self, token: Optional[str] = None, category_id: str = "*",
+                         page: int = 1, sortby: str = "added") -> dict:
+        """Hole Serien-Items einer Kategorie."""
+        try:
+            # Ensure we have a token
+            if not token:
+                client = self._get_client()
+                if not client.token:
+                    client.handshake()
+                token = client.token
+            
+            if not token:
+                logger.error("MacReplayStrategy get_series_items: No token available")
+                return {"data": [], "total_items": 0}
+            
+            params = {
+                "type": "series",
+                "action": "get_ordered_list",
+                "category": category_id,
+                "p": str(page),
+                "sortby": sortby,
+            }
+            
+            for method in ["GET", "POST"]:
+                data = self._make_request(params, token, method)
+                if data:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    if items:
+                        logger.info(f"MacReplayStrategy: Got {len(items)} series items via {method}")
+                        return {"data": items, "total_items": total}
+            
+            return {"data": [], "total_items": 0}
+        except Exception as e:
+            logger.error(f"MacReplayStrategy get_series_items failed: {e}")
+            return {"data": [], "total_items": 0}
+    
+    def get_genres(self, token: Optional[str] = None) -> list:
+        """Hole Live-TV Genres/Kategorien."""
+        try:
+            # Ensure we have a token
+            if not token:
+                client = self._get_client()
+                if not client.token:
+                    client.handshake()
+                token = client.token
+            
+            if not token:
+                logger.error("MacReplayStrategy get_genres: No token available")
+                return []
+            
+            params = {
+                "type": "itv",
+                "action": "get_genres",
+            }
+            
+            for method in ["GET", "POST"]:
+                data = self._make_request(params, token, method)
+                if data:
+                    genres = data.get("js", [])
+                    if genres:
+                        logger.info(f"MacReplayStrategy: Got {len(genres)} genres via {method}")
+                        return genres
+            
+            return []
+        except Exception as e:
+            logger.error(f"MacReplayStrategy get_genres failed: {e}")
             return []
