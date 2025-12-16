@@ -2990,11 +2990,27 @@ def refresh_single_m3u_account(account_id):
                 except Exception as e:
                     logger.error(f"Failed to queue VOD refresh for XC account {account_id}: {str(e)}")
             elif account.account_type == M3UAccount.Types.MAC:
-                logger.info(f"VOD is enabled for MAC account {account_id}, triggering MAC VOD category refresh")
+                logger.info(f"VOD is enabled for MAC account {account_id}, checking VOD categories")
                 try:
-                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
-                    refresh_mac_portal_categories.delay(account_id)
-                    logger.info(f"MAC VOD category refresh task queued for account {account_id}")
+                    # Check if VOD categories already exist and are enabled
+                    enabled_vod_groups = ChannelGroupM3UAccount.objects.filter(
+                        m3u_account=account,
+                        enabled=True,
+                        channel_group__group_type__in=['vod_movie', 'vod_series']
+                    ).exists()
+                    
+                    if enabled_vod_groups:
+                        # Phase 2: Import VOD content for selected categories
+                        logger.info(f"Found enabled VOD categories, triggering VOD content import for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_selected_vod
+                        refresh_mac_portal_selected_vod.delay(account_id)
+                        logger.info(f"MAC VOD content import task queued for account {account_id}")
+                    else:
+                        # Phase 1: Load categories first
+                        logger.info(f"No VOD categories yet, triggering MAC VOD category refresh for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                        refresh_mac_portal_categories.delay(account_id)
+                        logger.info(f"MAC VOD category refresh task queued for account {account_id}")
                 except Exception as e:
                     logger.error(f"Failed to queue MAC VOD refresh for account {account_id}: {str(e)}")
 
