@@ -314,7 +314,7 @@ def _create_portal_engine(account, mac_address):
             logger.info(f"VOD using FASTEST benchmarked engine: {engine_pref}")
         else:
             engine_pref = "auto"
-            logger.info(f"VOD: 'fastest' mode but no benchmark data, using auto")
+            logger.info("VOD: 'fastest' mode but no benchmark data, using auto")
     
     try:
         selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO
@@ -337,8 +337,11 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
     Portal categories can have various field names:
     - id, category_id, cat_id
     - title, name, category_name, cat_name
+    
+    WICHTIG: Diese Funktion funktioniert für ALLE Engines (MacReplay, iSTB, BoxPirate, etc.)
     """
     count = 0
+    updated_count = 0
     
     if not categories:
         logger.warning(f"No categories provided for {prefix}")
@@ -375,27 +378,42 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
         
         try:
             with transaction.atomic():
-                # Check if ChannelGroup model has the new fields
-                has_new_fields = hasattr(ChannelGroup, 'group_type') and hasattr(ChannelGroup, 'custom_properties')
+                # First check if group exists and needs group_type update
+                existing_group = ChannelGroup.objects.filter(name=group_name).first()
                 
-                if has_new_fields:
-                    # New model with group_type and custom_properties
-                    group, created = ChannelGroup.objects.update_or_create(
-                        name=group_name,
-                        defaults={
-                            'group_type': group_type,
-                            'custom_properties': {
-                                'portal_category_id': str(cat_id),
-                                'portal_category_name': cat_name,
-                                'is_vod_category': True,
-                            }
-                        }
-                    )
+                custom_props = {
+                    'portal_category_id': str(cat_id),
+                    'portal_category_name': cat_name,
+                    'is_vod_category': True,
+                }
+                
+                if existing_group:
+                    # Update group_type if it's wrong (e.g., 'live' instead of 'vod_movie')
+                    needs_update = False
+                    if existing_group.group_type != group_type:
+                        existing_group.group_type = group_type
+                        needs_update = True
+                    
+                    # Also update custom_properties if needed
+                    if existing_group.custom_properties != custom_props:
+                        existing_group.custom_properties = custom_props
+                        needs_update = True
+                    
+                    if needs_update:
+                        existing_group.save()
+                        updated_count += 1
+                        logger.info(f"Updated existing VOD category group: {group_name} -> group_type={group_type}")
+                    
+                    group = existing_group
                 else:
-                    # Old model without new fields - just create by name
-                    group, created = ChannelGroup.objects.get_or_create(
-                        name=group_name
+                    # Create new group
+                    group = ChannelGroup.objects.create(
+                        name=group_name,
+                        group_type=group_type,
+                        custom_properties=custom_props
                     )
+                    count += 1
+                    logger.info(f"Created new VOD category group: {group_name} with type={group_type}")
                 
                 # Get auto-enable setting
                 account_props = account.custom_properties or {}
@@ -419,15 +437,14 @@ def _create_channel_groups_for_categories(account, categories, prefix, group_typ
                     }
                 )
                 
-                if created or rel_created:
-                    count += 1
-                    logger.debug(f"Created VOD category group: {group_name}")
-                else:
-                    logger.debug(f"VOD category group already exists: {group_name}")
+                if rel_created:
+                    logger.debug(f"Created VOD category relation: {group_name}")
                 
         except Exception as e:
             logger.warning(f"Error creating category group {group_name}: {e}", exc_info=True)
             continue
     
-    logger.info(f"_create_channel_groups_for_categories: processed {len(categories)} categories, created/updated {count} groups")
-    return count
+    total = count + updated_count
+    logger.info(f"_create_channel_groups_for_categories: processed {len(categories)} categories, "
+                f"created {count} new, updated {updated_count} existing (total: {total})")
+    return total
