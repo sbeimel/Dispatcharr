@@ -125,13 +125,28 @@ const M3UGroupFilter = ({ playlist = null, isOpen, onClose }) => {
         custom_properties: state.custom_properties || undefined,
       }));
 
-      const categorySettings = movieCategoryStates
-        .concat(seriesCategoryStates)
-        .map((state) => ({
-          ...state,
-          custom_properties: state.custom_properties || undefined,
-        }))
-        .filter((state) => state.enabled !== state.original_enabled);
+      // For MAC accounts, VOD categories are also ChannelGroups, so add them to groupSettings
+      if (playlist?.account_type === 'MAC') {
+        const vodGroupSettings = movieCategoryStates
+          .concat(seriesCategoryStates)
+          .map((state) => ({
+            channel_group: state.channel_group || state.id,
+            enabled: state.enabled,
+            custom_properties: state.custom_properties || {},
+          }));
+        groupSettings.push(...vodGroupSettings);
+      }
+
+      // For XC accounts, use the old categorySettings approach
+      const categorySettings = playlist?.account_type === 'XC'
+        ? movieCategoryStates
+            .concat(seriesCategoryStates)
+            .map((state) => ({
+              ...state,
+              custom_properties: state.custom_properties || undefined,
+            }))
+            .filter((state) => state.enabled !== state.original_enabled)
+        : [];
 
       // Update account-level settings via the proper account endpoint
       await API.updatePlaylist({
