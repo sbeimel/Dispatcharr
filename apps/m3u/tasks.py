@@ -3181,9 +3181,12 @@ def _refresh_mac_account_with_groups(account_id):
                         logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
                         
                         # Save portal type/version info to account custom_properties
+                        # NOTE: We do NOT save portal_engine here anymore!
+                        # portal_engine should only be set explicitly by user or benchmark,
+                        # not automatically from global settings (which caused the bug where
+                        # changing global engine didn't take effect because account had cached value)
                         try:
                             custom_props = account.custom_properties or {}
-                            custom_props['portal_engine'] = portal_engine
                             
                             # Try to get portal type/version from UnifiedMacPortalClient
                             if hasattr(client, '_unified_client') and client._unified_client:
