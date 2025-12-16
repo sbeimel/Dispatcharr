@@ -3073,48 +3073,38 @@ def _refresh_mac_account_with_groups(account_id):
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
         
-        # Get portal engine setting - priority: account custom_properties > global settings
+        # Get portal engine from GLOBAL settings only
+        # Simplified logic:
+        # - "fastest" → use benchmark result (fastest_engine) per portal
+        # - "auto" → try all engines, cache first working one (until refresh)
+        # - specific engine (macreplay, istb, etc.) → use THAT engine directly, ignore all caches
         portal_engine = 'auto'
-        
-        # First check account-specific settings (from benchmark or user selection)
         account_props = account.custom_properties or {}
-        account_engine = account_props.get('portal_engine')
         
-        # If account has "fastest" mode, use the benchmarked fastest_engine
-        if account_engine == 'fastest':
-            fastest_engine = account_props.get('fastest_engine')
-            if fastest_engine:
-                portal_engine = fastest_engine
-                logger.info(f"MAC refresh using FASTEST benchmarked engine: {portal_engine}")
-            else:
-                # No benchmark yet, fall back to auto
-                portal_engine = 'auto'
-                logger.info(f"MAC refresh: 'fastest' mode but no benchmark data, using auto")
-        elif account_engine and account_engine not in ('auto', '', None):
-            # Account has a specific engine selected
-            portal_engine = account_engine
-            logger.info(f"MAC refresh using account-specific engine: {portal_engine}")
-        else:
-            # Fall back to global settings
-            try:
-                from .mac_portal_models import MACPortalGlobalSettings
-                settings = MACPortalGlobalSettings.get_settings()
-                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                
-                # If global is "fastest", check for account's fastest_engine
-                if global_engine == 'fastest':
-                    fastest_engine = account_props.get('fastest_engine')
-                    if fastest_engine:
-                        portal_engine = fastest_engine
-                        logger.info(f"MAC refresh using global FASTEST mode with benchmarked engine: {portal_engine}")
-                    else:
-                        portal_engine = 'auto'
-                        logger.info(f"MAC refresh: global 'fastest' mode but no benchmark data, using auto")
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                # Use benchmark result for this portal
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC refresh: FASTEST mode using benchmarked engine '{portal_engine}'")
                 else:
-                    portal_engine = global_engine
-                    logger.info(f"MAC refresh using global engine setting: {portal_engine}")
-            except Exception:
-                logger.info(f"MAC refresh using default engine: auto")
+                    portal_engine = 'auto'
+                    logger.info("MAC refresh: FASTEST mode but no benchmark, falling back to auto")
+            elif global_engine == 'auto':
+                # Auto mode - will try all engines and cache first working
+                portal_engine = 'auto'
+                logger.info("MAC refresh: AUTO mode - will try engines in order")
+            else:
+                # Specific engine selected - use it directly, ignore any cached results
+                portal_engine = global_engine
+                logger.info(f"MAC refresh: Using manually selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC refresh: Using default engine 'auto'")
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3302,44 +3292,34 @@ def _refresh_mac_account_direct(account_id):
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
         
-        # Get portal engine setting - priority: account custom_properties > global settings
+        # Get portal engine from GLOBAL settings only
+        # - "fastest" → use benchmark result per portal
+        # - "auto" → try all engines, cache first working
+        # - specific engine → use directly, ignore caches
         portal_engine = 'auto'
-        
-        # First check account-specific settings (from benchmark or user selection)
         account_props = account.custom_properties or {}
-        account_engine = account_props.get('portal_engine')
         
-        # If account has "fastest" mode, use the benchmarked fastest_engine
-        if account_engine == 'fastest':
-            fastest_engine = account_props.get('fastest_engine')
-            if fastest_engine:
-                portal_engine = fastest_engine
-                logger.info(f"MAC direct refresh using FASTEST benchmarked engine: {portal_engine}")
-            else:
-                portal_engine = 'auto'
-                logger.info(f"MAC direct refresh: 'fastest' mode but no benchmark data, using auto")
-        elif account_engine and account_engine not in ('auto', '', None):
-            portal_engine = account_engine
-            logger.info(f"MAC direct refresh using account-specific engine: {portal_engine}")
-        else:
-            try:
-                from .mac_portal_models import MACPortalGlobalSettings
-                settings = MACPortalGlobalSettings.get_settings()
-                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                
-                if global_engine == 'fastest':
-                    fastest_engine = account_props.get('fastest_engine')
-                    if fastest_engine:
-                        portal_engine = fastest_engine
-                        logger.info(f"MAC direct refresh using global FASTEST mode with benchmarked engine: {portal_engine}")
-                    else:
-                        portal_engine = 'auto'
-                        logger.info(f"MAC direct refresh: global 'fastest' mode but no benchmark data, using auto")
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC direct refresh: FASTEST mode using '{portal_engine}'")
                 else:
-                    portal_engine = global_engine
-                    logger.info(f"MAC direct refresh using global engine setting: {portal_engine}")
-            except Exception:
-                logger.info(f"MAC direct refresh using default engine: auto")
+                    portal_engine = 'auto'
+                    logger.info("MAC direct refresh: FASTEST but no benchmark, using auto")
+            elif global_engine == 'auto':
+                portal_engine = 'auto'
+                logger.info("MAC direct refresh: AUTO mode")
+            else:
+                portal_engine = global_engine
+                logger.info(f"MAC direct refresh: Using selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC direct refresh: Using default engine 'auto'")
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3491,28 +3471,24 @@ def check_mac_expiry(account_id=None):
     
     for account in accounts:
         try:
-            # Get portal engine for this account - priority: account custom_properties > global settings
+            # Get portal engine from GLOBAL settings only
             portal_engine = 'auto'
             account_props = account.custom_properties or {}
-            account_engine = account_props.get('portal_engine')
             
-            if account_engine == 'fastest':
-                fastest_engine = account_props.get('fastest_engine')
-                portal_engine = fastest_engine if fastest_engine else 'auto'
-            elif account_engine and account_engine not in ('auto', '', None):
-                portal_engine = account_engine
-            else:
-                try:
-                    from .mac_portal_models import MACPortalGlobalSettings
-                    settings = MACPortalGlobalSettings.get_settings()
-                    global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                    if global_engine == 'fastest':
-                        fastest_engine = account_props.get('fastest_engine')
-                        portal_engine = fastest_engine if fastest_engine else 'auto'
-                    else:
-                        portal_engine = global_engine
-                except Exception:
-                    pass
+            try:
+                from .mac_portal_models import MACPortalGlobalSettings
+                settings = MACPortalGlobalSettings.get_settings()
+                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+                
+                if global_engine == 'fastest':
+                    fastest_engine = account_props.get('fastest_engine')
+                    portal_engine = fastest_engine if fastest_engine else 'auto'
+                elif global_engine == 'auto':
+                    portal_engine = 'auto'
+                else:
+                    portal_engine = global_engine
+            except Exception:
+                pass
             
             # Set flag to check all MACs, not just first successful one
             account._status_check_mode = True

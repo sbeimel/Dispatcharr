@@ -300,21 +300,34 @@ def _get_mac_address(account):
 
 
 def _create_portal_engine(account, mac_address):
-    """Create UnifiedPortalEngine for account with fastest engine support."""
+    """Create UnifiedPortalEngine for account using GLOBAL engine setting."""
     from apps.m3u.unified_portal_engine import UnifiedPortalEngine, PortalEngine
     
     props = account.custom_properties or {}
-    engine_pref = props.get("portal_engine", "auto")
+    engine_pref = "auto"
     
-    # Handle "fastest" mode - use benchmarked fastest_engine if available
-    if engine_pref == "fastest":
-        fastest_engine = props.get("fastest_engine")
-        if fastest_engine:
-            engine_pref = fastest_engine
-            logger.info(f"VOD using FASTEST benchmarked engine: {engine_pref}")
-        else:
+    # Get engine from GLOBAL settings only
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+        
+        if global_engine == 'fastest':
+            fastest_engine = props.get("fastest_engine")
+            if fastest_engine:
+                engine_pref = fastest_engine
+                logger.info(f"VOD: FASTEST mode using '{engine_pref}'")
+            else:
+                engine_pref = "auto"
+                logger.info("VOD: FASTEST but no benchmark, using auto")
+        elif global_engine == 'auto':
             engine_pref = "auto"
-            logger.info("VOD: 'fastest' mode but no benchmark data, using auto")
+            logger.info("VOD: AUTO mode")
+        else:
+            engine_pref = global_engine
+            logger.info(f"VOD: Using selected engine '{engine_pref}'")
+    except Exception:
+        logger.info("VOD: Using default engine 'auto'")
     
     try:
         selected_engine = PortalEngine(engine_pref) if engine_pref != "auto" else PortalEngine.AUTO

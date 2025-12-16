@@ -1,6 +1,10 @@
 # Generated migration to clear cached portal_engine from account custom_properties
-# This fixes the bug where changing global engine setting didn't take effect
-# because accounts had a cached portal_engine value from previous refreshes.
+# Engine selection is now GLOBAL only - no per-account engine setting.
+# 
+# New simplified logic:
+# - "fastest" → use benchmark result (fastest_engine) per portal
+# - "auto" → try all engines, cache first working (until refresh)
+# - specific engine → use directly, ignore all caches
 
 from django.db import migrations
 
@@ -9,11 +13,8 @@ def clear_cached_portal_engine(apps, schema_editor):
     """
     Remove portal_engine from account custom_properties.
     
-    This was incorrectly being saved during refresh, which caused the global
-    engine setting to be ignored. The portal_engine should only be set
-    explicitly by user selection or benchmark, not automatically cached.
-    
-    Note: fastest_engine is kept because it's set by benchmark and is intentional.
+    Engine selection is now GLOBAL only. Per-account portal_engine is no longer used.
+    fastest_engine is kept because it's set by benchmark and used when global="fastest".
     """
     M3UAccount = apps.get_model('m3u', 'M3UAccount')
     
@@ -27,8 +28,8 @@ def clear_cached_portal_engine(apps, schema_editor):
             updated_count += 1
     
     if updated_count:
-        print(f"\n  Cleared cached portal_engine from {updated_count} MAC accounts")
-        print("  Global engine setting will now be used correctly")
+        print(f"\n  Cleared portal_engine from {updated_count} MAC accounts")
+        print("  Engine selection is now GLOBAL only")
 
 
 def reverse_clear(apps, schema_editor):
