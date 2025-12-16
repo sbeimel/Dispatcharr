@@ -190,8 +190,15 @@ const PortalCard = ({ portal, onRefresh }) => {
             {isOnline ? <IconCircleCheck size={16} /> : <IconCircleX size={16} />}
           </ThemeIcon>
           <Title order={5}>{portal.name}</Title>
-          <Badge size="sm" variant="outline">
-            {portal.portal_type || portal.type || 'Unknown'}
+          <Badge 
+            size="sm" 
+            variant="outline"
+            color={(!portal.portal_type || portal.portal_type === 'unknown') ? 'gray' : 'blue'}
+            title={(!portal.portal_type || portal.portal_type === 'unknown') ? 'Run Benchmark to detect portal type' : ''}
+          >
+            {portal.portal_type && portal.portal_type !== 'unknown' 
+              ? portal.portal_type.toUpperCase() 
+              : 'Run Benchmark'}
           </Badge>
           {portal.portal_version && portal.portal_version !== 'unknown' && (
             <Badge size="sm" variant="light" color="blue">
