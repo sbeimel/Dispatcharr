@@ -29,6 +29,8 @@ WORKDIR /app
 
 # Copy application code
 COPY . /app
+# Install/update Python dependencies (in case base image is outdated)
+RUN pip install --no-cache-dir -r /app/requirements.txt
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder

@@ -1156,23 +1156,32 @@ class AllinOneStrategy(BasePortalStrategy):
     - User-Agent Rotation bei Fehlern
     - Referer Header für create_link (BoxPirate)
     - metrics JSON mit uid, random (iSTB)
+    
+    OPTIMIZED: Kürzere Timeouts und weniger Retries für schnellere Handshakes.
     """
     
     NAME = "allinone"
     DESCRIPTION = "AllinOne Best-of-All (iSTB + MacAttack + alle anderen Techniken)"
     
-    # User-Agent Rotation Pool - MAG254 first (most compatible)
+    # OPTIMIZED: Kürzere Timeouts für schnellere Handshakes
+    FAST_TIMEOUT = 5  # 5s statt 10s für Handshake-Requests
+    PORTAL_DETECT_TIMEOUT = 3  # 3s für Portal-Typ-Erkennung
+    
+    # OPTIMIZED: Nur 2 User-Agents (MAG254 + MAG250 sind die kompatibelsten)
     USER_AGENT_POOL = [
         'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG254 stbapp ver: 2 rev: 369 Safari/533.3',
         'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 2 rev: 250 Safari/533.3',
-        'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG322 stbapp ver: 4 rev: 2721 Safari/533.3',
     ]
     
-    # Optimized Endpoints - most common first for speed
+    # OPTIMIZED: Nur die 2 häufigsten Endpoints zuerst
     ENDPOINTS = [
         '/portal.php',
-        '/server/load.php',
         '/stalker_portal/server/load.php',
+    ]
+    
+    # Fallback Endpoints für schwierige Portale
+    FALLBACK_ENDPOINTS = [
+        '/server/load.php',
         '/c/',
     ]
     
@@ -1186,6 +1195,8 @@ class AllinOneStrategy(BasePortalStrategy):
         self._token_random = None  # MacAttack X-Random support
         self._detected_portal_type = None  # MacAttack portal detection
         self._portal_version = "5.3.1"
+        # OPTIMIZED: Override timeout for AllinOne
+        self.timeout = self.FAST_TIMEOUT
     
     def _get_cookies(self) -> Dict[str, str]:
         """AllinOne Cookies - Alle wichtigen Cookies kombiniert (inkl. MacAttack)."""
@@ -1253,10 +1264,13 @@ class AllinOneStrategy(BasePortalStrategy):
         parsed = urlparse(self.portal_url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         
+        # OPTIMIZED: Kürzere Timeouts für Portal-Erkennung
+        detect_timeout = self.PORTAL_DETECT_TIMEOUT
+        
         # Check for type "portal" via /c/version.js
         try:
             version_url = f"{base_url}/c/version.js"
-            response = self.session.get(version_url, timeout=5, verify=False)
+            response = self.session.get(version_url, timeout=detect_timeout, verify=False)
             if response.status_code == 200:
                 import re
                 match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
@@ -1271,7 +1285,7 @@ class AllinOneStrategy(BasePortalStrategy):
         # Check for type "stalker_portal"
         try:
             version_url = f"{base_url}/stalker_portal/c/version.js"
-            response = self.session.get(version_url, timeout=5, verify=False)
+            response = self.session.get(version_url, timeout=detect_timeout, verify=False)
             if response.status_code == 200:
                 import re
                 match = re.search(r"var ver = ['\"](.*?)['\"];", response.text)
@@ -1289,21 +1303,29 @@ class AllinOneStrategy(BasePortalStrategy):
     
     def perform_handshake(self) -> HandshakeResult:
         """
-        AllinOne Handshake - Kombiniert alle Techniken (inkl. iSTB + MacAttack).
+        AllinOne Handshake - OPTIMIZED für schnellere Verbindungen.
         
-        1. Portal-Typ-Erkennung via version.js (MacAttack)
-        2. Standard Handshake versuchen
-        3. Bei token_random: X-Random Header für get_profile (MacAttack)
-        4. Bei "missing" Response: Prehash-Methode (EStalker)
-        5. Bei Fehler: User-Agent rotieren und erneut versuchen
+        OPTIMIERUNGEN:
+        - Kürzere Timeouts (5s statt 10s)
+        - Nur 2 User-Agents (MAG254, MAG250)
+        - Nur GET versuchen (POST nur bei Fehler)
+        - Schnelles Abbrechen bei Erfolg
+        
+        Ablauf:
+        1. Portal-Typ-Erkennung via version.js (3s timeout)
+        2. Standard Handshake mit GET
+        3. Bei token_random: X-Random Header für get_profile
+        4. Bei "missing" Response: Prehash-Methode
+        5. Bei Fehler: User-Agent rotieren (max 2x)
         """
-        # Detect portal type first (MacAttack style)
+        # Detect portal type first (MacAttack style) - OPTIMIZED: 3s timeout
         detected_endpoint = self._detect_portal_type()
         
-        # Prioritize detected endpoint
+        # OPTIMIZED: Nur primäre Endpoints, Fallbacks nur bei Bedarf
         endpoints_to_try = [detected_endpoint] + [e for e in self.ENDPOINTS if e != detected_endpoint]
         
-        max_ua_attempts = len(self.USER_AGENT_POOL)
+        # OPTIMIZED: Max 2 User-Agent Versuche
+        max_ua_attempts = min(len(self.USER_AGENT_POOL), 2)
         
         for ua_attempt in range(max_ua_attempts):
             headers = self._get_base_headers()
@@ -1319,13 +1341,13 @@ class AllinOneStrategy(BasePortalStrategy):
                 }
                 
                 try:
-                    # Versuche GET zuerst (wie MacAttack)
+                    # OPTIMIZED: Nur GET versuchen (schneller)
                     response = self.session.get(
                         url,
                         params=params,
                         headers=headers,
                         cookies=cookies,
-                        timeout=self.timeout,
+                        timeout=self.FAST_TIMEOUT,
                         verify=False
                     )
                     
@@ -1346,10 +1368,10 @@ class AllinOneStrategy(BasePortalStrategy):
                             # Store token_random for X-Random header (MacAttack)
                             self._token_random = js.get("random", "")
                             
-                            # If we have token_random, do extended get_profile (MacAttack/iSTB)
-                            if self._token_random:
-                                self._extended_get_profile(url, token, headers, cookies)
+                            # OPTIMIZED: Skip extended get_profile for faster handshake
+                            # (wird bei create_link nachgeholt wenn nötig)
                             
+                            logger.info(f"AllinOne: Handshake successful via GET on {endpoint}")
                             return HandshakeResult(
                                 success=True,
                                 token=token,
@@ -1363,41 +1385,40 @@ class AllinOneStrategy(BasePortalStrategy):
                                 }
                             )
                     
-                    # Fallback: POST (wie EStalker)
-                    response = self.session.post(
-                        url,
-                        params=params,
-                        headers=headers,
-                        cookies=cookies,
-                        timeout=self.timeout,
-                        verify=False
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        js = data.get("js", {})
+                    # OPTIMIZED: POST nur wenn GET fehlschlägt (nicht bei jedem Endpoint)
+                    if response.status_code != 200:
+                        response = self.session.post(
+                            url,
+                            params=params,
+                            headers=headers,
+                            cookies=cookies,
+                            timeout=self.FAST_TIMEOUT,
+                            verify=False
+                        )
                         
-                        if "msg" in js and "missing" in js.get("msg", "").lower():
-                            result = self._prehash_handshake(url, headers, cookies)
-                            if result.success:
-                                return result
-                            continue
-                        
-                        token = js.get("token")
-                        if token:
-                            self._token_random = js.get("random", "")
+                        if response.status_code == 200:
+                            data = response.json()
+                            js = data.get("js", {})
                             
-                            if self._token_random:
-                                self._extended_get_profile(url, token, headers, cookies)
+                            if "msg" in js and "missing" in js.get("msg", "").lower():
+                                result = self._prehash_handshake(url, headers, cookies)
+                                if result.success:
+                                    return result
+                                continue
                             
-                            return HandshakeResult(
-                                success=True,
-                                token=token,
-                                token_random=self._token_random,
-                                portal_type="stalker",
-                                portal_version=self._portal_version,
-                                engine_used=self.NAME,
-                            )
+                            token = js.get("token")
+                            if token:
+                                self._token_random = js.get("random", "")
+                                
+                                logger.info(f"AllinOne: Handshake successful via POST on {endpoint}")
+                                return HandshakeResult(
+                                    success=True,
+                                    token=token,
+                                    token_random=self._token_random,
+                                    portal_type="stalker",
+                                    portal_version=self._portal_version,
+                                    engine_used=self.NAME,
+                                )
                             
                 except Exception as e:
                     logger.debug(f"AllinOne handshake failed for {endpoint}: {e}")

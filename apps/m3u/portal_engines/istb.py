@@ -63,7 +63,8 @@ class iSTBStrategy(BasePortalStrategy):
     def _get_session(self) -> requests.Session:
         """Get or create requests session."""
         if self._session is None:
-            if self._use_cloudscraper:
+            # Use self.use_cloudscraper from base class (not _use_cloudscraper)
+            if self.use_cloudscraper:
                 try:
                     import cloudscraper
                     self._session = cloudscraper.create_scraper(
