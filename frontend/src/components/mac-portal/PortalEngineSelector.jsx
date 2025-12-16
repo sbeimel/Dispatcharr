@@ -151,7 +151,7 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
     setBenchmarkResults(null);
     
     try {
-      const response = await API.post(`/api/m3u-accounts/${accountId}/engine-benchmark/run/`);
+      const response = await API.post(`/api/m3u-accounts/${accountId}/engine-benchmark/`);
       setBenchmarkResults(response.data);
       // Refresh cached data
       loadCachedBenchmark();
@@ -167,7 +167,7 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
     if (!accountId) return;
     
     try {
-      await API.delete(`/api/m3u-accounts/${accountId}/engine-benchmark/clear/`);
+      await API.delete(`/api/m3u-accounts/${accountId}/engine-benchmark/all/`);
       setCachedBenchmark(null);
       setBenchmarkResults(null);
     } catch (error) {
@@ -179,7 +179,7 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
     if (!accountId) return;
     
     try {
-      await API.delete(`/api/m3u-accounts/${accountId}/engine-benchmark/clear_auto/`);
+      await API.delete(`/api/m3u-accounts/${accountId}/engine-benchmark/auto/`);
       // Refresh cached data to show updated state
       loadCachedBenchmark();
     } catch (error) {

@@ -649,6 +649,11 @@ class EngineBenchmarkViewSet(viewsets.ViewSet):
     API endpoint for engine benchmarking.
     
     Allows testing all portal engines and finding the fastest one.
+    
+    URLs:
+    - GET  /api/m3u-accounts/{id}/engine-benchmark/     - Get cached results
+    - POST /api/m3u-accounts/{id}/engine-benchmark/     - Run benchmark (was /run/)
+    - DELETE /api/m3u-accounts/{id}/engine-benchmark/   - Clear all caches (was /clear/)
     """
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
@@ -670,9 +675,8 @@ class EngineBenchmarkViewSet(viewsets.ViewSet):
             'has_benchmark': fastest_data is not None,
         })
     
-    @action(detail=False, methods=['post'])
-    def run(self, request, account_pk=None):
-        """POST /api/m3u-accounts/{id}/engine-benchmark/run/ - Run benchmark for all engines."""
+    def create(self, request, account_pk=None):
+        """POST /api/m3u-accounts/{id}/engine-benchmark/ - Run benchmark for all engines."""
         account = get_object_or_404(M3UAccount, pk=account_pk)
         
         # Get first available MAC
@@ -722,43 +726,38 @@ class EngineBenchmarkViewSet(viewsets.ViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
-    @action(detail=False, methods=['delete'])
-    def clear(self, request, account_pk=None):
-        """DELETE /api/m3u-accounts/{id}/engine-benchmark/clear/ - Clear ALL engine caches."""
+    def destroy(self, request, account_pk=None, pk=None):
+        """DELETE /api/m3u-accounts/{id}/engine-benchmark/{action}/ - Clear caches.
+        
+        pk='all' - Clear all caches
+        pk='auto' - Clear only auto engine cache
+        """
         account = get_object_or_404(M3UAccount, pk=account_pk)
         
         from ..mac_portal_client import UnifiedMacPortalClient
         from django.core.cache import cache
         
-        # Clear fastest engine cache (benchmark results)
-        fastest_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(account.server_url)
-        cache.delete(fastest_key)
-        
-        # Clear auto engine cache
-        auto_key = UnifiedMacPortalClient._get_engine_cache_key(account.server_url)
-        cache.delete(auto_key)
-        
-        return Response({
-            'status': 'all_cleared',
-            'account_id': account.id,
-            'cleared': ['fastest_engine', 'auto_engine'],
-        })
-    
-    @action(detail=False, methods=['delete'])
-    def clear_auto(self, request, account_pk=None):
-        """DELETE /api/m3u-accounts/{id}/engine-benchmark/clear_auto/ - Clear only AUTO engine cache (refresh)."""
-        account = get_object_or_404(M3UAccount, pk=account_pk)
-        
-        from ..mac_portal_client import UnifiedMacPortalClient
-        
-        # Only clear auto engine cache - forces re-detection on next request
-        UnifiedMacPortalClient.clear_cached_engine(account.server_url)
-        
-        return Response({
-            'status': 'auto_cleared',
-            'account_id': account.id,
-            'message': 'Auto engine cache cleared. Next request will re-detect the best engine.',
-        })
+        if pk == 'auto':
+            # Only clear auto engine cache - forces re-detection on next request
+            UnifiedMacPortalClient.clear_cached_engine(account.server_url)
+            return Response({
+                'status': 'auto_cleared',
+                'account_id': account.id,
+                'message': 'Auto engine cache cleared. Next request will re-detect the best engine.',
+            })
+        else:
+            # Clear all caches (default)
+            fastest_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(account.server_url)
+            cache.delete(fastest_key)
+            
+            auto_key = UnifiedMacPortalClient._get_engine_cache_key(account.server_url)
+            cache.delete(auto_key)
+            
+            return Response({
+                'status': 'all_cleared',
+                'account_id': account.id,
+                'cleared': ['fastest_engine', 'auto_engine'],
+            })
 
 
 class VODSeriesAPIViewSet(viewsets.ViewSet):

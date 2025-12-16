@@ -158,7 +158,7 @@ const PortalCard = ({ portal, onRefresh }) => {
     if (!portal.id) return;
     setBenchmarking(true);
     try {
-      const response = await API.post(`/api/m3u-accounts/${portal.id}/engine-benchmark/run/`);
+      const response = await API.post(`/api/m3u-accounts/${portal.id}/engine-benchmark/`);
       if (response.data?.fastest) {
         setFastestEngine({
           engine: response.data.fastest,
