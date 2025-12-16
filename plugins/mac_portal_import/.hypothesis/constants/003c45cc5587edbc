@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\nodes.py
-# hypothesis_version: 6.148.7
-
-[', ', '.', '/', '::', '::()', '<{} {}>', 'Collector', 'Item', 'Node', 'Optional[Node]', 'Optional[Session]', 'Session', '_NodeType', '__dict__', '__init__', '_nodeid', '_store', 'abstract', 'auto', 'config', 'fspath', 'fulltrace', 'location', 'long', 'name', 'obj', 'os.PathLike[str]', 'parent', 'path', 'session', 'short', 'showlocals', 'tbstyle', 'unknown location', 'value', 'verbose']

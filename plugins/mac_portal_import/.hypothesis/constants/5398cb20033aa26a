@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\Downloads\original\Dispatcharr-0.14.0\plugins\mac_portal_import\__init__.py
-# hypothesis_version: 6.148.7
-
-['1.0.0', 'ChannelFetcher', 'Dispatcharr', 'MACNormalizer', 'MACValidator', 'Plugin', 'StreamLinkGenerator']

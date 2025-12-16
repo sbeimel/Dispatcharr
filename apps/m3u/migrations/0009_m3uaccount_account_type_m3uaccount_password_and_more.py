@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='m3uaccount',
             name='account_type',
-            field=models.CharField(choices=[('STD', 'Standard'), ('XC', 'Xtream Codes')], default='STD'),
+            field=models.CharField(choices=[('Standard', 'Standard'), ('XC', 'Xtream Codes')], default='Standard', max_length=20),
         ),
         migrations.AddField(
             model_name='m3uaccount',

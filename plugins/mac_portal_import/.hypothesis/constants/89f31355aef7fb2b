@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\helpconfig.py
-# hypothesis_version: 6.148.7
-
-['  %s', '--debug', '--help', '--override-ini', '--trace-config', '--traceconfig', '--version', '-V', '-h', '-o', '-p', '.', '?', 'DEBUG_FILE_NAME', 'PYTEST_ADDOPTS', 'PYTEST_DEBUG', 'PYTEST_PLUGINS', '__file__', 'active plugins:', 'after_preparse', 'append', 'count', 'debug', 'debugconfig', 'help', 'name', 'override_ini', 'plugins', 'pytest_plugins', 'pytestdebug.log', 'store', 'store_true', 'string', 'terminalreporter', 'utf-8', 'version', 'w', 'warning : ', 'warnings']

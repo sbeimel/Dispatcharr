@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\Downloads\original\Dispatcharr-0.14.0\plugins\mac_portal_import\utils.py
-# hypothesis_version: 6.148.7
-
-['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d', '%d.%m.%Y', '%d.%m.%Y %H:%M:%S', '%d/%m/%Y', '-', ':', 'MAC ist abgelaufen', 'Uncategorized', 'channels', 'cmd', 'ffmpeg', 'ffmpeg ', 'genres', 'group_title', 'http', 'id', 'tv_genre_id']

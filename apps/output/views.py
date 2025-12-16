@@ -7,7 +7,6 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from apps.epg.models import ProgramData
 from apps.accounts.models import User
-from django.contrib.auth import authenticate
 from core.models import CoreSettings, NETWORK_ACCESS
 from dispatcharr.utils import network_access_allowed
 from django.utils import timezone as django_timezone
@@ -26,46 +25,86 @@ from apps.m3u.utils import calculate_tuner_count
 import regex
 from core.utils import log_system_event
 import hashlib
+from django.contrib.auth import authenticate
 
 logger = logging.getLogger(__name__)
 
+def get_client_identifier(request):
+    """Get client information including IP, user agent, and a unique hash identifier
+
+    Returns:
+        tuple: (client_id_hash, client_ip, user_agent)
+    """
+    # Get client IP (handle proxies)
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        client_ip = x_forwarded_for.split(',')[0].strip()
+    else:
+        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+
+    # Get user agent
+    user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
+
+    # Create a hash for a shorter cache key
+    client_str = f"{client_ip}:{user_agent}"
+    client_id_hash = hashlib.md5(client_str.encode()).hexdigest()[:12]
+
+    return client_id_hash, client_ip, user_agent
+
+
 def get_basic_auth_user(request):
     """Authenticate request using HTTP Basic Auth against the Django user model.
-
-    Returns a User instance on success or an HttpResponse (401) on failure.
+    
+    Returns:
+        User object if authentication successful, HttpResponse with 401 if failed
     """
     auth_header = request.META.get("HTTP_AUTHORIZATION")
     if not auth_header or not auth_header.lower().startswith("basic "):
         # No or invalid auth header -> ask for credentials
         response = HttpResponse("Authentication required", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="M3U"'
+        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
         return response
-
-    encoded = auth_header.split(" ", 1)[1].strip()
+    
     try:
-        decoded = base64.b64decode(encoded).decode("utf-8")
-    except Exception:
+        encoded = auth_header.split(" ", 1)[1].strip()
+    except IndexError:
         response = HttpResponse("Invalid Authorization header", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="M3U"'
+        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
         return response
-
-    if ":" not in decoded:
+    
+    try:
+        decoded = base64.b64decode(encoded).decode('utf-8')
+    except (ValueError, UnicodeDecodeError):
         response = HttpResponse("Invalid Authorization header", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="M3U"'
+        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
         return response
-
-    username, password = decoded.split(":", 1)
-
+    
+    try:
+        username, password = decoded.split(":", 1)
+    except ValueError:
+        response = HttpResponse("Invalid Authorization header", status=401)
+        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
+        return response
+    
     user = authenticate(request, username=username, password=password)
-    if user is None or not user.is_active:
+    if not user:
         response = HttpResponse("Invalid username or password", status=401)
-        response["WWW-Authenticate"] = 'Basic realm="M3U"'
+        response["WWW-Authenticate"] = 'Basic realm="Dispatcharr"'
         return response
-
+    
     return user
+
 
 def m3u_endpoint(request, profile_name=None, user=None):
     logger.debug("m3u_endpoint called: method=%s, profile=%s", request.method, profile_name)
+    
+    # Check Basic Authentication first
+    auth_result = get_basic_auth_user(request)
+    if isinstance(auth_result, HttpResponse):
+        # Authentication failed, return 401 response
+        return auth_result
+    authenticated_user = auth_result
+    
     if not network_access_allowed(request, "M3U_EPG"):
         # Log blocked M3U download
         from core.utils import log_system_event
@@ -80,19 +119,24 @@ def m3u_endpoint(request, profile_name=None, user=None):
         )
         return JsonResponse({"error": "Forbidden"}, status=403)
 
-    # Protect /output/m3u with HTTP Basic Auth using Dispatcharr users
-    if user is None:
-        auth_result = get_basic_auth_user(request)
-        # If authentication failed, the helper returns an HttpResponse (401)
-        if isinstance(auth_result, HttpResponse):
-            return auth_result
-        user = auth_result
-
+    # Handle HEAD requests efficiently without generating content
+    if request.method == "HEAD":
+        logger.debug("Handling HEAD request for M3U")
+        response = HttpResponse(content_type="audio/x-mpegurl")
+        response["Content-Disposition"] = 'attachment; filename="channels.m3u"'
+        return response
 
     return generate_m3u(request, profile_name, user)
 
 def epg_endpoint(request, profile_name=None, user=None):
     logger.debug("epg_endpoint called: method=%s, profile=%s", request.method, profile_name)
+    
+    # Check Basic Authentication first
+    auth_result = get_basic_auth_user(request)
+    if isinstance(auth_result, HttpResponse):
+        # Authentication failed, return 401 response
+        return auth_result
+    authenticated_user = auth_result
     if not network_access_allowed(request, "M3U_EPG"):
         # Log blocked EPG download
         from core.utils import log_system_event

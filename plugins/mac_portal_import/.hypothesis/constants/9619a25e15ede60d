@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\socks.py
-# hypothesis_version: 6.148.7
-
-[b'\x00', b'\x00\x00', b'\x00\x00\x00\x01', b'\x01', b'\x02', b'\x03', b'\x04', b'\x05', b'\x05\x01\x00', b'\x05\x02\x00\x02', b'\r\n', b' HTTP/1.1', b'0.0.0.0', b':', b'CONNECT ', b'Host: ', b'Proxy-Authorization: basic ', b'\xff', 0.0, 200, 400, 403, 405, 1024, 1080, 8080, '%s due to: %s', '0', '0.0.0.0', '1.7.1', ': {}', '>BBH', '>H', 'Connection refused', 'HTTP', 'HTTP/', 'Host unreachable', 'Invalid proxy type', 'Network unreachable', 'Packet filtered', 'SOCKS4', 'SOCKS5', 'Socket error', 'TTL expired', 'Unknown error', '[', '[]', 'idna', 'nt', 'proxy_type', 'proxytype', 'rb', 'recv', 'recvfrom', 'send', 'sendto', 'wb', '{:#04x}: {}', '{}: {}', '{}:{}']

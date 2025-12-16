@@ -66,16 +66,25 @@ def cleanup_task_memory(**kwargs):
 
     # Only run memory cleanup for memory-intensive tasks
     memory_intensive_tasks = [
+        # M3U/MAC account refresh tasks (can process 20k+ channels)
         'apps.m3u.tasks.refresh_single_m3u_account',
         'apps.m3u.tasks.refresh_m3u_accounts',
+        'apps.m3u.tasks.refresh_m3u_groups',
         'apps.m3u.tasks.process_m3u_batch',
         'apps.m3u.tasks.process_xc_category',
         'apps.m3u.tasks.sync_auto_channels',
+        # MAC Portal specific tasks (memory-intensive due to channel fetching)
+        'apps.m3u.tasks.refresh_mac_account',
+        'apps.m3u.tasks.check_mac_expiry',
+        'apps.m3u.tasks.cleanup_expired_macs',
+        # EPG tasks
         'apps.epg.tasks.refresh_epg_data',
         'apps.epg.tasks.refresh_all_epg_data',
         'apps.epg.tasks.parse_programs_for_source',
         'apps.epg.tasks.parse_programs_for_tvg_id',
+        # Channel tasks
         'apps.channels.tasks.match_epg_channels',
+        # Core tasks
         'core.tasks.rehash_streams'
     ]
 

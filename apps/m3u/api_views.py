@@ -17,7 +17,7 @@ from django.conf import settings
 from .tasks import refresh_m3u_groups
 import json
 
-from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
+from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
@@ -303,12 +303,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to update group settings: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
     def _delete_expired_macs_impl(self, account):
         """
-        Interne Logik zum Löschen abgelaufener/unklarer MACs.
-        Löscht EXPIRED und UNKNOWN, sortiert Prioritäten neu und
-        aktualisiert das mac_address-Feld auf Basis der verbleibenden MACs.
-        Gibt (deleted_count, remaining_addresses) zurück.
+        Internal logic for deleting expired/unknown MACs.
+        Deletes EXPIRED and UNKNOWN, reorders priorities and
+        updates the mac_address field based on remaining MACs.
+        Returns (deleted_count, remaining_addresses).
         """
         from .models import M3UAccountMac
         from django.db import transaction
@@ -330,13 +331,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             qs.delete()
 
             remaining = list(account.macs.order_by("priority", "id"))
-            # Prioritäten neu setzen
+            # Reorder priorities
             for idx, m in enumerate(remaining):
                 if m.priority != idx:
                     m.priority = idx
                     m.save(update_fields=["priority"])
 
-            # mac_address-Feld aus verbleibenden MACs aufbauen
+            # Update mac_address field from remaining MACs
             mac_list = [m.address for m in remaining]
             account.mac_address = " ".join(mac_list)
             account.save(update_fields=["mac_address"])
@@ -352,14 +353,14 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="delete-expired-macs")
     def delete_expired_macs(self, request, pk=None):
         """
-        Löscht alle EXPIRED- und UNKNOWN-MAC-Einträge für diesen Account.
-        Wird vom Button im M3U-Manager verwendet (Pfad: delete-expired-macs/).
+        Delete all EXPIRED and UNKNOWN MAC entries for this account.
+        Used by the button in the M3U manager (path: delete-expired-macs/).
         """
         account = self.get_object()
 
         deleted_count, mac_list = self._delete_expired_macs_impl(account)
 
-        # Aktualisierte Account-Daten zurückgeben (inkl. frischer MAC-Liste)
+        # Return updated account data (including fresh MAC list)
         serializer = self.get_serializer(account)
         return Response(
             {
@@ -372,8 +373,8 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="delete_expired_macs")
     def delete_expired_macs_underscore(self, request, pk=None):
         """
-        Alias-Endpoint mit Unterstrich im Pfad, falls das Frontend
-        /delete_expired_macs/ verwendet. Verwendet die gleiche Logik.
+        Alias endpoint with underscore in path, in case the frontend
+        uses /delete_expired_macs/. Uses the same logic.
         """
         account = self.get_object()
         deleted_count, mac_list = self._delete_expired_macs_impl(account)
@@ -389,7 +390,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["delete"], url_path=r"macs/(?P<mac_id>[^/.]+)")
     def delete_single_mac(self, request, pk=None, mac_id=None):
         """
-        Löscht eine einzelne MAC anhand ihrer ID (für das rote X im UI).
+        Delete a single MAC by its ID (for the red X in the UI).
         """
         from .models import M3UAccountMac
 
@@ -404,7 +405,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         mac_obj.delete()
 
-        # Prioritäten neu setzen und mac_address aktualisieren
+        # Reorder priorities and update mac_address
         remaining = list(account.macs.order_by("priority", "id"))
         for idx, m in enumerate(remaining):
             if m.priority != idx:
@@ -424,8 +425,8 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="reorder-macs")
     def reorder_macs(self, request, pk=None):
         """
-        Passt die Reihenfolge (Priorität) der MACs an.
-        Erwartet im Body: {"order": [mac_id1, mac_id2, ...]} in gewünschter Reihenfolge.
+        Adjust the order (priority) of MACs.
+        Expects in body: {"order": [mac_id1, mac_id2, ...]} in desired order.
         """
         from .models import M3UAccountMac
 
@@ -437,12 +438,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Map bestehende MACs nach ID
+        # Map existing MACs by ID
         mac_qs = account.macs.all()
         mac_map = {str(m.id): m for m in mac_qs}
 
         next_idx = 0
-        # Zuerst die IDs aus 'order' in genau dieser Reihenfolge
+        # First the IDs from 'order' in exactly this order
         for mac_id in order:
             m = mac_map.pop(str(mac_id), None)
             if m is None:
@@ -452,7 +453,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 m.save(update_fields=["priority"])
             next_idx += 1
 
-        # Alle übrigen MACs hinten anhängen
+        # All remaining MACs append at the end
         for m in mac_map.values():
             if m.priority != next_idx:
                 m.priority = next_idx
@@ -469,6 +470,112 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 "account": serializer.data,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="refresh-mac-status")
+    def refresh_mac_status(self, request, pk=None):
+        """
+        Trigger MAC status check for all MACs in this account.
+        """
+        account = self.get_object()
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            return Response(
+                {"error": "Not a MAC account"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        try:
+            # Trigger MAC status check task
+            from .tasks import check_mac_expiry
+            check_mac_expiry.delay(account.id)
+            
+            return Response(
+                {"message": "MAC status check initiated"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to initiate MAC status check: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"], url_path="clear-channels")
+    def clear_channels(self, request, pk=None):
+        """
+        Clear all channels and streams imported from this M3U account.
+        This removes duplicate imports and allows for a clean re-import.
+        Memory cleanup is performed after bulk deletion to free resources.
+        """
+        account = self.get_object()
+        logger.info(f"Clear channels request started for account {account.id} ({account.name})")
+        
+        try:
+            from django.db import transaction
+            from apps.channels.models import Stream, Channel, ChannelStream
+            import logging
+            
+            logger = logging.getLogger(__name__)
+            
+            with transaction.atomic():
+                # Count items before deletion for reporting
+                streams_count = account.streams.count()
+                
+                # Get channels that are linked to streams from this account
+                channels_with_account_streams = Channel.objects.filter(
+                    streams__m3u_account=account
+                ).distinct()
+                channels_count = channels_with_account_streams.count()
+                
+                logger.info(f"Clearing channels for M3U account {account.id} ({account.name})")
+                logger.info(f"Found {streams_count} streams and {channels_count} channels to clear")
+                
+                # Delete all streams from this account
+                # This will also remove ChannelStream relationships automatically
+                account.streams.all().delete()
+                
+                # Delete channels that no longer have any streams
+                # (channels that were only connected to streams from this account)
+                orphaned_channels = Channel.objects.filter(streams__isnull=True)
+                orphaned_count = orphaned_channels.count()
+                orphaned_channels.delete()
+                
+                logger.info(f"Deleted {streams_count} streams and {orphaned_count} orphaned channels")
+                
+                # Update account status
+                account.status = M3UAccount.Status.IDLE
+                account.last_message = f"Channels cleared successfully. Removed {streams_count} streams and {orphaned_count} channels."
+                account.save(update_fields=['status', 'last_message'])
+            
+            # Memory cleanup after bulk deletion (especially important for large accounts 20k+ streams)
+            # This is safe to call here because:
+            # 1. The transaction is already committed
+            # 2. We only clear Django ORM query cache and run garbage collection
+            # 3. No active sessions or import data are affected
+            # Memory cleanup after bulk deletion (higher threshold for better performance)
+            if streams_count > 2500:
+                logger.info(f"Running memory cleanup after clearing {streams_count} streams")
+                from core.utils import cleanup_memory
+                cleanup_memory(log_usage=True, force_collection=True)
+                logger.info(f"Memory cleanup completed after clearing {streams_count} streams")
+            else:
+                logger.info(f"Memory cleanup skipped (streams_count: {streams_count}, threshold: 2500)")
+            
+            logger.info(f"Clear channels completed successfully for account {account.id}")
+            return Response(
+                {
+                    "message": "Channels cleared successfully",
+                    "streams_deleted": streams_count,
+                    "channels_deleted": orphaned_count,
+                },
+                status=status.HTTP_200_OK,
+            )
+            
+        except Exception as e:
+            logger.error(f"Error clearing channels for account {account.id}: {e}")
+            return Response(
+                {"error": f"Failed to clear channels: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class M3UFilterViewSet(viewsets.ModelViewSet):
