@@ -183,6 +183,11 @@ else
 fi
 
 cd /app
+
+# Fix any ghost migration entries before running migrations
+echo "🔧 Checking for migration conflicts..."
+python /app/scripts/fix_migration_conflicts.py
+
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 
