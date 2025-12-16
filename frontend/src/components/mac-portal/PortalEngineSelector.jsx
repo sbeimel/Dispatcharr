@@ -20,7 +20,6 @@ import {
 } from '@mantine/core';
 import {
   IconRocket,
-  IconSettings,
   IconBrandPython,
   IconDeviceTv,
   IconFlask,
@@ -43,14 +42,6 @@ const PORTAL_ENGINES = [
     icon: IconRocket,
     color: 'teal',
     badge: 'Best-of-All',
-  },
-  {
-    value: 'unified',
-    label: 'Unified (All Strategies)',
-    description: 'Combines all strategies for maximum compatibility',
-    icon: IconSettings,
-    color: 'blue',
-    badge: null,
   },
   {
     value: 'macreplay',
@@ -83,6 +74,14 @@ const PORTAL_ENGINES = [
     icon: IconFlask,
     color: 'yellow',
     badge: 'Experimental',
+  },
+  {
+    value: 'istb',
+    label: 'iSTB (iOS Emulator)',
+    description: 'iOS STB Emulator style with prehash, metrics, hw_version_2, api_signature 263',
+    icon: IconDeviceTv,
+    color: 'pink',
+    badge: 'New',
   },
 ];
 

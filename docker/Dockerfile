@@ -49,4 +49,5 @@ RUN if [ -n "$TIMESTAMP" ]; then \
     cat /app/version.py; \
     fi
 
-ENTRYPOINT ["/app/docker/entrypoint.sh"]
+# Use bash explicitly to avoid "Syntax error: '(' unexpected" with /bin/sh
+ENTRYPOINT ["/bin/bash", "/app/docker/entrypoint.sh"]

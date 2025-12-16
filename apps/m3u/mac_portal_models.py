@@ -125,14 +125,15 @@ class MACPortalGlobalSettings(models.Model):
     )
     
     # Unified Portal Engine Selection (Requirement 100.1)
+    # Note: 'unified' was removed as it was identical to 'auto'
     PORTAL_ENGINE_CHOICES = [
         ('auto', 'Auto-Detect (Recommended)'),
-        ('unified', 'Unified (All Strategies)'),
         ('allinone', 'AllinOne Best-of-All (Empfohlen)'),
         ('macreplay', 'MacReplayXC (Standard)'),
         ('estalker', 'EStalker (Enigma2 Style)'),
         ('boxpirate', 'BoxPirate (Dreambox Style)'),
         ('ob2_2025', 'OB2_2025 (Extended Metrics)'),
+        ('istb', 'iSTB (iOS Emulator Style)'),
     ]
     portal_engine = models.CharField(
         max_length=20,

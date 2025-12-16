@@ -643,9 +643,12 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
             manager = FailoverManager(channel_id)
             
             # Try to get a new MAC for this stream
-            stream_url, profile_id, error = manager._try_mac_account_failover(stream, m3u_account)
+            stream_url, failover_profile_id, error = manager._try_mac_account_failover(stream, m3u_account)
             if not stream_url:
                 return {"error": error or "Failed to resolve MAC stream"}
+            # Use the profile ID from failover if available
+            if failover_profile_id:
+                m3u_profile_id = failover_profile_id
         else:
             input_url = stream.url
             stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)

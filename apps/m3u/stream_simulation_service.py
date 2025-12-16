@@ -151,9 +151,11 @@ class StreamSimulationService:
         }
     
     def _execute_failover_test(self, channel, error_type: ErrorType) -> dict:
-        """Execute a failover test for the channel."""
-        from apps.m3u.failover_manager import FailoverManager, FailoverExhausted
+        """Execute a failover test for the channel.
         
+        If the channel is imported from a real channel, use the real FailoverManager.
+        Otherwise, use simulated failover for test channels.
+        """
         result = {
             'success': False,
             'strategy': 'none',
@@ -161,6 +163,55 @@ class StreamSimulationService:
             'new': '',
         }
         
+        # If this is an imported real channel, use the real FailoverManager
+        if channel.is_imported and channel.original_channel_id:
+            return self._execute_real_failover(channel, error_type, result)
+        
+        # For test channels, use simulated failover
+        return self._execute_simulated_failover(channel, result)
+    
+    def _execute_real_failover(self, channel, error_type: ErrorType, result: dict) -> dict:
+        """Execute real failover using the actual FailoverManager."""
+        try:
+            from apps.channels.models import Channel as RealChannel
+            from apps.proxy.ts_proxy.failover_utils import FailoverManager
+            
+            # Get the real channel
+            real_channel = RealChannel.objects.get(id=channel.original_channel_id)
+            channel_uuid = str(real_channel.uuid)
+            
+            # Create FailoverManager for this channel
+            manager = FailoverManager(channel_uuid)
+            
+            # Try to get a failover stream
+            new_url, profile_id, error = manager.get_stream_with_failover()
+            
+            if new_url:
+                result['success'] = True
+                result['strategy'] = 'mac' if profile_id else 'stream'
+                result['original'] = channel.primary_stream_url
+                result['new'] = new_url
+                
+                # Log the failover event
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Real MAC failover test successful for channel {channel.name}: {new_url[:50]}...")
+            else:
+                result['success'] = False
+                result['strategy'] = 'none'
+                result['error'] = error or 'Failover exhausted'
+                
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Real failover test failed: {e}")
+            result['success'] = False
+            result['error'] = str(e)
+        
+        return result
+    
+    def _execute_simulated_failover(self, channel, result: dict) -> dict:
+        """Execute simulated failover for test channels."""
         # If channel has MAC portal config, test MAC failover
         if channel.mac_portal_config:
             result['strategy'] = 'mac'

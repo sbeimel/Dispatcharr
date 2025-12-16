@@ -16,11 +16,45 @@ from .utils import get_logger
 
 logger = get_logger()
 
-# Failover configuration constants
-MAC_COOLDOWN_DURATION = 360  # 6 minutes
-PROFILE_COOLDOWN_DURATION = 180  # 3 minutes
+# Failover configuration constants (defaults - will be overridden by settings)
+DEFAULT_MAC_COOLDOWN_DURATION = 300  # 5 minutes default
+DEFAULT_PROFILE_COOLDOWN_DURATION = 180  # 3 minutes default
+MAC_BUSY_DURATION = 3600  # 1 hour max for busy flag (auto-expires)
 
 MAX_FAILOVER_ATTEMPTS = 15  # Maximum failover attempts per channel (allows MAC + Profile + Stream failover)
+
+
+def _get_mac_cooldown_duration():
+    """Get MAC cooldown duration from settings (in seconds)."""
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        # mac_cooldown_failure is in minutes, convert to seconds
+        return settings.mac_cooldown_failure * 60
+    except Exception:
+        return DEFAULT_MAC_COOLDOWN_DURATION
+
+
+def _get_mac_block_cooldown_duration():
+    """Get MAC block cooldown duration from settings (in seconds)."""
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        # mac_cooldown_block is in minutes, convert to seconds
+        return settings.mac_cooldown_block * 60
+    except Exception:
+        return DEFAULT_MAC_COOLDOWN_DURATION * 6  # 30 minutes default
+
+
+def _get_profile_cooldown_duration():
+    """Get profile cooldown duration from settings (in seconds)."""
+    try:
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+        settings = MACPortalGlobalSettings.get_settings()
+        # portal_cooldown_error is in minutes, convert to seconds
+        return settings.portal_cooldown_error * 60
+    except Exception:
+        return DEFAULT_PROFILE_COOLDOWN_DURATION
 
 
 class FailoverManager:
@@ -432,16 +466,37 @@ class FailoverManager:
         current_connections = int(self.redis_client.get(connections_key) or 0)
         return current_connections < profile.max_streams
     
-    def _mark_mac_cooldown(self, mac_id: int):
-        """Mark MAC as in cooldown."""
+    def _mark_mac_cooldown(self, mac_id: int, is_block: bool = False):
+        """Mark MAC as in cooldown (only called when MAC FAILS during failover).
+        
+        COOLDOWN = MAC failed and shouldn't be retried for X minutes.
+        This is different from BUSY which means MAC is actively streaming.
+        
+        Args:
+            mac_id: The MAC ID to put in cooldown
+            is_block: If True, use longer block cooldown (e.g., portal blocked the MAC)
+        """
         cooldown_key = RedisKeys.mac_cooldown(mac_id)
-        self.redis_client.setex(cooldown_key, MAC_COOLDOWN_DURATION, "1")
-        logger.info(f"MAC {mac_id} marked for cooldown ({MAC_COOLDOWN_DURATION}s)")
+        if is_block:
+            duration = _get_mac_block_cooldown_duration()
+        else:
+            duration = _get_mac_cooldown_duration()
+        self.redis_client.setex(cooldown_key, duration, "1")
+        logger.info(f"MAC {mac_id} marked for COOLDOWN ({duration}s) - reason: {'block' if is_block else 'failure'}")
     
     def _mark_mac_busy(self, mac_id: int):
-        """Mark MAC as busy."""
+        """Mark MAC as BUSY (actively being used for a stream).
+        
+        BUSY = MAC is currently streaming. This flag is cleared when:
+        - Stream ends normally
+        - Stream fails and triggers failover
+        - Auto-expires after MAC_BUSY_DURATION (safety net)
+        
+        This is different from COOLDOWN which means MAC failed and shouldn't be retried.
+        """
         busy_key = RedisKeys.mac_busy(mac_id)
-        self.redis_client.setex(busy_key, 3600, "1")  # 1 hour max
+        self.redis_client.setex(busy_key, MAC_BUSY_DURATION, "1")
+        logger.debug(f"MAC {mac_id} marked as BUSY (actively streaming)")
     
     def _clear_mac_busy(self, mac_id: int):
         """Clear MAC busy flag."""
@@ -496,10 +551,11 @@ class FailoverManager:
         logger.debug(f"Set current MAC {mac_id} for channel {self.channel_id}")
     
     def _mark_profile_cooldown(self, profile_id: int):
-        """Mark profile as in cooldown."""
+        """Mark profile as in cooldown (only called when profile FAILS during failover)."""
         cooldown_key = RedisKeys.profile_cooldown(profile_id)
-        self.redis_client.setex(cooldown_key, PROFILE_COOLDOWN_DURATION, "1")
-        logger.info(f"Profile {profile_id} marked for cooldown ({PROFILE_COOLDOWN_DURATION}s)")
+        duration = _get_profile_cooldown_duration()
+        self.redis_client.setex(cooldown_key, duration, "1")
+        logger.info(f"Profile {profile_id} marked for COOLDOWN ({duration}s)")
     
     def _increment_profile_connections(self, profile_id: int):
         """Increment profile connection count."""

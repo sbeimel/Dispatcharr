@@ -43,8 +43,8 @@ class PortalEngine(Enum):
     ESTALKER = "estalker"            # EStalker Enigma2
     BOXPIRATE = "boxpirate"          # BoxPirate Dreambox
     ALLINONE = "allinone"            # Best-of-All kombiniert
-    UNIFIED = "unified"              # Unified (alle kombiniert)
-    AUTO = "auto"                    # Automatische Erkennung
+    ISTB = "istb"                    # iSTB iOS Emulator Style
+    AUTO = "auto"                    # Automatische Erkennung (versucht alle Strategien)
 
 
 @dataclass
@@ -211,10 +211,15 @@ class BasePortalStrategy:
         self.session = self._create_session()
         
         if self.use_cloudscraper:
-            logger.info(f"{self.NAME}: Using cloudscraper for Cloudflare bypass")
+            logger.info(f"{self.NAME}: Cloudscraper ENABLED (from global settings)")
+        else:
+            logger.debug(f"{self.NAME}: Cloudscraper DISABLED (from global settings or not available)")
     
     def _should_use_cloudscraper(self) -> bool:
-        """Check if cloudscraper should be used based on global settings."""
+        """Check if cloudscraper should be used based on global settings.
+        
+        This is called at strategy creation time to get the current setting.
+        """
         if not CLOUDSCRAPER_AVAILABLE:
             logger.debug("Cloudscraper not available (not installed)")
             return False
@@ -222,7 +227,7 @@ class BasePortalStrategy:
             from apps.m3u.mac_portal_models import MACPortalGlobalSettings
             settings = MACPortalGlobalSettings.get_settings()
             enabled = settings.cloudscraper_enabled
-            logger.debug(f"Cloudscraper setting from DB: {enabled}")
+            logger.debug(f"BasePortalStrategy: Cloudscraper setting from DB: {enabled}")
             return enabled
         except Exception as e:
             # Default to True if settings can't be loaded
@@ -230,7 +235,11 @@ class BasePortalStrategy:
             return True
     
     def _create_session(self) -> requests.Session:
-        """Erstelle HTTP-Session mit optionalem Cloudscraper für Cloudflare-Bypass."""
+        """Erstelle HTTP-Session mit optionalem Cloudscraper für Cloudflare-Bypass.
+        
+        Note: Session is created once per strategy instance. If cloudscraper setting
+        changes, a new strategy instance must be created to pick up the change.
+        """
         if self.use_cloudscraper and CLOUDSCRAPER_AVAILABLE:
             # Use cloudscraper for Cloudflare bypass - same config as original MacReplay
             session = cloudscraper.create_scraper(
@@ -1576,6 +1585,7 @@ class UnifiedPortalEngine:
         PortalEngine.BOXPIRATE: BoxPirateStrategy,
         PortalEngine.OB2_2025: OB2_2025Strategy,
         PortalEngine.ALLINONE: AllinOneStrategy,
+        PortalEngine.ISTB: None,  # Lazy-loaded to avoid circular imports
     }
     
     # Optimized order for AUTO mode - fastest strategies first, skip allinone (redundant)
@@ -1584,6 +1594,7 @@ class UnifiedPortalEngine:
         PortalEngine.OB2_2025,    # Fast, good compatibility
         PortalEngine.ESTALKER,    # Medium speed
         PortalEngine.BOXPIRATE,   # Medium speed
+        PortalEngine.ISTB,        # iSTB iOS Emulator - extended validation
         # AllinOne skipped in AUTO - it's redundant and slow
     ]
     
@@ -1615,17 +1626,19 @@ class UnifiedPortalEngine:
             logger.info(f"UnifiedPortalEngine: Cloudscraper DISABLED for {portal_url}")
     
     def _check_cloudscraper_setting(self) -> bool:
-        """Check global cloudscraper setting."""
+        """Check global cloudscraper setting from MACPortalGlobalSettings."""
         if not CLOUDSCRAPER_AVAILABLE:
-            logger.debug("Cloudscraper not available (not installed)")
+            logger.info("Cloudscraper not available (not installed) - using standard requests")
             return False
         try:
             from apps.m3u.mac_portal_models import MACPortalGlobalSettings
             settings = MACPortalGlobalSettings.get_settings()
-            return settings.cloudscraper_enabled
+            enabled = settings.cloudscraper_enabled
+            logger.debug(f"Cloudscraper setting from MACPortalGlobalSettings: {enabled}")
+            return enabled
         except Exception as e:
-            logger.debug(f"Could not load cloudscraper setting: {e}")
-            return True  # Default to enabled
+            logger.warning(f"Could not load cloudscraper setting from DB: {e} - defaulting to enabled")
+            return True  # Default to enabled if DB not available
     
     def _get_cache_key(self) -> str:
         """Cache-Key für Portal."""
@@ -1634,6 +1647,13 @@ class UnifiedPortalEngine:
     def _get_strategy(self, engine: PortalEngine) -> BasePortalStrategy:
         """Erstelle Strategie-Instanz mit cloudscraper setting."""
         strategy_class = self.STRATEGIES.get(engine)
+        
+        # Lazy-load iSTBStrategy to avoid circular imports
+        if engine == PortalEngine.ISTB and strategy_class is None:
+            from apps.m3u.portal_engines.istb import iSTBStrategy
+            strategy_class = iSTBStrategy
+            self.STRATEGIES[PortalEngine.ISTB] = iSTBStrategy
+        
         if not strategy_class:
             raise ValueError(f"Unknown engine: {engine}")
         
@@ -1652,7 +1672,7 @@ class UnifiedPortalEngine:
         
         Bei AUTO: Versuche alle Strategien und cache die erfolgreiche.
         """
-        if self.engine == PortalEngine.AUTO or self.engine == PortalEngine.UNIFIED:
+        if self.engine == PortalEngine.AUTO:
             return self._auto_handshake()
         else:
             strategy = self._get_strategy(self.engine)
@@ -1701,7 +1721,7 @@ class UnifiedPortalEngine:
         return HandshakeResult(
             success=False,
             error=f"All strategies failed: {'; '.join(errors)}",
-            engine_used="unified"
+            engine_used="auto"
         )
     
     def get_profile(self) -> Dict[str, Any]:
@@ -1776,7 +1796,7 @@ class UnifiedPortalEngine:
         # Determine which engine to use
         if engine_used and engine_used in [e.value for e in PortalEngine]:
             engine = PortalEngine(engine_used)
-        elif self.engine != PortalEngine.AUTO and self.engine != PortalEngine.UNIFIED:
+        elif self.engine != PortalEngine.AUTO:
             engine = self.engine
         else:
             # Use cached strategy or default to MacReplay
@@ -1795,7 +1815,7 @@ class UnifiedPortalEngine:
             logger.debug(f"create_link with {engine.value} failed: {e}")
         
         # Fallback: Try all strategies if specific one failed
-        if self.engine == PortalEngine.AUTO or self.engine == PortalEngine.UNIFIED:
+        if self.engine == PortalEngine.AUTO:
             for fallback_engine in self.STRATEGIES.keys():
                 if fallback_engine == engine:
                     continue
@@ -1822,7 +1842,7 @@ class UnifiedPortalEngine:
         
         if engine_used and engine_used in [e.value for e in PortalEngine]:
             engine = PortalEngine(engine_used)
-        elif self.engine != PortalEngine.AUTO and self.engine != PortalEngine.UNIFIED:
+        elif self.engine != PortalEngine.AUTO:
             engine = self.engine
         else:
             cache_key = self._get_cache_key()
@@ -1895,11 +1915,6 @@ class UnifiedPortalEngine:
                 "id": PortalEngine.AUTO.value,
                 "name": "Auto-Detect",
                 "description": "Automatische Erkennung der besten Strategie"
-            },
-            {
-                "id": PortalEngine.UNIFIED.value,
-                "name": "Unified",
-                "description": "Alle Strategien kombiniert"
             },
         ]
         
