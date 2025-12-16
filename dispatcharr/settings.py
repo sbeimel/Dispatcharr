@@ -84,14 +84,26 @@ REQUESTS_TIMEOUT = 30  # Seconds for external API requests
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # CORS must be before CommonMiddleware
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
+    "dispatcharr.middleware.CsrfExemptAPIMiddleware",  # Custom CSRF that exempts /api/
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
 ]
+
+# CSRF exemption for API endpoints (they use JWT authentication)
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+    "http://localhost:9191",
+    "http://localhost:5656",
+]
+
+# Exempt API paths from CSRF (REST API uses JWT, not session auth)
+CSRF_COOKIE_HTTPONLY = False
+CSRF_USE_SESSIONS = False
 
 
 ROOT_URLCONF = "dispatcharr.urls"
