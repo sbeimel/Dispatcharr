@@ -8,6 +8,7 @@ Einfache, direkte Logik wie in MacReplayXC-main/stb.py und app-docker.py:
 """
 
 import logging
+import re
 import requests
 from typing import Dict, List
 
@@ -18,6 +19,32 @@ from .models import M3UAccount
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Helper Functions - Basierend auf MacReplayXC utils.py
+# =============================================================================
+
+def sanitize_name(name: str) -> str:
+    """
+    Sanitize category/channel name - basierend auf MacReplayXC sanitize_channel_name().
+    
+    Entfernt/ersetzt problematische Zeichen und normalisiert Whitespace.
+    """
+    if not name:
+        return ""
+    
+    # Remove or replace problematic characters (like MacReplayXC)
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', str(name))
+    
+    # Normalize whitespace (multiple spaces -> single space)
+    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+    
+    # Optional: Remove common decorative characters/emojis
+    # Keep letters, numbers, spaces, and basic punctuation
+    # sanitized = re.sub(r'[^\w\s\-.,()&]', '', sanitized, flags=re.UNICODE)
+    
+    return sanitized
 
 
 # =============================================================================
@@ -182,9 +209,15 @@ def _get_mac_and_token(account) -> tuple:
 
 
 def _save_category(account, cat_id: str, title: str, 
-                   group_type: str, prefix: str) -> str:
+                   group_type: str) -> str:
     """
     Save category as ChannelGroup - wie MacReplayXC INSERT OR REPLACE.
+    
+    Args:
+        account: M3UAccount
+        cat_id: Category ID from portal
+        title: Category title from portal
+        group_type: 'vod_movie' or 'vod_series'
     
     Returns: 'created', 'updated', 'skipped', or 'error'
     """
@@ -192,7 +225,13 @@ def _save_category(account, cat_id: str, title: str,
     if cat_id == "*" or not cat_id:
         return 'skipped'
     
-    group_name = f"{prefix} - {title}"
+    # Skip if no title - don't use ID as fallback
+    if not title:
+        logger.warning(f"Category {cat_id} has no title, skipping")
+        return 'skipped'
+    
+    # Sanitize title (remove problematic characters) - like MacReplayXC
+    group_name = sanitize_name(title)
     
     try:
         # Get or create ChannelGroup
@@ -310,12 +349,13 @@ def refresh_mac_portal_categories(account_id):
             logger.info(f"First VOD category: {vod_cats[0]}")
             
             for cat in vod_cats:
+                # Try multiple fields for title (title, alias, name)
+                title = cat.get('title') or cat.get('alias') or cat.get('name') or ''
                 result = _save_category(
                     account=account,
                     cat_id=str(cat.get('id', '')),
-                    title=cat.get('title', ''),
-                    group_type='vod_movie',
-                    prefix='VOD - Movies'
+                    title=title,
+                    group_type='vod_movie'
                 )
                 if result == 'created':
                     stats["created"] += 1
@@ -335,12 +375,13 @@ def refresh_mac_portal_categories(account_id):
             logger.info(f"First Series category: {series_cats[0]}")
             
             for cat in series_cats:
+                # Try multiple fields for title (title, alias, name)
+                title = cat.get('title') or cat.get('alias') or cat.get('name') or ''
                 result = _save_category(
                     account=account,
                     cat_id=str(cat.get('id', '')),
-                    title=cat.get('title', ''),
-                    group_type='vod_series',
-                    prefix='VOD - Series'
+                    title=title,
+                    group_type='vod_series'
                 )
                 if result == 'created':
                     stats["created"] += 1
