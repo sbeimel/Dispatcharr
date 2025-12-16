@@ -15,22 +15,14 @@ export { default as VODScanningToggle } from './VODScanningToggle';
 // MAC Management Components
 export { default as MACHealthDashboard } from './MACHealthDashboard';
 export { default as MACDetailView } from './MACDetailView';
-export { default as MACBatchOperations } from './MACBatchOperations';
 export { default as MACImportExport } from './MACImportExport';
 
 // Failover Components
 export { default as FailoverSettings } from './FailoverSettings';
 export { default as MACFailoverConfig } from './MACFailoverConfig';
-export { default as PortalFailoverConfig } from './PortalFailoverConfig';
 export { default as StreamFailoverConfig } from './StreamFailoverConfig';
-export { default as UserAgentFailoverConfig } from './UserAgentFailoverConfig';
-export { default as FailoverPriorityList } from './FailoverPriorityList';
 export { default as FailoverStatistics } from './FailoverStatistics';
 export { default as FailoverEventLog } from './FailoverEventLog';
-
-// Diagnostics Components
-export { default as ConnectionTestWizard } from './ConnectionTestWizard';
-export { default as DebugLogViewer } from './DebugLogViewer';
 
 // VOD/Series Components
 export { default as VODBrowser } from './VODBrowser';

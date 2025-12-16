@@ -5,8 +5,8 @@ from rest_framework.permissions import AllowAny
 
 # Import predictive failover URLs
 from apps.proxy.ts_proxy.predictive.api import get_predictive_failover_urls
-# Import MAC management URLs (for engine-benchmark etc.)
-from apps.m3u.api.mac_portal_api import get_mac_management_urls
+# Import Engine Benchmark API (simple APIView)
+from apps.m3u.api.engine_benchmark_api import get_engine_benchmark_urls
 
 app_name = 'api'
 
@@ -32,19 +32,14 @@ urlpatterns = [
     path('core/', include(('core.api_urls', 'core'), namespace='core')),
     path('plugins/', include(('apps.plugins.api_urls', 'plugins'), namespace='plugins')),
     path('vod/', include(('apps.vod.api_urls', 'vod'), namespace='vod')),
-    # path('output/', include(('apps.output.api_urls', 'output'), namespace='output')),
-    #path('player/', include(('apps.player.api_urls', 'player'), namespace='player')),
-    #path('settings/', include(('apps.settings.api_urls', 'settings'), namespace='settings')),
-    #path('streams/', include(('apps.streams.api_urls', 'streams'), namespace='streams')),
     
     # Predictive Failover API
     path('', include(get_predictive_failover_urls())),
     
-    # MAC Management URLs (engine-benchmark, health, batch, etc.)
-    # These need to be at /api/m3u-accounts/{id}/... level
-    path('', include(get_mac_management_urls())),
+    # Engine Benchmark API (simple APIView - works reliably)
+    path('', include(get_engine_benchmark_urls())),
 
-    # Swagger Documentation api_urls
+    # Swagger Documentation
     re_path(r'^swagger/?$', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
     path('swagger.json', schema_view.without_ui(cache_timeout=0), name='schema-json'),

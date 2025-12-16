@@ -942,12 +942,16 @@ def get_mac_management_urls():
         basename='vod-series'
     )
     
-    # Manual URL patterns for EngineBenchmarkViewSet (router doesn't work well with regex + create)
+    # Manual URL patterns for EngineBenchmarkViewSet
     benchmark_list = EngineBenchmarkViewSet.as_view({'get': 'list', 'post': 'create'})
     benchmark_detail = EngineBenchmarkViewSet.as_view({'delete': 'destroy'})
     
     manual_urls = [
         re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/$', benchmark_list, name='engine-benchmark-list'),
+        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/(?P<pk>[^/]+)/$', benchmark_detail, name='engine-benchmark-detail'),
+    ]
+    
+    return router.urls + manual_urls$', benchmark_list, name='engine-benchmark-list'),
         re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/(?P<pk>[^/]+)/$', benchmark_detail, name='engine-benchmark-detail'),
     ]
     

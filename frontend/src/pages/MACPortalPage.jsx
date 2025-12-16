@@ -2,12 +2,9 @@
  * MAC Portal Page - Hauptseite mit allen MAC Portal Funktionen
  * 
  * Tabs:
- * 1. Overview - Portal-Übersicht mit Status (inkl. Health-Infos)
+ * 1. Overview - Portal-Übersicht mit Status (inkl. Health-Infos, Benchmark)
  * 2. MAC Portal Settings - Globale Einstellungen
  * 3. Failover - Failover-Konfiguration
- * 4. Batch Ops - Batch-Operationen für angelegte Portale/MACs
- * 5. Connection Test - Verbindungstest
- * 6. Debug Logs - Debug Logs
  */
 
 import React, { useState } from 'react';
@@ -16,18 +13,12 @@ import {
   IconDashboard,
   IconSettings,
   IconArrowsShuffle,
-  IconFileText,
-  IconTestPipe,
-  IconUsers,
 } from '@tabler/icons-react';
 
 // Import MAC Portal Components
 import MACPortalOverview from '../components/mac-portal/MACPortalOverview';
 import MACPortalSettings from '../components/mac-portal/MACPortalSettings';
 import FailoverSettings from '../components/mac-portal/FailoverSettings';
-import DebugLogViewer from '../components/mac-portal/DebugLogViewer';
-import ConnectionTestWizard from '../components/mac-portal/ConnectionTestWizard';
-import MACBatchOperations from '../components/mac-portal/MACBatchOperations';
 
 const MACPortalPage = () => {
   const [activeTab, setActiveTab] = useState('overview');
@@ -49,19 +40,10 @@ const MACPortalPage = () => {
             Overview
           </Tabs.Tab>
           <Tabs.Tab value="settings" leftSection={<IconSettings size={16} />}>
-            MAC Portal Settings
+            Settings
           </Tabs.Tab>
           <Tabs.Tab value="failover" leftSection={<IconArrowsShuffle size={16} />}>
             Failover
-          </Tabs.Tab>
-          <Tabs.Tab value="batch" leftSection={<IconUsers size={16} />}>
-            Batch Ops
-          </Tabs.Tab>
-          <Tabs.Tab value="connection-test" leftSection={<IconTestPipe size={16} />}>
-            Connection Test
-          </Tabs.Tab>
-          <Tabs.Tab value="logs" leftSection={<IconFileText size={16} />}>
-            Debug Logs
           </Tabs.Tab>
         </Tabs.List>
 
@@ -75,18 +57,6 @@ const MACPortalPage = () => {
 
         <Tabs.Panel value="failover" pt="xs">
           <FailoverSettings />
-        </Tabs.Panel>
-
-        <Tabs.Panel value="batch" pt="xs">
-          <MACBatchOperations />
-        </Tabs.Panel>
-
-        <Tabs.Panel value="connection-test" pt="xs">
-          <ConnectionTestWizard />
-        </Tabs.Panel>
-
-        <Tabs.Panel value="logs" pt="xs">
-          <DebugLogViewer />
         </Tabs.Panel>
       </Tabs>
     </Box>
