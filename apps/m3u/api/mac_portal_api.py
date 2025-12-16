@@ -905,12 +905,12 @@ def get_mac_portal_urls():
 
 def get_mac_management_urls():
     """Get URL patterns for MAC Management API."""
+    from django.urls import path, re_path
     from rest_framework.routers import DefaultRouter
     
     router = DefaultRouter()
     
     # Register nested viewsets for account-specific MAC operations
-    # These will create URLs like: /api/m3u-accounts/{account_id}/macs/health/
     router.register(
         r'm3u-accounts/(?P<account_pk>\d+)/macs/health',
         MACHealthViewSet,
@@ -941,10 +941,14 @@ def get_mac_management_urls():
         VODSeriesAPIViewSet,
         basename='vod-series'
     )
-    router.register(
-        r'm3u-accounts/(?P<account_pk>\d+)/engine-benchmark',
-        EngineBenchmarkViewSet,
-        basename='engine-benchmark'
-    )
     
-    return router.urls
+    # Manual URL patterns for EngineBenchmarkViewSet (router doesn't work well with regex + create)
+    benchmark_list = EngineBenchmarkViewSet.as_view({'get': 'list', 'post': 'create'})
+    benchmark_detail = EngineBenchmarkViewSet.as_view({'delete': 'destroy'})
+    
+    manual_urls = [
+        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/$', benchmark_list, name='engine-benchmark-list'),
+        re_path(r'^m3u-accounts/(?P<account_pk>\d+)/engine-benchmark/(?P<pk>[^/]+)/$', benchmark_detail, name='engine-benchmark-detail'),
+    ]
+    
+    return router.urls + manual_urls

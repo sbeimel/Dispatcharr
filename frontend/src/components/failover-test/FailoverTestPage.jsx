@@ -313,7 +313,7 @@ const FailoverTestPage = () => {
     setSimulatingError(channel.id);
     try {
       const host = import.meta.env.DEV ? `http://${window.location.hostname}:5656` : '';
-      const response = await fetch(`${host}/api/proxy/simulate-error/${channel.id}/`, {
+      const response = await fetch(`${host}/proxy/simulate-error/${channel.id}/`, {
         method: 'POST',
         headers: { 
           Authorization: `Bearer ${await API.getAuthToken()}`,
