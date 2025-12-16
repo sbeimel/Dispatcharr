@@ -3,9 +3,6 @@ from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
 from rest_framework.permissions import AllowAny
 
-# Import Engine Benchmark API (simple APIView)
-from apps.m3u.api.engine_benchmark_api import get_engine_benchmark_urls
-
 app_name = 'api'
 
 schema_view = get_schema_view(
@@ -30,9 +27,6 @@ urlpatterns = [
     path('core/', include(('core.api_urls', 'core'), namespace='core')),
     path('plugins/', include(('apps.plugins.api_urls', 'plugins'), namespace='plugins')),
     path('vod/', include(('apps.vod.api_urls', 'vod'), namespace='vod')),
-    
-    # Engine Benchmark API (simple APIView - works reliably)
-    path('', include(get_engine_benchmark_urls())),
 
     # Swagger Documentation
     re_path(r'^swagger/?$', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
