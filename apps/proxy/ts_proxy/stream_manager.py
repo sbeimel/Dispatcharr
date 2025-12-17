@@ -348,17 +348,10 @@ class StreamManager:
                             except Exception as e:
                                 logger.error(f"Could not log connection error event: {e}")
                         else:
-                            # Optimized: No delay during stream switching for faster failover
-                            if hasattr(self, 'url_switching') and self.url_switching:
-                                timeout = 0  # Immediate reconnect during stream switch
-                                logger.info(f"Immediate reconnect during stream switch (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            else:
-                                # Wait with exponential backoff before retrying
-                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
-                                logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            
-                            if timeout > 0:
-                                gevent.sleep(timeout)
+                            # Wait with exponential backoff before retrying
+                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            gevent.sleep(timeout)
 
                     except Exception as e:
                         logger.error(f"Connection error on channel: {self.channel_id}: {e}", exc_info=True)
@@ -383,17 +376,10 @@ class StreamManager:
                             except Exception as log_error:
                                 logger.error(f"Could not log connection error event: {log_error}")
                         else:
-                            # Optimized: No delay during stream switching for faster failover
-                            if hasattr(self, 'url_switching') and self.url_switching:
-                                timeout = 0  # Immediate reconnect during stream switch
-                                logger.info(f"Immediate reconnect during stream switch after error (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            else:
-                                # Wait with exponential backoff before retrying
-                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
-                                logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            
-                            if timeout > 0:
-                                gevent.sleep(timeout)
+                            # Wait with exponential backoff before retrying
+                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            gevent.sleep(timeout)
 
                 # If URL failed and we're still running, try failover (0.12.0-04 style: MAC → Profile → Stream)
                 if url_failed and self.running:
