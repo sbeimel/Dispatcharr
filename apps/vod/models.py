@@ -300,11 +300,22 @@ class M3UMovieRelation(models.Model):
 
     def _get_mac_vod_link(self):
         """Get VOD playback link for MAC Portal using create_link API"""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         try:
+            logger.info(f"[MAC-VOD] Getting VOD link for movie {self.movie.name}")
+            logger.info(f"[MAC-VOD] Custom properties: {self.custom_properties}")
+            
             # Get cmd from custom_properties
             cmd = self.custom_properties.get('cmd') if self.custom_properties else None
             if not cmd:
+                logger.error(f"[MAC-VOD] No cmd found in custom_properties")
                 return None
+            
+            logger.info(f"[MAC-VOD] Using cmd: {cmd}")
+            logger.info(f"[MAC-VOD] Portal URL: {self.m3u_account.server_url}")
+            logger.info(f"[MAC-VOD] MAC addresses: {self.m3u_account.mac_addresses}")
             
             # Import UnifiedPortalEngine
             from apps.m3u.unified_portal_engine import UnifiedPortalEngine
@@ -316,14 +327,18 @@ class M3UMovieRelation(models.Model):
                 proxy=None
             )
             
+            logger.info(f"[MAC-VOD] Created UnifiedPortalEngine")
+            
             # Get VOD link using create_link with type=vod
             vod_link = engine.create_link(cmd, content_type="vod")
+            
+            logger.info(f"[MAC-VOD] create_link returned: {vod_link}")
             return vod_link
             
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error getting MAC VOD link: {e}")
+            logger.error(f"[MAC-VOD] Error getting MAC VOD link: {e}")
+            import traceback
+            logger.error(f"[MAC-VOD] Traceback: {traceback.format_exc()}")
             return None
 
 

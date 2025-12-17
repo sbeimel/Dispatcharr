@@ -445,12 +445,13 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
                     external_series_id=item_id,  # FIX: external_series_id hinzufügen
                     defaults={
                         'category': category,
-                        'custom_properties': {}
+                        'custom_properties': custom_props  # FIX: custom_props statt {}
                     }
                 )
                 if not series_relation_created:
                     # Update existing relation
                     series_relation.category = category
+                    series_relation.custom_properties = custom_props  # FIX: custom_props auch bei Update
                     series_relation.last_seen = timezone.now()
                     series_relation.save()
             except IntegrityError as e:
@@ -463,6 +464,7 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
                     )
                     series_relation.series = series
                     series_relation.category = category
+                    series_relation.custom_properties = custom_props  # FIX: custom_props auch hier
                     series_relation.last_seen = timezone.now()
                     series_relation.save()
                 except M3USeriesRelation.DoesNotExist:
@@ -504,12 +506,13 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
                     stream_id=item_id,  # FIX: stream_id hinzufügen
                     defaults={
                         'category': category,
-                        'custom_properties': {}
+                        'custom_properties': custom_props  # FIX: custom_props statt {}
                     }
                 )
                 if not relation_created:
                     # Update existing relation
                     relation.category = category
+                    relation.custom_properties = custom_props  # FIX: custom_props auch bei Update
                     relation.last_seen = timezone.now()
                     relation.save()
             except IntegrityError as e:
@@ -522,6 +525,7 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
                     )
                     relation.movie = movie
                     relation.category = category
+                    relation.custom_properties = custom_props  # FIX: custom_props auch hier
                     relation.last_seen = timezone.now()
                     relation.save()
                 except M3UMovieRelation.DoesNotExist:
