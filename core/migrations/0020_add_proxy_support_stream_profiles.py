@@ -5,32 +5,21 @@ from django.db import migrations
 def add_proxy_support_profiles(apps, schema_editor):
     StreamProfile = apps.get_model("core", "StreamProfile")
     
-    # Update existing ffmpeg profile to support proxy
+    # Update existing ffmpeg profile - proxy is now handled in build_command()
     try:
         ffmpeg_profile = StreamProfile.objects.get(name="ffmpeg")
-        # Update parameters to include proxy support
-        ffmpeg_profile.parameters = "-user_agent {userAgent} {proxy} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1"
+        # Parameters without {proxy} placeholder - proxy is injected by build_command()
+        ffmpeg_profile.parameters = "-user_agent {userAgent} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1"
         ffmpeg_profile.save()
     except StreamProfile.DoesNotExist:
-        # Create new ffmpeg profile with proxy support if it doesn't exist
+        # Create new ffmpeg profile if it doesn't exist
         StreamProfile.objects.create(
             name="ffmpeg",
             command="ffmpeg",
-            parameters="-user_agent {userAgent} {proxy} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1",
+            parameters="-user_agent {userAgent} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1",
             is_active=True,
             user_agent_id=1,
         )
-    
-    # Create a new profile specifically for proxy-enabled streaming
-    StreamProfile.objects.get_or_create(
-        name="ffmpeg-proxy",
-        defaults={
-            "command": "ffmpeg",
-            "parameters": "-user_agent {userAgent} {proxy} -i {streamUrl} -c copy -f mpegts pipe:1",
-            "is_active": True,
-            "user_agent_id": 1,
-        }
-    )
 
 def reverse_proxy_support_profiles(apps, schema_editor):
     StreamProfile = apps.get_model("core", "StreamProfile")

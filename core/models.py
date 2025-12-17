@@ -125,33 +125,30 @@ class StreamProfile(models.Model):
         if self.is_proxy():
             return []
 
-        # Bereite Proxy-Parameter vor
-        proxy_param = ""
-        if proxy:
-            proxy_param = f"-http_proxy {proxy}"
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.debug(f"StreamProfile {self.name}: Adding proxy parameter: {proxy_param}")
-
         replacements = {
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
-            "{proxy}": proxy_param,
         }
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command]
         
+        # Track if we've added -i parameter (stream URL input)
+        added_input = False
+        
         for part in self.parameters.split():
-            # Spezielle Behandlung für Proxy-Parameter
-            if "{proxy}" in part:
-                if proxy:
-                    # Füge Proxy-Parameter nur hinzu wenn Proxy gesetzt ist
-                    cmd.append(self._replace_in_part(part, replacements))
-                # Überspringe Proxy-Parameter wenn kein Proxy gesetzt ist
-            else:
-                # Normale Parameter ohne Proxy-Platzhalter
-                cmd.append(self._replace_in_part(part, replacements))
+            replaced_part = self._replace_in_part(part, replacements)
+            
+            # If this is the -i parameter and we have a proxy, inject proxy BEFORE -i
+            if part == "-i" and proxy and not added_input:
+                cmd.append("-http_proxy")
+                cmd.append(proxy)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"StreamProfile {self.name}: Injected proxy before -i: {proxy}")
+                added_input = True
+            
+            cmd.append(replaced_part)
 
         return cmd
 
