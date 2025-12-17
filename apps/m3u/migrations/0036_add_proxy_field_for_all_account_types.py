@@ -10,6 +10,26 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        # Safely add proxy field if it doesn't exist (for MAC/STB accounts)
+        migrations.RunSQL(
+            sql="""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name = 'm3u_m3uaccount' 
+                        AND column_name = 'proxy'
+                    ) THEN
+                        ALTER TABLE m3u_m3uaccount 
+                        ADD COLUMN proxy varchar(255);
+                    END IF;
+                END $$;
+            """,
+            reverse_sql="-- Don't drop proxy field in reverse",
+        ),
+        
+        # Add the new proxy_std_xc field for STD/XC accounts
         migrations.AddField(
             model_name='m3uaccount',
             name='proxy_std_xc',
@@ -19,17 +39,6 @@ class Migration(migrations.Migration):
                 max_length=255,
                 null=True,
                 verbose_name='Proxy (STD/XC)'
-            ),
-        ),
-        migrations.AlterField(
-            model_name='m3uaccount',
-            name='proxy',
-            field=models.CharField(
-                blank=True,
-                help_text='Proxy server for MAC portal connections (e.g., http://proxy:8080). Used only for MAC/STB Portal accounts.',
-                max_length=255,
-                null=True,
-                verbose_name='Proxy (MAC/STB)'
             ),
         ),
     ]
