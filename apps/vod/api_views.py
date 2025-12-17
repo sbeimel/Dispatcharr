@@ -547,6 +547,15 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
+    def _safe_float_convert(self, value):
+        """Safely convert rating value to float, handling 'N/A' and other non-numeric values"""
+        if not value or value == 'N/A' or value == '':
+            return 0.0
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+
     def list(self, request, *args, **kwargs):
         """Override list to handle unified content properly - database-level approach"""
         import logging
@@ -685,7 +694,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                         'name': item_dict['name'],
                         'description': item_dict['description'] or '',
                         'year': item_dict['year'],
-                        'rating': float(item_dict['rating']) if item_dict['rating'] else 0.0,
+                        'rating': self._safe_float_convert(item_dict['rating']),
                         'genre': item_dict['genre'] or '',
                         'duration': item_dict['duration'],
                         'created_at': item_dict['created_at'].isoformat() if item_dict['created_at'] else None,
