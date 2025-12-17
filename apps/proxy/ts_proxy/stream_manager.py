@@ -2322,7 +2322,10 @@ class StreamManager:
 
     def _get_account_proxy(self, channel):
         """
-        Get the proxy setting from the associated M3U account for this channel.
+        Get the proxy setting from the M3U account of the CURRENT stream.
+        
+        This is important for channels with multiple backup streams that may use
+        different M3U accounts with different proxy settings.
         
         Args:
             channel: Channel object
@@ -2331,7 +2334,19 @@ class StreamManager:
             str or None: Proxy URL if configured, None otherwise
         """
         try:
-            # Check if channel has a channel_group
+            # First, try to get proxy from the current stream's M3U account
+            if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                try:
+                    stream = Stream.objects.get(id=self.current_stream_id)
+                    if stream.m3u_account:
+                        proxy = stream.m3u_account.get_proxy()
+                        if proxy:
+                            logger.debug(f"Using proxy {proxy} from current stream's M3U account {stream.m3u_account.name} (type: {stream.m3u_account.account_type}) for channel {self.channel_id}")
+                            return proxy
+                except Stream.DoesNotExist:
+                    logger.debug(f"Stream {self.current_stream_id} not found for proxy lookup")
+            
+            # Fallback: Check if channel has a channel_group
             if not channel.channel_group:
                 return None
                 
@@ -2342,7 +2357,7 @@ class StreamManager:
                 m3u_account = cga.m3u_account
                 proxy = m3u_account.get_proxy()
                 if proxy:
-                    logger.debug(f"Using proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {self.channel_id}")
+                    logger.debug(f"Using proxy {proxy} from channel group M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {self.channel_id}")
                     return proxy
                     
             return None
