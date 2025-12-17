@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\_io\terminalwriter.py
+# hypothesis_version: 6.148.7
+
+['\x1b[%sm', '\x1b[0m', '0', '1', 'FORCE_COLOR', 'NO_COLOR', 'PYTEST_THEME', 'PYTEST_THEME_MODE', 'PY_COLORS', 'TERM', 'ascii', 'dark', 'dumb', 'isatty', 'unicode-escape', 'win32']

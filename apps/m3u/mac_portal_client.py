@@ -864,15 +864,7 @@ class MacPortalClient:
                         raise ValueError("Non-JSON response")
                     
                     data = response.json()
-                    js = data.get("js", {})
-                    
-                    # Handle case where portal returns empty list instead of dict
-                    if isinstance(js, list):
-                        if not js:
-                            logger.debug(f"Portal returned empty list for cmd={cmd} (channel may not exist)")
-                        raise ValueError("Portal returned list instead of dict")
-                    
-                    link = js.get("cmd", "").split()[-1]
+                    link = data["js"]["cmd"].split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
                 except ValueError as e:
@@ -909,17 +901,7 @@ class MacPortalClient:
                         raise ValueError("Non-JSON response")
                     
                     data = response.json()
-                    js = data.get("js", {})
-                    
-                    # Handle empty list response (channel not found/disabled)
-                    if isinstance(js, list):
-                        if not js:
-                            logger.debug(f"Portal returned empty list for cmd={cmd}")
-                        else:
-                            logger.debug(f"Portal returned non-empty list instead of dict: {js}")
-                        raise ValueError("Portal returned list instead of dict")
-                    
-                    link = js.get("cmd", "").split()[-1]
+                    link = data["js"]["cmd"].split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
                 except ValueError as e:
@@ -2072,38 +2054,8 @@ class UnifiedMacPortalClient:
         return []
     
     def _normalize_channels(self, raw_channels: List[Dict]) -> List[Dict]:
-        """Normalize raw channel data to MacPortalClient format.
-        
-        If channels are already normalized (have 'group' and 'url' keys with proper format),
-        they are returned as-is to avoid double-normalization.
-        """
+        """Normalize raw channel data to MacPortalClient format."""
         import base64
-        
-        if not raw_channels:
-            return []
-        
-        # Check if channels are already normalized by the engine
-        # Normalized channels have: 'group', 'url' (mac:// format), 'name', 'cmd'
-        first_ch = raw_channels[0] if raw_channels else {}
-        is_already_normalized = (
-            'group' in first_ch and 
-            'url' in first_ch and 
-            isinstance(first_ch.get('url', ''), str) and
-            first_ch.get('url', '').startswith('mac://')
-        )
-        
-        if is_already_normalized:
-            # Channels are already normalized by the engine (e.g., macreplay)
-            # Just return them as-is
-            group_counts = {}
-            for ch in raw_channels:
-                g = ch.get('group', 'Unknown')
-                group_counts[g] = group_counts.get(g, 0) + 1
-            logger.info(f"Channels already normalized: {len(raw_channels)} channels in {len(group_counts)} groups")
-            if len(group_counts) <= 10:
-                logger.info(f"Group distribution: {group_counts}")
-            return raw_channels
-        
         normalized = []
         
         # Get genres map for group names

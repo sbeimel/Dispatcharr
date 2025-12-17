@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\_py\error.py
+# hypothesis_version: 6.148.7
+
+[267, 'P', 'R', 'UnknownErrno%d', '[{}]: {}', '_', '__doc__', '__module__', 'errno', 'py.error', 'win32', '{}.{} {!r}: {} ']

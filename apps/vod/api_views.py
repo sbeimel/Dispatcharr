@@ -547,29 +547,20 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
         except KeyError:
             return [Authenticated()]
 
-    def _safe_float_convert(self, value):
-        """Safely convert rating value to float, handling 'N/A' and other non-numeric values"""
-        if not value or value == 'N/A' or value == '':
-            return 0.0
-        try:
-            return float(value)
-        except (ValueError, TypeError):
-            return 0.0
-
     def list(self, request, *args, **kwargs):
         """Override list to handle unified content properly - database-level approach"""
         import logging
         from django.db import connection
 
         logger = logging.getLogger(__name__)
-        logger.debug("=== UnifiedContentViewSet.list() called ===")
+        logger.error("=== UnifiedContentViewSet.list() called ===")
 
         try:
             # Get pagination parameters
             page_size = int(request.query_params.get('page_size', 24))
             page_number = int(request.query_params.get('page', 1))
 
-            logger.debug(f"Page {page_number}, page_size {page_size}")
+            logger.error(f"Page {page_number}, page_size {page_size}")
 
             # Calculate offset for unified pagination
             offset = (page_number - 1) * page_size
@@ -664,7 +655,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
 
             params.extend([page_size, offset])
 
-            logger.debug(f"Executing SQL with LIMIT {page_size} OFFSET {offset}")
+            logger.error(f"Executing SQL with LIMIT {page_size} OFFSET {offset}")
 
             with connection.cursor() as cursor:
                 cursor.execute(sql, params)
@@ -694,7 +685,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                         'name': item_dict['name'],
                         'description': item_dict['description'] or '',
                         'year': item_dict['year'],
-                        'rating': self._safe_float_convert(item_dict['rating']),
+                        'rating': float(item_dict['rating']) if item_dict['rating'] else 0.0,
                         'genre': item_dict['genre'] or '',
                         'duration': item_dict['duration'],
                         'created_at': item_dict['created_at'].isoformat() if item_dict['created_at'] else None,
@@ -705,7 +696,7 @@ class UnifiedContentViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                     results.append(formatted_item)
 
-            logger.debug(f"Retrieved {len(results)} results via SQL")
+            logger.error(f"Retrieved {len(results)} results via SQL")
 
             # Get total count estimate (for pagination info)
             # Use a separate efficient count query

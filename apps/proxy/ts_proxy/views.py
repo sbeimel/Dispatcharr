@@ -253,14 +253,10 @@ def stream_ts(request, channel_id):
                     get_stream_info_for_switch,
                 )
 
-                # Get proxy for this channel
-                from .url_utils import get_channel_proxy
-                channel_proxy = get_channel_proxy(channel)
-                
                 # Try initial URL
                 logger.info(f"[{client_id}] Validating redirect URL: {stream_url}")
                 is_valid, final_url, status_code, message = validate_stream_url(
-                    stream_url, user_agent=stream_user_agent, timeout=(5, 5), proxy=channel_proxy
+                    stream_url, user_agent=stream_user_agent, timeout=(5, 5)
                 )
 
                 # If first URL doesn't validate, try alternates
@@ -300,7 +296,6 @@ def stream_ts(request, channel_id):
                             alt_info["url"],
                             user_agent=alt_info["user_agent"],
                             timeout=(5, 5),
-                            proxy=channel_proxy
                         )
 
                         if is_valid:
@@ -397,7 +392,6 @@ def stream_ts(request, channel_id):
                                 )
                                 # Reset wait timer to allow the transition to complete
                                 wait_start = time.time()
-                                gevent.sleep(0.1)  # Avoid busy-wait loop
                                 continue
 
                             # Check if we're switching URLs
@@ -410,7 +404,6 @@ def stream_ts(request, channel_id):
                                 )
                                 # Reset wait timer to give the switch a chance
                                 wait_start = time.time()
-                                gevent.sleep(0.1)  # Avoid busy-wait loop
                                 continue
 
                             # If we reach here, we've exhausted retries and the channel isn't in a valid transitional state

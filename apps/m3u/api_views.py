@@ -24,6 +24,7 @@ from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
+from apps.vod.models import M3UVODCategoryRelation
 
 from .serializers import (
     M3UAccountSerializer,
@@ -233,9 +234,12 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check if VOD is enabled (from custom_properties)
-        custom_props = account.custom_properties or {}
-        vod_enabled = custom_props.get("enable_vod", False)
+        # Check if VOD is enabled
+        vod_enabled = account.enable_vod
+        if not vod_enabled:
+            # Also check custom_properties for backwards compatibility
+            custom_props = account.custom_properties or {}
+            vod_enabled = custom_props.get("enable_vod", False)
 
         if not vod_enabled:
             return Response(
@@ -317,11 +321,20 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         },
                     )
 
-            # VOD categories are now stored as ChannelGroups with group_type='vod_movie' or 'vod_series'
-            # They are handled in group_settings above, so category_settings is deprecated
-            # Keep this for backward compatibility but don't create old VOD relations
-            if category_settings:
-                logger.warning(f"Received deprecated category_settings for account {account.id}. VOD categories should be in group_settings.")
+            for setting in category_settings:
+                category_id = setting.get("id")
+                enabled = setting.get("enabled", True)
+                custom_properties = setting.get("custom_properties", {})
+
+                if category_id:
+                    M3UVODCategoryRelation.objects.update_or_create(
+                        category_id=category_id,
+                        m3u_account=account,
+                        defaults={
+                            "enabled": enabled,
+                            "custom_properties": custom_properties,
+                        },
+                    )
 
             return Response({"message": "Group settings updated successfully"})
 

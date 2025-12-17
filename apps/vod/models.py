@@ -213,48 +213,6 @@ class M3USeriesRelation(models.Model):
     def __str__(self):
         return f"{self.m3u_account.name} - {self.series.name}"
 
-    def get_stream_url(self):
-        """Get the full stream URL for this series from this provider"""
-        # Build URL dynamically for XtreamCodes accounts
-        if self.m3u_account.account_type == 'XC':
-            server_url = self.m3u_account.server_url.rstrip('/')
-            username = self.m3u_account.username
-            password = self.m3u_account.password
-            return f"{server_url}/series/{username}/{password}/{self.external_series_id}/"
-        elif self.m3u_account.account_type == 'MAC':
-            # For MAC Portal accounts, use the create_link API
-            return self._get_mac_series_link()
-        else:
-            return None
-
-    def _get_mac_series_link(self):
-        """Get Series playback link for MAC Portal using create_link API"""
-        try:
-            # Get cmd from custom_properties
-            cmd = self.custom_properties.get('cmd') if self.custom_properties else None
-            if not cmd:
-                return None
-            
-            # Import UnifiedPortalEngine
-            from apps.m3u.unified_portal_engine import UnifiedPortalEngine
-            
-            # Create engine for this account
-            engine = UnifiedPortalEngine(
-                portal_url=self.m3u_account.server_url,
-                mac_addresses=self.m3u_account.mac_addresses,
-                proxy=None
-            )
-            
-            # Get Series link using create_link with type=series
-            series_link = engine.create_link(cmd, content_type="series")
-            return series_link
-            
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error getting MAC Series link: {e}")
-            return None
-
 
 class M3UMovieRelation(models.Model):
     """Links M3U accounts to Movies with provider-specific information"""
@@ -291,54 +249,8 @@ class M3UMovieRelation(models.Model):
             username = self.m3u_account.username
             password = self.m3u_account.password
             return f"{server_url}/movie/{username}/{password}/{self.stream_id}.{self.container_extension or 'mp4'}"
-        elif self.m3u_account.account_type == 'MAC':
-            # For MAC Portal accounts, use the getVodLink API
-            return self._get_mac_vod_link()
         else:
             # For other account types, we would need another way to build URLs
-            return None
-
-    def _get_mac_vod_link(self):
-        """Get VOD playback link for MAC Portal using create_link API"""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        try:
-            logger.info(f"[MAC-VOD] Getting VOD link for movie {self.movie.name}")
-            logger.info(f"[MAC-VOD] Custom properties: {self.custom_properties}")
-            
-            # Get cmd from custom_properties
-            cmd = self.custom_properties.get('cmd') if self.custom_properties else None
-            if not cmd:
-                logger.error(f"[MAC-VOD] No cmd found in custom_properties")
-                return None
-            
-            logger.info(f"[MAC-VOD] Using cmd: {cmd}")
-            logger.info(f"[MAC-VOD] Portal URL: {self.m3u_account.server_url}")
-            logger.info(f"[MAC-VOD] MAC addresses: {self.m3u_account.mac_addresses}")
-            
-            # Import UnifiedPortalEngine
-            from apps.m3u.unified_portal_engine import UnifiedPortalEngine
-            
-            # Create engine for this account
-            engine = UnifiedPortalEngine(
-                portal_url=self.m3u_account.server_url,
-                mac_addresses=self.m3u_account.mac_addresses,
-                proxy=None
-            )
-            
-            logger.info(f"[MAC-VOD] Created UnifiedPortalEngine")
-            
-            # Get VOD link using create_link with type=vod
-            vod_link = engine.create_link(cmd, content_type="vod")
-            
-            logger.info(f"[MAC-VOD] create_link returned: {vod_link}")
-            return vod_link
-            
-        except Exception as e:
-            logger.error(f"[MAC-VOD] Error getting MAC VOD link: {e}")
-            import traceback
-            logger.error(f"[MAC-VOD] Traceback: {traceback.format_exc()}")
             return None
 
 

@@ -327,9 +327,22 @@ class FailoverManager:
             if not proxy_list:
                 proxy_list = [None]
             
-            # Use stream.url which contains the mac:// URL for MAC portals
-            # The mac:// URL will be resolved by UnifiedPortalEngine.create_link()
-            cmd = stream.url
+            # Determine command for the portal
+            stream_props = stream.custom_properties or {}
+            cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
+            
+            # If it's a mac:// URL, extract the cmd
+            if cmd and cmd.startswith("mac://"):
+                try:
+                    import base64
+                    encoded_data = cmd[6:]  # Remove "mac://" prefix
+                    decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
+                    parts = decoded_data.split("|", 3)
+                    if len(parts) >= 3:
+                        cmd = parts[2]  # Extract cmd from mac:// URL
+                except Exception as e:
+                    logger.warning(f"Failed to extract cmd from mac:// URL: {e}")
+                    cmd = stream.url
             
             # Get engine preference from account settings
             engine_pref = props.get("portal_engine", "auto")
@@ -351,16 +364,9 @@ class FailoverManager:
                     engine.proxy = proxy  # Set proxy after initialization
                     
                     # Resolve the stream URL
-                    # MAC portal URLs (mac://...) need to be resolved
-                    if cmd and cmd.startswith("mac://"):
-                        from apps.m3u.mac_portal_client import MacPortalClient
-                        resolved_url = MacPortalClient.resolve_mac_url(
-                            cmd, 
-                            proxy=proxy,
-                            portal_engine=engine_pref if engine_pref != "auto" else None
-                        )
+                    if cmd and not cmd.startswith('http'):
+                        resolved_url = engine.create_link(cmd)
                     else:
-                        # Direct HTTP/HTTPS URLs don't need resolution
                         resolved_url = cmd
                     
                     if resolved_url:

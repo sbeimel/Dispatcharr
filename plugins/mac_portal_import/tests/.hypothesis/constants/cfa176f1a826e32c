@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\runner.py
+# hypothesis_version: 6.148.7
+
+[0.005, '\x00', ' (fixtures used: {})', '(null)', ', ', '--durations', '--durations-min', '=', 'CallInfo[None]', 'CallInfo[TResult]', 'CallInfo[object]', 'E', 'ERROR', 'N', 'PYTEST_CURRENT_TEST', 'Reporting', 'SKIPPED', 'Session', 'TResult', 'TerminalReporter', '_request', 'call', 'collect', 'duration', 'error', 'failed', 'fixturenames', 'general', 'line', 'passed', 's', 'setup', 'setuponly', 'setupshow', 'skipped', 'slowest %s durations', 'slowest durations', 'store', 'teardown', 'terminal reporting', 'toterminal', 'unittest', 'usepdb', 'verbose', 'wasxfail']

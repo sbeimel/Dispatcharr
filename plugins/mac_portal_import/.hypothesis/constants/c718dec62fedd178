@@ -1,0 +1,4 @@
+# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\urllib3\util\retry.py
+# hypothesis_version: 6.148.7
+
+[0.0, 120, 413, 429, 503, 'Authorization', 'Cookie', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PUT', 'Proxy-Authorization', 'Retry-After', 'TRACE', '^\\s*[0-9]+\\s*$', 'too many redirects', 'unknown']
