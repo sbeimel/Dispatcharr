@@ -79,7 +79,7 @@ class TSConfig(BaseConfig):
     """Configuration settings for TS proxy"""
 
     # Buffer settings
-    INITIAL_BEHIND_CHUNKS = 4  # How many chunks behind to start a client (4 chunks = ~1MB)
+    INITIAL_BEHIND_CHUNKS = 10  # How many chunks behind to start a client (10 chunks = ~2.5MB, better for seamless failover)
     CHUNK_BATCH_SIZE = 5       # How many chunks to fetch in one batch
     KEEPALIVE_INTERVAL = 0.5   # Seconds between keepalive packets when at buffer head
     # Chunk read timeout
