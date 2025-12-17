@@ -142,12 +142,14 @@ class M3UAccount(models.Model):
         Get the appropriate proxy for this account based on its type.
         
         Returns:
-            str or None: Proxy URL if configured, None otherwise
+            str or None: Proxy URL if configured and not empty, None otherwise
         """
-        if self.type == self.Types.MAC:
-            return self.proxy
-        elif self.type in [self.Types.STADNARD, self.Types.XC]:
-            return self.proxy_std_xc
+        if self.account_type == self.Types.MAC:
+            # Return proxy only if it's not None and not empty/whitespace
+            return self.proxy.strip() if self.proxy and self.proxy.strip() else None
+        elif self.account_type in [self.Types.STADNARD, self.Types.XC]:
+            # Return proxy_std_xc only if it's not None and not empty/whitespace
+            return self.proxy_std_xc.strip() if self.proxy_std_xc and self.proxy_std_xc.strip() else None
         return None
 
     def clean(self):

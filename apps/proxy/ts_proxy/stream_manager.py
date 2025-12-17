@@ -2288,7 +2288,7 @@ class StreamManager:
                 m3u_account = cga.m3u_account
                 proxy = m3u_account.get_proxy()
                 if proxy:
-                    logger.debug(f"Using proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.type}) for channel {self.channel_id}")
+                    logger.debug(f"Using proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {self.channel_id}")
                     return proxy
                     
             return None

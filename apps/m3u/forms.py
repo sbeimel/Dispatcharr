@@ -15,12 +15,18 @@ class M3UAccountForm(forms.ModelForm):
         model = M3UAccount
         fields = [
             'name',
+            'account_type',
             'server_url',
             'uploaded_file',
+            'username',
+            'password',
             'server_group',
             'max_streams',
             'is_active',
             'enable_vod',
+            'proxy',
+            'proxy_std_xc',
+            'mac_address',
         ]
 
     def __init__(self, *args, **kwargs):

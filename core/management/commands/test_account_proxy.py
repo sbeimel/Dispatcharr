@@ -55,12 +55,12 @@ class Command(BaseCommand):
             proxy = account.get_proxy()
             proxy_status = proxy if proxy else "No proxy configured"
             proxy_type = ""
-            if account.type == account.Types.MAC and account.proxy:
+            if account.account_type == account.Types.MAC and account.proxy:
                 proxy_type = " (MAC/STB)"
-            elif account.type in [account.Types.STADNARD, account.Types.XC] and account.proxy_std_xc:
+            elif account.account_type in [account.Types.STADNARD, account.Types.XC] and account.proxy_std_xc:
                 proxy_type = " (STD/XC)"
             
-            self.stdout.write(f"ID: {account.id} | Name: {account.name} | Type: {account.get_type_display()} | Proxy: {proxy_status}{proxy_type}")
+            self.stdout.write(f"ID: {account.id} | Name: {account.name} | Type: {account.get_account_type_display()} | Proxy: {proxy_status}{proxy_type}")
 
     def test_account_proxy(self, account_id):
         """Test proxy configuration for a specific account."""
@@ -70,7 +70,7 @@ class Command(BaseCommand):
             
             proxy = account.get_proxy()
             if proxy:
-                self.stdout.write(f"Account type: {account.get_type_display()}")
+                self.stdout.write(f"Account type: {account.get_account_type_display()}")
                 self.stdout.write(f"Proxy configured: {proxy}")
                 
                 # Test build_command with proxy
@@ -89,7 +89,7 @@ class Command(BaseCommand):
                 else:
                     self.stdout.write(self.style.ERROR("No ffmpeg profile found"))
             else:
-                self.stdout.write(f"No proxy configured for this {account.get_type_display()} account")
+                self.stdout.write(f"No proxy configured for this {account.get_account_type_display()} account")
                 
         except M3UAccount.DoesNotExist:
             self.stdout.write(self.style.ERROR(f"Account with ID {account_id} not found"))
@@ -111,7 +111,7 @@ class Command(BaseCommand):
                         account = cga.m3u_account
                         proxy = account.get_proxy()
                         proxy_status = proxy if proxy else "No proxy"
-                        self.stdout.write(f"  - Account: {account.name} | Type: {account.get_type_display()} | Proxy: {proxy_status}")
+                        self.stdout.write(f"  - Account: {account.name} | Type: {account.get_account_type_display()} | Proxy: {proxy_status}")
                         
                         if proxy:
                             # Simulate the proxy retrieval logic

@@ -605,7 +605,7 @@ def get_channel_proxy(channel):
             m3u_account = cga.m3u_account
             proxy = m3u_account.get_proxy()
             if proxy:
-                logger.debug(f"Found proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.type}) for channel {channel.uuid}")
+                logger.debug(f"Found proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {channel.uuid}")
                 return proxy
                 
         return None
