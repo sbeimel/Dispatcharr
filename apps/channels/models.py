@@ -425,6 +425,23 @@ class Channel(models.Model):
                 (obj for obj in m3u_profiles if obj.is_default), None
             )
 
+            # For MAC accounts, create a default profile if none exists
+            if not default_profile and m3u_account.account_type == M3UAccount.Types.MAC:
+                logger.info(f"Creating default profile for MAC account {m3u_account.id}")
+                from apps.m3u.models import M3UAccountProfile
+                default_profile, created = M3UAccountProfile.objects.get_or_create(
+                    m3u_account=m3u_account,
+                    is_default=True,
+                    defaults={
+                        'is_active': True,
+                        'max_streams': 1,  # MAC accounts typically support 1 stream per MAC
+                        'search_pattern': r'(.*)',
+                        'replace_pattern': r'\1'
+                    }
+                )
+                if created:
+                    logger.info(f"Created default profile {default_profile.id} for MAC account {m3u_account.id}")
+
             if not default_profile:
                 logger.debug(f"M3U account {m3u_account.id} has no active default profile")
                 continue
