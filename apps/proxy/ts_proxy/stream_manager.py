@@ -851,8 +851,20 @@ class StreamManager:
             else:
                 logger.info(f"No proxy configured for channel {self.channel_id}")
             
+            # Resolve mac:// URLs before passing to FFmpeg
+            stream_url = self.url
+            if stream_url and stream_url.startswith("mac://"):
+                logger.info(f"Resolving mac:// URL for FFmpeg...")
+                try:
+                    from apps.m3u.mac_portal_client import MacPortalClient
+                    stream_url = MacPortalClient.resolve_mac_url(stream_url, proxy=proxy)
+                    logger.info(f"Resolved mac:// URL to: {stream_url[:80]}...")
+                except Exception as e:
+                    logger.error(f"Failed to resolve mac:// URL: {e}")
+                    raise
+            
             # Build and start transcode command
-            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
+            self.transcode_cmd = stream_profile.build_command(stream_url, self.user_agent, proxy)
             
             # Log the final command for debugging
             logger.debug(f"ffmpeg command for channel {self.channel_id}: {' '.join(self.transcode_cmd)}")
