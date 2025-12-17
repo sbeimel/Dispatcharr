@@ -843,8 +843,11 @@ class StreamManager:
             else:
                 stream_profile = channel.get_stream_profile()
 
+            # Get proxy from associated M3U account if available
+            proxy = self._get_account_proxy(channel)
+            
             # Build and start transcode command
-            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
 
             # For UDP streams, remove any user_agent parameters from the command
             if hasattr(self, 'stream_type') and self.stream_type == StreamType.UDP:
@@ -2262,5 +2265,36 @@ class StreamManager:
     def _reset_url_switching_state(self):
         """Safely reset the URL switching state if it gets stuck"""
         self.url_switching = False
+
+    def _get_account_proxy(self, channel):
+        """
+        Get the proxy setting from the associated M3U account for this channel.
+        
+        Args:
+            channel: Channel object
+            
+        Returns:
+            str or None: Proxy URL if configured, None otherwise
+        """
+        try:
+            # Check if channel has a channel_group
+            if not channel.channel_group:
+                return None
+                
+            # Get M3U accounts associated with this channel group
+            channel_group_accounts = channel.channel_group.m3u_accounts.filter(enabled=True)
+            
+            for cga in channel_group_accounts:
+                m3u_account = cga.m3u_account
+                proxy = m3u_account.get_proxy()
+                if proxy:
+                    logger.debug(f"Using proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.type}) for channel {self.channel_id}")
+                    return proxy
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting account proxy for channel {self.channel_id}: {e}")
+            return None
         self.url_switch_start_time = 0
         logger.info(f"Reset URL switching state for channel {self.channel_id}")

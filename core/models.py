@@ -121,20 +121,34 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent):
+    def build_command(self, stream_url, user_agent, proxy=None):
         if self.is_proxy():
             return []
+
+        # Bereite Proxy-Parameter vor
+        proxy_param = ""
+        if proxy:
+            proxy_param = f"-http_proxy {proxy}"
 
         replacements = {
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
+            "{proxy}": proxy_param,
         }
 
         # Split the command and iterate through each part to apply replacements
-        cmd = [self.command] + [
-            self._replace_in_part(part, replacements)
-            for part in self.parameters.split()
-        ]
+        cmd = [self.command]
+        
+        for part in self.parameters.split():
+            # Spezielle Behandlung für Proxy-Parameter
+            if "{proxy}" in part:
+                if proxy:
+                    # Füge Proxy-Parameter nur hinzu wenn Proxy gesetzt ist
+                    cmd.append(self._replace_in_part(part, replacements))
+                # Überspringe Proxy-Parameter wenn kein Proxy gesetzt ist
+            else:
+                # Normale Parameter ohne Proxy-Platzhalter
+                cmd.append(self._replace_in_part(part, replacements))
 
         return cmd
 

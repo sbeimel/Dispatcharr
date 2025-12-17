@@ -120,6 +120,14 @@ class M3UAccount(models.Model):
         blank=True,
         null=True,
         help_text="Proxy server for MAC portal connections (e.g., http://proxy:8080)",
+        verbose_name="Proxy (MAC/STB)"
+    )
+    proxy_std_xc = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Proxy server for STD/XC connections (e.g., http://proxy:8080). Used for Standard and Xtream Codes accounts.",
+        verbose_name="Proxy (STD/XC)"
     )
     enable_vod_scanning = models.BooleanField(
         default=False,
@@ -128,6 +136,19 @@ class M3UAccount(models.Model):
 
     def __str__(self):
         return self.name
+
+    def get_proxy(self):
+        """
+        Get the appropriate proxy for this account based on its type.
+        
+        Returns:
+            str or None: Proxy URL if configured, None otherwise
+        """
+        if self.type == self.Types.MAC:
+            return self.proxy
+        elif self.type in [self.Types.STADNARD, self.Types.XC]:
+            return self.proxy_std_xc
+        return None
 
     def clean(self):
         if self.max_streams < 0:
