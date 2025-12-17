@@ -129,6 +129,9 @@ class StreamProfile(models.Model):
         proxy_param = ""
         if proxy:
             proxy_param = f"-http_proxy {proxy}"
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"StreamProfile {self.name}: Adding proxy parameter: {proxy_param}")
 
         replacements = {
             "{streamUrl}": stream_url,

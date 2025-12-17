@@ -846,8 +846,16 @@ class StreamManager:
             # Get proxy from associated M3U account if available
             proxy = self._get_account_proxy(channel)
             
+            if proxy:
+                logger.info(f"Using account-specific proxy for channel {self.channel_id}: {proxy}")
+            else:
+                logger.info(f"No proxy configured for channel {self.channel_id}")
+            
             # Build and start transcode command
             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
+            
+            # Log the final command for debugging
+            logger.debug(f"ffmpeg command for channel {self.channel_id}: {' '.join(self.transcode_cmd)}")
 
             # For UDP streams, remove any user_agent parameters from the command
             if hasattr(self, 'stream_type') and self.stream_type == StreamType.UDP:

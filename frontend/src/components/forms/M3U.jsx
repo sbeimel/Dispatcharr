@@ -75,6 +75,7 @@ const M3U = ({
       enable_vod: false,
       mac_address: '',
       proxy: '',
+      proxy_std_xc: '',
     },
 
     validate: {
@@ -119,6 +120,7 @@ const M3U = ({
         enable_vod: m3uAccount.enable_vod || false,
         mac_address: m3uAccount.mac_address ?? '',
         proxy: m3uAccount.proxy ?? '',
+        proxy_std_xc: m3uAccount.proxy_std_xc ?? '',
       });
 
       if (accountType == 'XC') {
@@ -547,6 +549,15 @@ const M3U = ({
                     description="Password for Xtream Codes authentication (leave empty to keep existing)"
                     {...form.getInputProps('password')}
                   />
+
+                  <TextInput
+                    id="proxy_std_xc"
+                    name="proxy_std_xc"
+                    label="Proxy Server (Optional)"
+                    description="Proxy server for XC connections (e.g. http://proxy:8080 or socks5://proxy:1080)"
+                    {...form.getInputProps('proxy_std_xc')}
+                    key={form.key('proxy_std_xc')}
+                  />
                 </Box>
               )}
 
@@ -695,13 +706,24 @@ const M3U = ({
               )}
 
               {form.getValues().account_type != 'XC' && form.getValues().account_type != 'MAC' && (
-                <FileInput
-                  id="file"
-                  label="Upload files"
-                  placeholder="Upload files"
-                  description="Upload a local M3U file instead of using URL"
-                  onChange={setFile}
-                />
+                <>
+                  <FileInput
+                    id="file"
+                    label="Upload files"
+                    placeholder="Upload files"
+                    description="Upload a local M3U file instead of using URL"
+                    onChange={setFile}
+                  />
+
+                  <TextInput
+                    id="proxy_std_xc"
+                    name="proxy_std_xc"
+                    label="Proxy Server (Optional)"
+                    description="Proxy server for STD connections (e.g. http://proxy:8080 or socks5://proxy:1080)"
+                    {...form.getInputProps('proxy_std_xc')}
+                    key={form.key('proxy_std_xc')}
+                  />
+                </>
               )}
             </Stack>
 

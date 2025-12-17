@@ -13,6 +13,9 @@ class M3UFilterInline(admin.TabularInline):
 
 @admin.register(M3UAccount)
 class M3UAccountAdmin(admin.ModelAdmin):
+    from .forms import M3UAccountForm
+    form = M3UAccountForm  # Verwende das erweiterte Formular
+    
     list_display = (
         "name",
         "account_type",
