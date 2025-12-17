@@ -30,6 +30,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
     smart_buffer_clear_enabled: true,
     buffer_clear_on_codec_change: true,
     buffer_clear_on_resolution_change: true,
+    legacy_buffer_mode: false,
     failover_total_timeout: 60,
     failover_timeout_action: 'stop',
     max_failover_attempts: 10,
@@ -45,6 +46,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
         smart_buffer_clear_enabled: settings.smart_buffer_clear_enabled ?? true,
         buffer_clear_on_codec_change: settings.buffer_clear_on_codec_change ?? true,
         buffer_clear_on_resolution_change: settings.buffer_clear_on_resolution_change ?? true,
+        legacy_buffer_mode: settings.legacy_buffer_mode ?? false,
         failover_total_timeout: settings.failover_total_timeout ?? 60,
         failover_timeout_action: settings.failover_timeout_action ?? 'stop',
         max_failover_attempts: settings.max_failover_attempts ?? 10,
@@ -192,26 +194,37 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
 
         <Stack gap="sm">
           <FeatureSwitch
-            field="smart_buffer_clear_enabled"
-            label="Enable Smart Buffer Clearing"
-            description="Only clear buffer when codec or resolution changes (recommended)"
+            field="legacy_buffer_mode"
+            label="Legacy Buffer Mode (0.12.0-04 Style)"
+            description="Always clear buffer on stream switch - disables smart seamless mode"
           />
 
-          {localSettings.smart_buffer_clear_enabled && (
-            <Box ml="md" mt="xs">
-              <Stack gap="sm">
-                <FeatureSwitch
-                  field="buffer_clear_on_codec_change"
-                  label="Clear on Codec Change"
-                  description="Clear buffer when codec changes (e.g., h264 → hevc)"
-                />
-                <FeatureSwitch
-                  field="buffer_clear_on_resolution_change"
-                  label="Clear on Resolution Change"
-                  description="Clear buffer when resolution changes (e.g., 720p → 1080p)"
-                />
-              </Stack>
-            </Box>
+          {!localSettings.legacy_buffer_mode && (
+            <>
+              <Divider my="xs" />
+              <FeatureSwitch
+                field="smart_buffer_clear_enabled"
+                label="Enable Smart Buffer Clearing"
+                description="Only clear buffer when codec or resolution changes (recommended)"
+              />
+
+              {localSettings.smart_buffer_clear_enabled && (
+                <Box ml="md" mt="xs">
+                  <Stack gap="sm">
+                    <FeatureSwitch
+                      field="buffer_clear_on_codec_change"
+                      label="Clear on Codec Change"
+                      description="Clear buffer when codec changes (e.g., h264 → hevc)"
+                    />
+                    <FeatureSwitch
+                      field="buffer_clear_on_resolution_change"
+                      label="Clear on Resolution Change"
+                      description="Clear buffer when resolution changes (e.g., 720p → 1080p)"
+                    />
+                  </Stack>
+                </Box>
+              )}
+            </>
           )}
         </Stack>
       </Paper>

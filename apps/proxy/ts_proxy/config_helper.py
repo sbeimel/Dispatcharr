@@ -171,6 +171,16 @@ class ConfigHelper:
             return True  # Default enabled
 
     @staticmethod
+    def legacy_buffer_mode():
+        """Check if legacy buffer mode (0.12.0-04 style) is enabled"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.legacy_buffer_mode
+        except Exception:
+            return False  # Default disabled (smart mode enabled)
+
+    @staticmethod
     def failover_total_timeout():
         """Get total failover timeout in seconds from MAC Portal settings or default"""
         try:

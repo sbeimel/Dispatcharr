@@ -1450,30 +1450,59 @@ class StreamManager:
             
             if stream_id_changed or profile_id_changed:
                 # Something changed - check if buffer clearing is needed
-                if ConfigHelper.smart_buffer_clear_enabled():
-                    # Smart mode: Only clear if codec/resolution changes
+                should_clear = False
+                
+                # Check if legacy buffer mode is enabled (0.12.0-04 style)
+                if ConfigHelper.legacy_buffer_mode():
+                    should_clear = True
+                    logger.info(f"Stream/Profile changed, will clear buffer (legacy mode 0.12.0-04 enabled)")
+                elif ConfigHelper.smart_buffer_clear_enabled():
+                    # Smart mode: Check codec/resolution for both stream and profile changes
                     if stream_id_changed:
+                        # Stream changed - check if codec/resolution differs
                         should_clear = self._should_clear_buffer_for_stream_switch(old_stream_id, stream_id)
-                    else:
-                        # Profile changed but same stream - assume codec might differ (MAC vs M3U)
-                        # Safe default: clear buffer when switching between account types
-                        should_clear = True
-                        logger.info(f"Profile ID changed from {old_profile_id} to {m3u_profile_id}, will clear buffer (account type change)")
-                    
-                    if should_clear:
-                        logger.info(f"Stream/Profile changed, will clear buffer due to codec/resolution change")
-                        self.clear_buffer_on_next_data = True
-                    else:
-                        logger.info(f"Stream changed but codec/resolution compatible, keeping buffer for seamless transition")
-                        self.clear_buffer_on_next_data = False
+                        if should_clear:
+                            logger.info(f"Stream ID changed with different codec/resolution, will clear buffer")
+                        else:
+                            logger.info(f"Stream ID changed but codec/resolution compatible, keeping buffer")
+                    elif profile_id_changed:
+                        # Profile changed but same stream - check if we can compare codecs
+                        # Since it's the same stream ID, codec should be the same
+                        # But different profiles might use different sources/encodings
+                        # For now, keep buffer (seamless) since stream ID is same
+                        should_clear = False
+                        logger.info(f"Profile ID changed from {old_profile_id} to {m3u_profile_id} but same stream, keeping buffer for seamless transition")
                 else:
                     # Smart mode disabled - always clear on stream/profile change
+                    should_clear = True
                     logger.info(f"Stream/Profile changed, will clear buffer (smart mode disabled)")
-                    self.clear_buffer_on_next_data = True
+                
+                if should_clear:
+                    logger.info(f"Stream/Profile changed, clearing buffer immediately to prevent codec mismatch")
+                    # Clear buffer IMMEDIATELY, not on next data
+                    try:
+                        if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                            # Clear all buffer chunks
+                            buffer_index_key = RedisKeys.buffer_index(self.channel_id)
+                            current_index = int(self.buffer.redis_client.get(buffer_index_key) or 0)
+                            
+                            # Delete last 100 chunks to ensure clean slate
+                            for i in range(current_index - 100, current_index + 1):
+                                chunk_key = RedisKeys.buffer_chunk(self.channel_id, i)
+                                self.buffer.redis_client.delete(chunk_key)
+                            
+                            # Reset buffer index to 0
+                            self.buffer.redis_client.set(buffer_index_key, 0)
+                            self.buffer.index = 0
+                            
+                            logger.info(f"Buffer cleared immediately for channel {self.channel_id} - ready for new stream data")
+                    except Exception as e:
+                        logger.error(f"Error clearing buffer immediately: {e}")
+                else:
+                    logger.info(f"Stream changed but codec/resolution compatible, keeping buffer for seamless transition")
             else:
                 # Same stream and profile (MAC failover within same account) - keep buffer for seamless transition
                 logger.debug(f"Same stream and profile, keeping buffer for seamless MAC failover")
-                self.clear_buffer_on_next_data = False
 
             # Log stream switch event
             try:
@@ -1815,32 +1844,8 @@ class StreamManager:
             chunk_size = len(chunk)
             self._update_bytes_processed(chunk_size)
 
-            # Clear buffer if this is the first chunk after stream switch
-            if hasattr(self, 'clear_buffer_on_next_data') and self.clear_buffer_on_next_data:
-                logger.info(f"First chunk received after stream switch, clearing old buffer for channel {self.channel_id}")
-                try:
-                    if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                        # Clear all buffer chunks
-                        buffer_index_key = RedisKeys.buffer_index(self.channel_id)
-                        current_index = int(self.buffer.redis_client.get(buffer_index_key) or 0)
-                        
-                        # Delete old chunks (last 100 chunks to be safe)
-                        pipe = self.buffer.redis_client.pipeline()
-                        for idx in range(max(0, current_index - 100), current_index + 1):
-                            chunk_key = RedisKeys.buffer_chunk(self.channel_id, idx)
-                            pipe.delete(chunk_key)
-                        pipe.execute()
-                        
-                        # Reset buffer index
-                        self.buffer.redis_client.set(buffer_index_key, 0)
-                        self.buffer.index = 0
-                        
-                        logger.info(f"Buffer cleared for channel {self.channel_id} - new stream data is now flowing")
-                except Exception as e:
-                    logger.error(f"Error clearing buffer on first chunk: {e}")
-                finally:
-                    # Clear flag so we only do this once
-                    self.clear_buffer_on_next_data = False
+            # Buffer is now cleared immediately in update_url() when stream/profile changes
+            # No need to clear on first chunk anymore
 
             # Add directly to buffer without TS-specific processing
             success = self.buffer.add_chunk(chunk)

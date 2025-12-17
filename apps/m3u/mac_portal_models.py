@@ -182,6 +182,10 @@ class MACPortalGlobalSettings(models.Model):
         default=True,
         help_text="Clear buffer when resolution changes (e.g., 720p → 1080p)"
     )
+    legacy_buffer_mode = models.BooleanField(
+        default=False,
+        help_text="Use legacy buffer clearing (0.12.0-04 style): always clear buffer on stream switch"
+    )
     
     # Failover Timeout Settings (Requirement 103.1)
     failover_total_timeout = models.IntegerField(
