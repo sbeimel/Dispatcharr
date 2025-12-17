@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\requests\adapters.py
-# hypothesis_version: 6.148.7
-
-['CERT_NONE', 'CERT_REQUIRED', 'Content-Length', 'Proxy-Authorization', '_pool_block', '_pool_connections', '_pool_maxsize', 'config', 'headers', 'http', 'https', 'max_retries', 'socks', 'status', 'utf-8']

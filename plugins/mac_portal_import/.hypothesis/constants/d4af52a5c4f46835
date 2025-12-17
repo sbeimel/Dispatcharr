@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\idna\__init__.py
-# hypothesis_version: 6.148.7
-
-['IDNABidiError', 'IDNAError', 'InvalidCodepoint', '__version__', 'alabel', 'check_bidi', 'check_hyphen_ok', 'check_label', 'check_nfc', 'decode', 'encode', 'intranges_contain', 'ulabel', 'uts46_remap', 'valid_contextj', 'valid_contexto', 'valid_label_length', 'valid_string_length']
