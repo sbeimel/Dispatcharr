@@ -27,9 +27,9 @@ const MACPortalPage = () => {
     <Box p="md">
       <Group justify="space-between" mb="lg">
         <div>
-          <Title order={2}>MAC Portal Management</Title>
+          <Title order={2}>Advanced Settings</Title>
           <Text c="dimmed" size="sm">
-            Verwalte MAC Portale, Failover-Einstellungen und Health-Monitoring
+            Configure MAC Portal settings, failover behavior, and performance tuning
           </Text>
         </div>
       </Group>

@@ -165,7 +165,7 @@ const Sidebar = ({ collapsed, toggleDrawer, drawerWidth, miniDrawerWidth }) => {
             path: '/failover-test',
           },
           {
-            label: 'MAC Portal',
+            label: 'Advanced Settings',
             icon: <Router size={20} />,
             path: '/mac-portal',
           },

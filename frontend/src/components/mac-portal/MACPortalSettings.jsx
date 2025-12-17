@@ -97,7 +97,7 @@ const MACPortalSettings = () => {
   return (
     <Box p="md">
       <Group justify="space-between" mb="md">
-        <Title order={2}>MAC Portal Settings</Title>
+        <Title order={2}>Global Settings</Title>
         <Button variant="outline" color="gray" onClick={handleResetSettings}>
           Reset to Defaults
         </Button>

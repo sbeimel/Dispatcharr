@@ -104,6 +104,7 @@ class StreamManager:
 
         # Add tracking for tried streams and current stream
         self.current_stream_id = stream_id
+        self.current_profile_id = None  # Track current profile for buffer clearing decisions
         self.tried_stream_ids = set()
         self.tried_profile_ids = set()  # Track tried profiles for profile failover
 
@@ -1421,36 +1422,57 @@ class StreamManager:
             self.url = new_url
             self.connected = False
 
+            # Track old values for comparison
+            old_stream_id = self.current_stream_id
+            old_profile_id = getattr(self, 'current_profile_id', None)
+            
             # Update stream ID if provided
             if stream_id:
-                old_stream_id = self.current_stream_id
                 self.current_stream_id = stream_id
                 # Add stream ID to tried streams for proper tracking
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
 
+            # Update profile ID if provided
+            if m3u_profile_id:
+                self.current_profile_id = m3u_profile_id
+                logger.info(f"Updated profile ID from {old_profile_id} to {m3u_profile_id} for channel {self.channel_id}")
+
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
 
             # Intelligent buffer clearing decision
-            if old_stream_id and stream_id and old_stream_id != stream_id:
-                # Stream ID changed - check if buffer clearing is needed
+            # Clear buffer if:
+            # 1. Stream ID changed (different stream)
+            # 2. Profile ID changed (MAC → M3U or different account, likely different codec)
+            stream_id_changed = old_stream_id and stream_id and old_stream_id != stream_id
+            profile_id_changed = old_profile_id and m3u_profile_id and old_profile_id != m3u_profile_id
+            
+            if stream_id_changed or profile_id_changed:
+                # Something changed - check if buffer clearing is needed
                 if ConfigHelper.smart_buffer_clear_enabled():
                     # Smart mode: Only clear if codec/resolution changes
-                    should_clear = self._should_clear_buffer_for_stream_switch(old_stream_id, stream_id)
+                    if stream_id_changed:
+                        should_clear = self._should_clear_buffer_for_stream_switch(old_stream_id, stream_id)
+                    else:
+                        # Profile changed but same stream - assume codec might differ (MAC vs M3U)
+                        # Safe default: clear buffer when switching between account types
+                        should_clear = True
+                        logger.info(f"Profile ID changed from {old_profile_id} to {m3u_profile_id}, will clear buffer (account type change)")
+                    
                     if should_clear:
-                        logger.info(f"Stream ID changed from {old_stream_id} to {stream_id}, will clear buffer due to codec/resolution change")
+                        logger.info(f"Stream/Profile changed, will clear buffer due to codec/resolution change")
                         self.clear_buffer_on_next_data = True
                     else:
-                        logger.info(f"Stream ID changed but codec/resolution compatible, keeping buffer for seamless transition")
+                        logger.info(f"Stream changed but codec/resolution compatible, keeping buffer for seamless transition")
                         self.clear_buffer_on_next_data = False
                 else:
-                    # Smart mode disabled - always clear on stream change
-                    logger.info(f"Stream ID changed from {old_stream_id} to {stream_id}, will clear buffer (smart mode disabled)")
+                    # Smart mode disabled - always clear on stream/profile change
+                    logger.info(f"Stream/Profile changed, will clear buffer (smart mode disabled)")
                     self.clear_buffer_on_next_data = True
             else:
-                # Same stream (MAC failover) - keep buffer for seamless transition
-                logger.debug(f"Same stream ID, keeping buffer for seamless MAC failover")
+                # Same stream and profile (MAC failover within same account) - keep buffer for seamless transition
+                logger.debug(f"Same stream and profile, keeping buffer for seamless MAC failover")
                 self.clear_buffer_on_next_data = False
 
             # Log stream switch event
