@@ -125,13 +125,28 @@ const M3UGroupFilter = ({ playlist = null, isOpen, onClose }) => {
         custom_properties: state.custom_properties || undefined,
       }));
 
-      const categorySettings = movieCategoryStates
-        .concat(seriesCategoryStates)
-        .map((state) => ({
-          ...state,
-          custom_properties: state.custom_properties || undefined,
-        }))
-        .filter((state) => state.enabled !== state.original_enabled);
+      // For MAC accounts, VOD categories are also ChannelGroups, so add them to groupSettings
+      if (playlist?.account_type === 'MAC') {
+        const vodGroupSettings = movieCategoryStates
+          .concat(seriesCategoryStates)
+          .map((state) => ({
+            channel_group: state.channel_group || state.id,
+            enabled: state.enabled,
+            custom_properties: state.custom_properties || {},
+          }));
+        groupSettings.push(...vodGroupSettings);
+      }
+
+      // For XC accounts, use the old categorySettings approach
+      const categorySettings = playlist?.account_type === 'XC'
+        ? movieCategoryStates
+            .concat(seriesCategoryStates)
+            .map((state) => ({
+              ...state,
+              custom_properties: state.custom_properties || undefined,
+            }))
+            .filter((state) => state.enabled !== state.original_enabled)
+        : [];
 
       // Update account-level settings via the proper account endpoint
       await API.updatePlaylist({
@@ -195,9 +210,15 @@ const M3UGroupFilter = ({ playlist = null, isOpen, onClose }) => {
       <Stack>
         <Tabs defaultValue="live">
           <Tabs.List>
-            <Tabs.Tab value="live">Live</Tabs.Tab>
-            <Tabs.Tab value="vod-movie">VOD - Movies</Tabs.Tab>
-            <Tabs.Tab value="vod-series">VOD - Series</Tabs.Tab>
+            <Tabs.Tab value="live">Live TV Groups</Tabs.Tab>
+            {/* Show VOD tabs for XC accounts with VOD enabled, or MAC accounts with VOD categories */}
+            {((playlist?.account_type === 'XC' && playlist?.enable_vod) || 
+              (playlist?.account_type === 'MAC' && (playlist?.vod_movie_categories?.length > 0 || playlist?.vod_series_categories?.length > 0))) && (
+              <>
+                <Tabs.Tab value="vod-movie">VOD - Movies</Tabs.Tab>
+                <Tabs.Tab value="vod-series">VOD - Series</Tabs.Tab>
+              </>
+            )}
           </Tabs.List>
 
           <Tabs.Panel value="live">
@@ -210,27 +231,33 @@ const M3UGroupFilter = ({ playlist = null, isOpen, onClose }) => {
             />
           </Tabs.Panel>
 
-          <Tabs.Panel value="vod-movie">
-            <VODCategoryFilter
-              playlist={playlist}
-              categoryStates={movieCategoryStates}
-              setCategoryStates={setMovieCategoryStates}
-              type="movie"
-              autoEnableNewGroups={autoEnableNewGroupsVod}
-              setAutoEnableNewGroups={setAutoEnableNewGroupsVod}
-            />
-          </Tabs.Panel>
+          {/* VOD tabs - shown for XC with VOD enabled or MAC with VOD categories */}
+          {((playlist?.account_type === 'XC' && playlist?.enable_vod) || 
+            (playlist?.account_type === 'MAC' && (playlist?.vod_movie_categories?.length > 0 || playlist?.vod_series_categories?.length > 0))) && (
+            <>
+              <Tabs.Panel value="vod-movie">
+                <VODCategoryFilter
+                  playlist={playlist}
+                  categoryStates={movieCategoryStates}
+                  setCategoryStates={setMovieCategoryStates}
+                  type="movie"
+                  autoEnableNewGroups={autoEnableNewGroupsVod}
+                  setAutoEnableNewGroups={setAutoEnableNewGroupsVod}
+                />
+              </Tabs.Panel>
 
-          <Tabs.Panel value="vod-series">
-            <VODCategoryFilter
-              playlist={playlist}
-              categoryStates={seriesCategoryStates}
-              setCategoryStates={setSeriesCategoryStates}
-              type="series"
-              autoEnableNewGroups={autoEnableNewGroupsSeries}
-              setAutoEnableNewGroups={setAutoEnableNewGroupsSeries}
-            />
-          </Tabs.Panel>
+              <Tabs.Panel value="vod-series">
+                <VODCategoryFilter
+                  playlist={playlist}
+                  categoryStates={seriesCategoryStates}
+                  setCategoryStates={setSeriesCategoryStates}
+                  type="series"
+                  autoEnableNewGroups={autoEnableNewGroupsSeries}
+                  setAutoEnableNewGroups={setAutoEnableNewGroupsSeries}
+                />
+              </Tabs.Panel>
+            </>
+          )}
         </Tabs>
 
         <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">

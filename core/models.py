@@ -121,7 +121,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent):
+    def build_command(self, stream_url, user_agent, proxy=None):
         if self.is_proxy():
             return []
 
@@ -131,10 +131,24 @@ class StreamProfile(models.Model):
         }
 
         # Split the command and iterate through each part to apply replacements
-        cmd = [self.command] + [
-            self._replace_in_part(part, replacements)
-            for part in self.parameters.split()
-        ]
+        cmd = [self.command]
+        
+        for part in self.parameters.split():
+            # Skip {proxy} placeholder entirely - we'll inject it properly
+            if part == "{proxy}":
+                continue
+                
+            replaced_part = self._replace_in_part(part, replacements)
+            
+            # If this is the -i parameter and we have a proxy, inject proxy BEFORE -i
+            if part == "-i" and proxy:
+                cmd.append("-http_proxy")
+                cmd.append(proxy)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"StreamProfile {self.name}: Injected proxy before -i: {proxy}")
+            
+            cmd.append(replaced_part)
 
         return cmd
 

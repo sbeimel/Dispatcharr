@@ -450,7 +450,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
         return []
 
-def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
+def validate_stream_url(url, user_agent=None, timeout=(5, 5), proxy=None):
     """
     Validate if a stream URL is accessible without downloading the full content.
 
@@ -461,6 +461,7 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
         url (str): The URL to validate
         user_agent (str): User agent to use for the request
         timeout (tuple): Connection and read timeout in seconds
+        proxy (str): Proxy URL to use for the request (e.g., http://proxy:8080)
 
     Returns:
         tuple: (is_valid, final_url, status_code, message)
@@ -480,11 +481,21 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
         }
         session.headers.update(headers)
 
+        # Configure proxy if provided
+        proxies = None
+        if proxy:
+            proxies = {
+                'http': proxy,
+                'https': proxy
+            }
+            logger.debug(f"Using proxy {proxy} for stream validation")
+
         # Make HEAD request first as it's faster and doesn't download content
         head_response = session.head(
             url,
             timeout=timeout,
-            allow_redirects=True
+            allow_redirects=True,
+            proxies=proxies
         )
 
         # If HEAD not supported, server will return 405 or other error
@@ -497,7 +508,8 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
             url,
             stream=True,
             timeout=timeout,
-            allow_redirects=True
+            allow_redirects=True,
+            proxies=proxies
         )
 
         # IMPORTANT: Check status code first before checking content
@@ -570,6 +582,37 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
     finally:
         if 'session' in locals():
             session.close()
+
+def get_channel_proxy(channel):
+    """
+    Get the proxy setting from the associated M3U account for this channel.
+    
+    Args:
+        channel: Channel object
+        
+    Returns:
+        str or None: Proxy URL if configured, None otherwise
+    """
+    try:
+        # Check if channel has a channel_group
+        if not channel.channel_group:
+            return None
+            
+        # Get M3U accounts associated with this channel group
+        channel_group_accounts = channel.channel_group.m3u_accounts.filter(enabled=True)
+        
+        for cga in channel_group_accounts:
+            m3u_account = cga.m3u_account
+            proxy = m3u_account.get_proxy()
+            if proxy:
+                logger.debug(f"Found proxy {proxy} from M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {channel.uuid}")
+                return proxy
+                
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error getting channel proxy for channel {channel.uuid}: {e}")
+        return None
 
 def get_connections_left(m3u_profile_id: int) -> int:
     """

@@ -329,7 +329,7 @@ class MACBatchOperationsViewSet(viewsets.ViewSet):
             client = ExtendedMacPortalClient(
                 base_url=account.server_url,
                 mac=mac.address,
-                proxy=account.proxy_url,
+                proxy=account.get_proxy(),
             )
             token = client.handshake()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -492,7 +492,7 @@ class ConnectionTestViewSet(viewsets.ViewSet):
             client = ExtendedMacPortalClient(
                 base_url=account.server_url,
                 mac=mac.address,
-                proxy=account.proxy_url,
+                proxy=account.get_proxy(),
             )
             portal_url = client.resolve_portal_url()
             duration = int((time.time() - start) * 1000)
@@ -522,7 +522,7 @@ class ConnectionTestViewSet(viewsets.ViewSet):
             client = ExtendedMacPortalClient(
                 base_url=account.server_url,
                 mac=mac.address,
-                proxy=account.proxy_url,
+                proxy=account.get_proxy(),
             )
             token = client.handshake()
             duration = int((time.time() - start) * 1000)
@@ -552,7 +552,7 @@ class ConnectionTestViewSet(viewsets.ViewSet):
             client = ExtendedMacPortalClient(
                 base_url=account.server_url,
                 mac=mac.address,
-                proxy=account.proxy_url,
+                proxy=account.get_proxy(),
             )
             client.handshake()
             channels = client.get_all_channels_raw()
@@ -696,7 +696,7 @@ class EngineBenchmarkViewSet(viewsets.ViewSet):
             results = UnifiedMacPortalClient.benchmark_all_engines(
                 portal_url=account.server_url,
                 mac=mac.address,
-                proxy=account.proxy_url
+                proxy=account.get_proxy()
             )
             
             # Save portal_info to account's custom_properties

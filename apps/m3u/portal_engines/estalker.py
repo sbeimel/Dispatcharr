@@ -249,21 +249,35 @@ class EStalkerStrategy(BasePortalStrategy):
         data = self._make_request(params, self.identity.token, "GET")
         if data:
             try:
-                link = data.get("js", {}).get("cmd", "").split()[-1]
-                if link and link.startswith("http"):
-                    return link
-            except Exception:
-                pass
+                js = data.get("js", {})
+                
+                # Handle empty list response (channel not found/disabled)
+                if isinstance(js, list):
+                    if not js:
+                        logger.debug(f"EStalker: Portal returned empty list for cmd={cmd}")
+                else:
+                    link = js.get("cmd", "").split()[-1]
+                    if link and link.startswith("http"):
+                        return link
+            except Exception as e:
+                logger.debug(f"EStalker: GET create_link parse error: {e}")
         
         # Try POST
         data = self._make_request(params, self.identity.token, "POST")
         if data:
             try:
-                link = data.get("js", {}).get("cmd", "").split()[-1]
-                if link and link.startswith("http"):
-                    return link
-            except Exception:
-                pass
+                js = data.get("js", {})
+                
+                # Handle empty list response (channel not found/disabled)
+                if isinstance(js, list):
+                    if not js:
+                        logger.debug(f"EStalker: Portal returned empty list for cmd={cmd}")
+                else:
+                    link = js.get("cmd", "").split()[-1]
+                    if link and link.startswith("http"):
+                        return link
+            except Exception as e:
+                logger.debug(f"EStalker: POST create_link parse error: {e}")
         
         return None
     

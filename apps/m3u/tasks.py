@@ -560,14 +560,15 @@ def process_groups(account, groups):
         if group_name in existing_groups:
             existing_group_objs.append(existing_groups[group_name])
         else:
-            groups_to_create.append(ChannelGroup(name=group_name))
+            # Create new Live TV group with group_type='live'
+            groups_to_create.append(ChannelGroup(name=group_name, group_type='live'))
 
     # Create new groups and fetch them back with IDs
     newly_created_group_objs = []
     if groups_to_create:
-        logger.info(f"Creating {len(groups_to_create)} new groups for account {account.id}")
+        logger.info(f"Creating {len(groups_to_create)} new Live TV groups for account {account.id}")
         newly_created_group_objs = list(ChannelGroup.bulk_create_and_fetch(groups_to_create))
-        logger.debug(f"Successfully created {len(newly_created_group_objs)} new groups")
+        logger.debug(f"Successfully created {len(newly_created_group_objs)} new Live TV groups")
 
     # Combine all groups
     all_group_objs = existing_group_objs + newly_created_group_objs
@@ -594,9 +595,26 @@ def process_groups(account, groups):
     relations_to_delete = []
 
     # Find orphaned relationships (groups that no longer exist in the source)
+    # IMPORTANT: Only delete Live TV groups, NOT VOD categories
     current_group_names = set(groups.keys())
     for group_name, rel in all_existing_relationships.items():
         if group_name not in current_group_names:
+            # Check if this is a VOD category - don't delete those during Live TV refresh
+            is_vod_category = False
+            rel_props = rel.custom_properties or {}
+            if rel_props.get('is_vod_category') or rel_props.get('vod_type'):
+                is_vod_category = True
+            # Also check group_type on the ChannelGroup itself
+            if hasattr(rel.channel_group, 'group_type') and rel.channel_group.group_type in ['vod_movie', 'vod_series']:
+                is_vod_category = True
+            # Also check by name pattern for backward compatibility
+            if group_name.startswith('VOD - '):
+                is_vod_category = True
+            
+            if is_vod_category:
+                logger.debug(f"Skipping deletion of VOD category group '{group_name}' during Live TV refresh for account {account.id}")
+                continue
+            
             relations_to_delete.append(rel)
             logger.debug(f"Marking relationship for deletion: group '{group_name}' no longer exists in source for account {account.id}")
 
@@ -2972,11 +2990,27 @@ def refresh_single_m3u_account(account_id):
                 except Exception as e:
                     logger.error(f"Failed to queue VOD refresh for XC account {account_id}: {str(e)}")
             elif account.account_type == M3UAccount.Types.MAC:
-                logger.info(f"VOD is enabled for MAC account {account_id}, triggering MAC VOD category refresh")
+                logger.info(f"VOD is enabled for MAC account {account_id}, checking VOD categories")
                 try:
-                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
-                    refresh_mac_portal_categories.delay(account_id)
-                    logger.info(f"MAC VOD category refresh task queued for account {account_id}")
+                    # Check if VOD categories already exist and are enabled
+                    enabled_vod_groups = ChannelGroupM3UAccount.objects.filter(
+                        m3u_account=account,
+                        enabled=True,
+                        channel_group__group_type__in=['vod_movie', 'vod_series']
+                    ).exists()
+                    
+                    if enabled_vod_groups:
+                        # Phase 2: Import VOD content for selected categories
+                        logger.info(f"Found enabled VOD categories, triggering VOD content import for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_selected_vod
+                        refresh_mac_portal_selected_vod.delay(account_id)
+                        logger.info(f"MAC VOD content import task queued for account {account_id}")
+                    else:
+                        # Phase 1: Load categories first
+                        logger.info(f"No VOD categories yet, triggering MAC VOD category refresh for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                        refresh_mac_portal_categories.delay(account_id)
+                        logger.info(f"MAC VOD category refresh task queued for account {account_id}")
                 except Exception as e:
                     logger.error(f"Failed to queue MAC VOD refresh for account {account_id}: {str(e)}")
 
@@ -3055,48 +3089,38 @@ def _refresh_mac_account_with_groups(account_id):
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
         
-        # Get portal engine setting - priority: account custom_properties > global settings
+        # Get portal engine from GLOBAL settings only
+        # Simplified logic:
+        # - "fastest" → use benchmark result (fastest_engine) per portal
+        # - "auto" → try all engines, cache first working one (until refresh)
+        # - specific engine (macreplay, istb, etc.) → use THAT engine directly, ignore all caches
         portal_engine = 'auto'
-        
-        # First check account-specific settings (from benchmark or user selection)
         account_props = account.custom_properties or {}
-        account_engine = account_props.get('portal_engine')
         
-        # If account has "fastest" mode, use the benchmarked fastest_engine
-        if account_engine == 'fastest':
-            fastest_engine = account_props.get('fastest_engine')
-            if fastest_engine:
-                portal_engine = fastest_engine
-                logger.info(f"MAC refresh using FASTEST benchmarked engine: {portal_engine}")
-            else:
-                # No benchmark yet, fall back to auto
-                portal_engine = 'auto'
-                logger.info(f"MAC refresh: 'fastest' mode but no benchmark data, using auto")
-        elif account_engine and account_engine not in ('auto', '', None):
-            # Account has a specific engine selected
-            portal_engine = account_engine
-            logger.info(f"MAC refresh using account-specific engine: {portal_engine}")
-        else:
-            # Fall back to global settings
-            try:
-                from .mac_portal_models import MACPortalGlobalSettings
-                settings = MACPortalGlobalSettings.get_settings()
-                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                
-                # If global is "fastest", check for account's fastest_engine
-                if global_engine == 'fastest':
-                    fastest_engine = account_props.get('fastest_engine')
-                    if fastest_engine:
-                        portal_engine = fastest_engine
-                        logger.info(f"MAC refresh using global FASTEST mode with benchmarked engine: {portal_engine}")
-                    else:
-                        portal_engine = 'auto'
-                        logger.info(f"MAC refresh: global 'fastest' mode but no benchmark data, using auto")
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                # Use benchmark result for this portal
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC refresh: FASTEST mode using benchmarked engine '{portal_engine}'")
                 else:
-                    portal_engine = global_engine
-                    logger.info(f"MAC refresh using global engine setting: {portal_engine}")
-            except Exception:
-                logger.info(f"MAC refresh using default engine: auto")
+                    portal_engine = 'auto'
+                    logger.info("MAC refresh: FASTEST mode but no benchmark, falling back to auto")
+            elif global_engine == 'auto':
+                # Auto mode - will try all engines and cache first working
+                portal_engine = 'auto'
+                logger.info("MAC refresh: AUTO mode - will try engines in order")
+            else:
+                # Specific engine selected - use it directly, ignore any cached results
+                portal_engine = global_engine
+                logger.info(f"MAC refresh: Using manually selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC refresh: Using default engine 'auto'")
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3163,9 +3187,12 @@ def _refresh_mac_account_with_groups(account_id):
                         logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
                         
                         # Save portal type/version info to account custom_properties
+                        # NOTE: We do NOT save portal_engine here anymore!
+                        # portal_engine should only be set explicitly by user or benchmark,
+                        # not automatically from global settings (which caused the bug where
+                        # changing global engine didn't take effect because account had cached value)
                         try:
                             custom_props = account.custom_properties or {}
-                            custom_props['portal_engine'] = portal_engine
                             
                             # Try to get portal type/version from UnifiedMacPortalClient
                             if hasattr(client, '_unified_client') and client._unified_client:
@@ -3281,44 +3308,34 @@ def _refresh_mac_account_direct(account_id):
             logger.error(f"MAC account {account_id} has no server URL")
             return {"error": "No server URL configured"}
         
-        # Get portal engine setting - priority: account custom_properties > global settings
+        # Get portal engine from GLOBAL settings only
+        # - "fastest" → use benchmark result per portal
+        # - "auto" → try all engines, cache first working
+        # - specific engine → use directly, ignore caches
         portal_engine = 'auto'
-        
-        # First check account-specific settings (from benchmark or user selection)
         account_props = account.custom_properties or {}
-        account_engine = account_props.get('portal_engine')
         
-        # If account has "fastest" mode, use the benchmarked fastest_engine
-        if account_engine == 'fastest':
-            fastest_engine = account_props.get('fastest_engine')
-            if fastest_engine:
-                portal_engine = fastest_engine
-                logger.info(f"MAC direct refresh using FASTEST benchmarked engine: {portal_engine}")
-            else:
-                portal_engine = 'auto'
-                logger.info(f"MAC direct refresh: 'fastest' mode but no benchmark data, using auto")
-        elif account_engine and account_engine not in ('auto', '', None):
-            portal_engine = account_engine
-            logger.info(f"MAC direct refresh using account-specific engine: {portal_engine}")
-        else:
-            try:
-                from .mac_portal_models import MACPortalGlobalSettings
-                settings = MACPortalGlobalSettings.get_settings()
-                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                
-                if global_engine == 'fastest':
-                    fastest_engine = account_props.get('fastest_engine')
-                    if fastest_engine:
-                        portal_engine = fastest_engine
-                        logger.info(f"MAC direct refresh using global FASTEST mode with benchmarked engine: {portal_engine}")
-                    else:
-                        portal_engine = 'auto'
-                        logger.info(f"MAC direct refresh: global 'fastest' mode but no benchmark data, using auto")
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC direct refresh: FASTEST mode using '{portal_engine}'")
                 else:
-                    portal_engine = global_engine
-                    logger.info(f"MAC direct refresh using global engine setting: {portal_engine}")
-            except Exception:
-                logger.info(f"MAC direct refresh using default engine: auto")
+                    portal_engine = 'auto'
+                    logger.info("MAC direct refresh: FASTEST but no benchmark, using auto")
+            elif global_engine == 'auto':
+                portal_engine = 'auto'
+                logger.info("MAC direct refresh: AUTO mode")
+            else:
+                portal_engine = global_engine
+                logger.info(f"MAC direct refresh: Using selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC direct refresh: Using default engine 'auto'")
         
         # Ensure MAC addresses are processed into M3UAccountMac objects
         # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
@@ -3470,28 +3487,24 @@ def check_mac_expiry(account_id=None):
     
     for account in accounts:
         try:
-            # Get portal engine for this account - priority: account custom_properties > global settings
+            # Get portal engine from GLOBAL settings only
             portal_engine = 'auto'
             account_props = account.custom_properties or {}
-            account_engine = account_props.get('portal_engine')
             
-            if account_engine == 'fastest':
-                fastest_engine = account_props.get('fastest_engine')
-                portal_engine = fastest_engine if fastest_engine else 'auto'
-            elif account_engine and account_engine not in ('auto', '', None):
-                portal_engine = account_engine
-            else:
-                try:
-                    from .mac_portal_models import MACPortalGlobalSettings
-                    settings = MACPortalGlobalSettings.get_settings()
-                    global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
-                    if global_engine == 'fastest':
-                        fastest_engine = account_props.get('fastest_engine')
-                        portal_engine = fastest_engine if fastest_engine else 'auto'
-                    else:
-                        portal_engine = global_engine
-                except Exception:
-                    pass
+            try:
+                from .mac_portal_models import MACPortalGlobalSettings
+                settings = MACPortalGlobalSettings.get_settings()
+                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+                
+                if global_engine == 'fastest':
+                    fastest_engine = account_props.get('fastest_engine')
+                    portal_engine = fastest_engine if fastest_engine else 'auto'
+                elif global_engine == 'auto':
+                    portal_engine = 'auto'
+                else:
+                    portal_engine = global_engine
+            except Exception:
+                pass
             
             # Set flag to check all MACs, not just first successful one
             account._status_check_mode = True

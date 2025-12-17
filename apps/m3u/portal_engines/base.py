@@ -339,7 +339,14 @@ class BasePortalStrategy(ABC):
             data = self._make_request(params, self.identity.token, method)
             if data:
                 try:
-                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    js = data.get("js", {})
+                    # Handle case where portal returns empty list instead of dict
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"{self.NAME}: Portal returned empty list for cmd={cmd} (channel may not exist)")
+                        continue
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         logger.info(f"{self.NAME}: create_link successful via {method}")
                         return link
@@ -377,3 +384,198 @@ class BasePortalStrategy(ABC):
                     logger.debug(f"{self.NAME}: get_all_channels parse failed: {e}")
         
         return []
+
+    # ============== VOD Methods ==============
+    
+    def get_genres(self, token: Optional[str] = None) -> list:
+        """
+        Get live TV genres/categories from portal.
+        
+        Args:
+            token: Authentication token (optional, will use identity.token if not provided)
+            
+        Returns:
+            List of genre dicts or empty list
+        """
+        use_token = token or self.identity.token
+        if not use_token:
+            result = self.perform_handshake()
+            if not result.success:
+                return []
+            use_token = self.identity.token
+        
+        params = {
+            "type": "itv",
+            "action": "get_genres",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, use_token, method)
+            if data:
+                try:
+                    genres = data.get("js", [])
+                    if genres:
+                        logger.info(f"{self.NAME}: Got {len(genres)} genres via {method}")
+                        return genres
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_genres parse failed: {e}")
+        
+        return []
+    
+    def get_vod_categories(self, token: Optional[str] = None) -> list:
+        """
+        Get VOD categories from portal.
+        
+        Args:
+            token: Authentication token (optional, will use identity.token if not provided)
+            
+        Returns:
+            List of category dicts or empty list
+        """
+        use_token = token or self.identity.token
+        if not use_token:
+            result = self.perform_handshake()
+            if not result.success:
+                return []
+            use_token = self.identity.token
+        
+        params = {
+            "type": "vod",
+            "action": "get_categories",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, use_token, method)
+            if data:
+                try:
+                    categories = data.get("js", [])
+                    if categories:
+                        logger.info(f"{self.NAME}: Got {len(categories)} VOD categories via {method}")
+                        return categories
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_vod_categories parse failed: {e}")
+        
+        return []
+    
+    def get_vod_items(self, token: Optional[str] = None, category_id: str = "*",
+                      page: int = 1, sortby: str = "added") -> dict:
+        """
+        Get VOD items from portal.
+        
+        Args:
+            token: Authentication token (optional)
+            category_id: Category ID or "*" for all
+            page: Page number
+            sortby: Sort order (added, name, rating)
+            
+        Returns:
+            Dict with 'data' list and 'total_items'
+        """
+        use_token = token or self.identity.token
+        if not use_token:
+            result = self.perform_handshake()
+            if not result.success:
+                return {"data": [], "total_items": 0}
+            use_token = self.identity.token
+        
+        params = {
+            "type": "vod",
+            "action": "get_ordered_list",
+            "category": category_id,
+            "p": str(page),
+            "sortby": sortby,
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, use_token, method)
+            if data:
+                try:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    if items:
+                        logger.info(f"{self.NAME}: Got {len(items)} VOD items via {method}")
+                        return {"data": items, "total_items": total}
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_vod_items parse failed: {e}")
+        
+        return {"data": [], "total_items": 0}
+    
+    def get_series_categories(self, token: Optional[str] = None) -> list:
+        """
+        Get Series categories from portal.
+        
+        Args:
+            token: Authentication token (optional)
+            
+        Returns:
+            List of category dicts or empty list
+        """
+        use_token = token or self.identity.token
+        if not use_token:
+            result = self.perform_handshake()
+            if not result.success:
+                return []
+            use_token = self.identity.token
+        
+        params = {
+            "type": "series",
+            "action": "get_categories",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, use_token, method)
+            if data:
+                try:
+                    categories = data.get("js", [])
+                    if categories:
+                        logger.info(f"{self.NAME}: Got {len(categories)} Series categories via {method}")
+                        return categories
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_series_categories parse failed: {e}")
+        
+        return []
+    
+    def get_series_items(self, token: Optional[str] = None, category_id: str = "*",
+                         page: int = 1, sortby: str = "added") -> dict:
+        """
+        Get Series items from portal.
+        
+        Args:
+            token: Authentication token (optional)
+            category_id: Category ID or "*" for all
+            page: Page number
+            sortby: Sort order
+            
+        Returns:
+            Dict with 'data' list and 'total_items'
+        """
+        use_token = token or self.identity.token
+        if not use_token:
+            result = self.perform_handshake()
+            if not result.success:
+                return {"data": [], "total_items": 0}
+            use_token = self.identity.token
+        
+        params = {
+            "type": "series",
+            "action": "get_ordered_list",
+            "category": category_id,
+            "p": str(page),
+            "sortby": sortby,
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, use_token, method)
+            if data:
+                try:
+                    js = data.get("js", {})
+                    items = js.get("data", [])
+                    total = js.get("total_items", len(items))
+                    if items:
+                        logger.info(f"{self.NAME}: Got {len(items)} Series items via {method}")
+                        return {"data": items, "total_items": total}
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_series_items parse failed: {e}")
+        
+        return {"data": [], "total_items": 0}

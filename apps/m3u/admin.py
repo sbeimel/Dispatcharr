@@ -13,22 +13,53 @@ class M3UFilterInline(admin.TabularInline):
 
 @admin.register(M3UAccount)
 class M3UAccountAdmin(admin.ModelAdmin):
+    from .forms import M3UAccountForm
+    form = M3UAccountForm  # Verwende das erweiterte Formular
+    
     list_display = (
         "name",
+        "account_type",
         "server_url",
         "server_group",
         "max_streams",
         "priority",
         "is_active",
+        "proxy_display",
         "user_agent_display",
         "uploaded_file_link",
         "created_at",
         "updated_at",
     )
-    list_filter = ("is_active", "server_group")
+    list_filter = ("is_active", "account_type", "server_group")
     search_fields = ("name", "server_url", "server_group__name")
     inlines = [M3UFilterInline]
     actions = ["activate_accounts", "deactivate_accounts"]
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'account_type', 'is_active')
+        }),
+        ('Connection Settings', {
+            'fields': ('server_url', 'username', 'password', 'server_group')
+        }),
+        ('Proxy Configuration', {
+            'fields': ('proxy', 'proxy_std_xc'),
+            'description': 'Configure proxy settings. Use "Proxy (MAC/STB)" for MAC Portal accounts, "Proxy (STD/XC)" for Standard/Xtream Codes accounts.'
+        }),
+        ('MAC Portal Settings', {
+            'fields': ('mac_address',),
+            'classes': ('collapse',),
+            'description': 'MAC address settings for STB/MAC Portal accounts'
+        }),
+        ('Advanced Settings', {
+            'fields': ('max_streams', 'priority', 'user_agent', 'stream_profile'),
+            'classes': ('collapse',)
+        }),
+        ('File Upload', {
+            'fields': ('uploaded_file',),
+            'classes': ('collapse',)
+        }),
+    )
 
     # Handle both ForeignKey and ManyToManyField cases for UserAgent
     def user_agent_display(self, obj):
@@ -39,6 +70,18 @@ class M3UAccountAdmin(admin.ModelAdmin):
         return "None"
 
     user_agent_display.short_description = "User Agent(s)"
+
+    def proxy_display(self, obj):
+        """Display proxy configuration based on account type"""
+        proxy = obj.get_proxy()
+        if proxy:
+            if obj.account_type == obj.Types.MAC:
+                return f"{proxy} (MAC/STB)"
+            else:
+                return f"{proxy} (STD/XC)"
+        return "No proxy configured"
+    
+    proxy_display.short_description = "Proxy"
 
     def vod_enabled_display(self, obj):
         """Display whether VOD is enabled for this account"""

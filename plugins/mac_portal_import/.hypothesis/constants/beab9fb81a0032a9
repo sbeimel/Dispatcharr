@@ -1,4 +1,0 @@
-# file: C:\Users\Piwit\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\_pytest\cacheprovider.py
-# hypothesis_version: 6.148.7
-
-[' first', '%s contains:', '*', '-', '--cache-clear', '--cache-show', '--failed-first', '--ff', '--last-failed', '--lf', '--lfnf', '--new-first', '--nf', '.gitignore', '.pytest_cache', '::', '?', 'CACHEDIR.TAG', 'Cache', 'Cache directory path', 'LFPlugin', 'README.md', 'TOX_ENV_DIR', 'UTF-8', 'all', 'append', 'cache is empty', 'cache values for %r', 'cache/lastfailed', 'cache/nodeids', 'cache_dir', 'cacheclear', 'cachedir: ', 'cacheshow', 'call', 'collectonly', 'd', 'failedfirst', 'failure', 'failures', 'file', 'files', 'general', 'lf', 'lfplugin', 'lfplugin-collskip', 'lfplugin-collwrapper', 'newfirst', 'nfplugin', 'none', 'passed', 'r', 'run-last-failure: %s', 'skipped', 'store', 'store_true', 'v', 'verbose', 'w', 'workerinput']
