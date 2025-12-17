@@ -78,10 +78,20 @@ class HLSConfig(BaseConfig):
 class TSConfig(BaseConfig):
     """Configuration settings for TS proxy"""
 
-    # Buffer settings
-    INITIAL_BEHIND_CHUNKS = 4  # How many chunks behind to start a client
+    # Buffer settings (can be overridden by MAC Portal settings)
+    INITIAL_BEHIND_CHUNKS = 10  # How many chunks behind to start a client (optimized for seamless failover)
     CHUNK_BATCH_SIZE = 5       # How many chunks to fetch in one batch
     KEEPALIVE_INTERVAL = 0.5   # Seconds between keepalive packets when at buffer head
+    
+    @classmethod
+    def get_initial_behind_chunks(cls):
+        """Get buffer chunks from MAC Portal settings or default"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.buffer_chunks
+        except Exception:
+            return cls.INITIAL_BEHIND_CHUNKS
     # Chunk read timeout
     CHUNK_TIMEOUT = 5        # Seconds to wait for each chunk read
 

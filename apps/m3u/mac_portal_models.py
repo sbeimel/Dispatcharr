@@ -152,6 +152,37 @@ class MACPortalGlobalSettings(models.Model):
         help_text="PIN for parental control"
     )
     
+    # Stream Performance Settings (Requirement 101.1)
+    buffer_chunks = models.IntegerField(
+        default=10,
+        validators=[MinValueValidator(4), MaxValueValidator(20)],
+        help_text="Buffer size in chunks (4-20, ~250KB per chunk)"
+    )
+    health_check_timeout = models.IntegerField(
+        default=10,
+        validators=[MinValueValidator(5), MaxValueValidator(30)],
+        help_text="Health check timeout in seconds (5-30)"
+    )
+    health_check_timeout_switching = models.IntegerField(
+        default=15,
+        validators=[MinValueValidator(10), MaxValueValidator(60)],
+        help_text="Health check timeout during stream switch in seconds (10-60)"
+    )
+    
+    # Smart Buffer Clearing (Requirement 102.1)
+    smart_buffer_clear_enabled = models.BooleanField(
+        default=True,
+        help_text="Enable smart buffer clearing on stream switch (only when codec/resolution changes)"
+    )
+    buffer_clear_on_codec_change = models.BooleanField(
+        default=True,
+        help_text="Clear buffer when codec changes (e.g., h264 → hevc)"
+    )
+    buffer_clear_on_resolution_change = models.BooleanField(
+        default=True,
+        help_text="Clear buffer when resolution changes (e.g., 720p → 1080p)"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

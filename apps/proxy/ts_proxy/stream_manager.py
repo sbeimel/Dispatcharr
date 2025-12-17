@@ -348,10 +348,17 @@ class StreamManager:
                             except Exception as e:
                                 logger.error(f"Could not log connection error event: {e}")
                         else:
-                            # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
-                            logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            gevent.sleep(timeout)
+                            # Optimized: No delay during stream switch for faster failover
+                            if hasattr(self, 'url_switching') and self.url_switching:
+                                timeout = 0  # Immediate reconnect during stream switch
+                                logger.info(f"Immediate reconnect during stream switch (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            else:
+                                # Wait with exponential backoff before retrying
+                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                                logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            
+                            if timeout > 0:
+                                gevent.sleep(timeout)
 
                     except Exception as e:
                         logger.error(f"Connection error on channel: {self.channel_id}: {e}", exc_info=True)
@@ -376,8 +383,13 @@ class StreamManager:
                             except Exception as log_error:
                                 logger.error(f"Could not log connection error event: {log_error}")
                         else:
-                            # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            # Optimized: No delay during stream switch for faster failover
+                            if hasattr(self, 'url_switching') and self.url_switching:
+                                timeout = 0  # Immediate reconnect during stream switch
+                                logger.info(f"Immediate reconnect during stream switch after error (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            else:
+                                # Wait with exponential backoff before retrying
+                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
                             logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
                             gevent.sleep(timeout)
 
@@ -1398,9 +1410,26 @@ class StreamManager:
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
 
-            # DON'T clear buffer - let old chunks play out for seamless transition
-            # This is how 0.12.0-04 does it and it works well
-            # The buffer will naturally fill with new stream data
+            # Intelligent buffer clearing decision
+            if old_stream_id and stream_id and old_stream_id != stream_id:
+                # Stream ID changed - check if buffer clearing is needed
+                if ConfigHelper.smart_buffer_clear_enabled():
+                    # Smart mode: Only clear if codec/resolution changes
+                    should_clear = self._should_clear_buffer_for_stream_switch(old_stream_id, stream_id)
+                    if should_clear:
+                        logger.info(f"Stream ID changed from {old_stream_id} to {stream_id}, will clear buffer due to codec/resolution change")
+                        self.clear_buffer_on_next_data = True
+                    else:
+                        logger.info(f"Stream ID changed but codec/resolution compatible, keeping buffer for seamless transition")
+                        self.clear_buffer_on_next_data = False
+                else:
+                    # Smart mode disabled - always clear on stream change
+                    logger.info(f"Stream ID changed from {old_stream_id} to {stream_id}, will clear buffer (smart mode disabled)")
+                    self.clear_buffer_on_next_data = True
+            else:
+                # Same stream (MAC failover) - keep buffer for seamless transition
+                logger.debug(f"Same stream ID, keeping buffer for seamless MAC failover")
+                self.clear_buffer_on_next_data = False
 
             # Log stream switch event
             try:
@@ -1446,9 +1475,9 @@ class StreamManager:
                 
                 # Optimized: Longer timeout during stream switching to allow FFmpeg to start
                 if hasattr(self, 'url_switching') and self.url_switching:
-                    timeout_threshold = 15  # 15 seconds tolerance during stream switch
+                    timeout_threshold = ConfigHelper.health_check_timeout_switching()  # Configurable timeout during stream switch
                 else:
-                    timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
+                    timeout_threshold = ConfigHelper.health_check_timeout()  # Configurable normal timeout
 
                 if inactivity_duration > timeout_threshold and self.connected:
                     if self.healthy:
@@ -1741,6 +1770,33 @@ class StreamManager:
             # Track chunk size before adding to buffer
             chunk_size = len(chunk)
             self._update_bytes_processed(chunk_size)
+
+            # Clear buffer if this is the first chunk after stream switch
+            if hasattr(self, 'clear_buffer_on_next_data') and self.clear_buffer_on_next_data:
+                logger.info(f"First chunk received after stream switch, clearing old buffer for channel {self.channel_id}")
+                try:
+                    if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                        # Clear all buffer chunks
+                        buffer_index_key = RedisKeys.buffer_index(self.channel_id)
+                        current_index = int(self.buffer.redis_client.get(buffer_index_key) or 0)
+                        
+                        # Delete old chunks (last 100 chunks to be safe)
+                        pipe = self.buffer.redis_client.pipeline()
+                        for idx in range(max(0, current_index - 100), current_index + 1):
+                            chunk_key = RedisKeys.buffer_chunk(self.channel_id, idx)
+                            pipe.delete(chunk_key)
+                        pipe.execute()
+                        
+                        # Reset buffer index
+                        self.buffer.redis_client.set(buffer_index_key, 0)
+                        self.buffer.index = 0
+                        
+                        logger.info(f"Buffer cleared for channel {self.channel_id} - new stream data is now flowing")
+                except Exception as e:
+                    logger.error(f"Error clearing buffer on first chunk: {e}")
+                finally:
+                    # Clear flag so we only do this once
+                    self.clear_buffer_on_next_data = False
 
             # Add directly to buffer without TS-specific processing
             success = self.buffer.add_chunk(chunk)
@@ -2325,6 +2381,70 @@ class StreamManager:
     def _reset_url_switching_state(self):
         """Safely reset the URL switching state if it gets stuck"""
         self.url_switching = False
+
+    def _should_clear_buffer_for_stream_switch(self, old_stream_id, new_stream_id):
+        """
+        Determine if buffer should be cleared based on codec/resolution changes.
+        
+        Returns True if:
+        - Codec changes (h264 → hevc) AND buffer_clear_on_codec_change enabled
+        - Resolution changes (720p → 1080p) AND buffer_clear_on_resolution_change enabled
+        - Stream info cannot be determined (safe default)
+        
+        Returns False if:
+        - Codec and resolution are the same
+        - Smart clearing is disabled for the detected change type
+        """
+        try:
+            # Get stream objects
+            old_stream = Stream.objects.filter(id=old_stream_id).first()
+            new_stream = Stream.objects.filter(id=new_stream_id).first()
+            
+            if not old_stream or not new_stream:
+                logger.warning(f"Could not load stream objects for comparison, defaulting to clear buffer")
+                return True  # Safe default
+            
+            # Get stream properties (codec, resolution)
+            old_props = old_stream.custom_properties or {}
+            new_props = new_stream.custom_properties or {}
+            
+            old_codec = old_props.get('codec', '').lower()
+            new_codec = new_props.get('codec', '').lower()
+            old_resolution = old_props.get('resolution', '')
+            new_resolution = new_props.get('resolution', '')
+            
+            # Check codec change
+            codec_changed = False
+            if old_codec and new_codec and old_codec != new_codec:
+                codec_changed = True
+                if ConfigHelper.buffer_clear_on_codec_change():
+                    logger.info(f"Codec changed: {old_codec} → {new_codec}, buffer will be cleared")
+                    return True
+                else:
+                    logger.info(f"Codec changed: {old_codec} → {new_codec}, but clearing disabled")
+            
+            # Check resolution change
+            resolution_changed = False
+            if old_resolution and new_resolution and old_resolution != new_resolution:
+                resolution_changed = True
+                if ConfigHelper.buffer_clear_on_resolution_change():
+                    logger.info(f"Resolution changed: {old_resolution} → {new_resolution}, buffer will be cleared")
+                    return True
+                else:
+                    logger.info(f"Resolution changed: {old_resolution} → {new_resolution}, but clearing disabled")
+            
+            # If we have codec/resolution info and nothing changed, keep buffer
+            if (old_codec or old_resolution) and not codec_changed and not resolution_changed:
+                logger.info(f"Codec/resolution unchanged ({old_codec or 'unknown'}/{old_resolution or 'unknown'}), keeping buffer")
+                return False
+            
+            # If we don't have codec/resolution info, default to clearing (safe)
+            logger.warning(f"Stream codec/resolution info not available, defaulting to clear buffer")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error comparing streams for buffer clearing decision: {e}")
+            return True  # Safe default
 
     def _get_account_proxy(self, channel):
         """

@@ -38,8 +38,8 @@ class ConfigHelper:
 
     @staticmethod
     def initial_behind_chunks():
-        """Get number of chunks to start behind"""
-        return ConfigHelper.get('INITIAL_BEHIND_CHUNKS', 4)
+        """Get number of chunks to start behind from MAC Portal settings or default"""
+        return Config.get_initial_behind_chunks()
 
     @staticmethod
     def keepalive_interval():
@@ -109,3 +109,63 @@ class ConfigHelper:
         Set this higher (e.g., 30s) for slow providers that may have intermittent delays.
         """
         return ConfigHelper.get('CHUNK_TIMEOUT', 5)  # Default 5 seconds
+
+    @staticmethod
+    def buffer_chunks():
+        """Get buffer size in chunks from MAC Portal settings or default"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.buffer_chunks
+        except Exception:
+            return 10  # Default to 10 chunks
+
+    @staticmethod
+    def health_check_timeout():
+        """Get health check timeout from MAC Portal settings or default"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.health_check_timeout
+        except Exception:
+            return 10  # Default to 10 seconds
+
+    @staticmethod
+    def health_check_timeout_switching():
+        """Get health check timeout during stream switch from MAC Portal settings or default"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.health_check_timeout_switching
+        except Exception:
+            return 15  # Default to 15 seconds
+
+    @staticmethod
+    def smart_buffer_clear_enabled():
+        """Check if smart buffer clearing is enabled"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.smart_buffer_clear_enabled
+        except Exception:
+            return True  # Default enabled
+
+    @staticmethod
+    def buffer_clear_on_codec_change():
+        """Check if buffer should be cleared on codec change"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.buffer_clear_on_codec_change
+        except Exception:
+            return True  # Default enabled
+
+    @staticmethod
+    def buffer_clear_on_resolution_change():
+        """Check if buffer should be cleared on resolution change"""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            return settings.buffer_clear_on_resolution_change
+        except Exception:
+            return True  # Default enabled
