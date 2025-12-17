@@ -1,190 +1,323 @@
+/**
+ * Stream Performance Settings Component
+ * 
+ * Configure buffer size, health check timeouts, and smart buffer clearing.
+ * Requirements: 101.1, 102.1
+ */
+
 import React, { useState, useEffect } from 'react';
-import { Card, Form, Slider, Switch, Divider, Alert, Space, Typography } from 'antd';
-import { InfoCircleOutlined } from '@ant-design/icons';
-import axios from 'axios';
+import {
+  Stack,
+  Switch,
+  Button,
+  Group,
+  Text,
+  Paper,
+  Title,
+  Slider,
+  Alert,
+  Divider,
+  Box,
+  Select,
+} from '@mantine/core';
+import { IconInfoCircle } from '@tabler/icons-react';
 
-const { Title, Text } = Typography;
-
-const StreamPerformanceSettings = () => {
-  const [form] = Form.useForm();
-  const [loading, setLoading] = useState(false);
-  const [smartBufferEnabled, setSmartBufferEnabled] = useState(true);
+const StreamPerformanceSettings = ({ settings, onSave }) => {
+  const [localSettings, setLocalSettings] = useState({
+    buffer_chunks: 10,
+    health_check_timeout: 10,
+    health_check_timeout_switching: 15,
+    smart_buffer_clear_enabled: true,
+    buffer_clear_on_codec_change: true,
+    buffer_clear_on_resolution_change: true,
+    failover_total_timeout: 60,
+    failover_timeout_action: 'stop',
+    max_failover_attempts: 10,
+  });
+  const [hasChanges, setHasChanges] = useState(false);
 
   useEffect(() => {
-    loadSettings();
-  }, []);
-
-  const loadSettings = async () => {
-    try {
-      setLoading(true);
-      const response = await axios.get('/api/mac-portal/settings/');
-      form.setFieldsValue({
-        buffer_chunks: response.data.buffer_chunks || 10,
-        health_check_timeout: response.data.health_check_timeout || 10,
-        health_check_timeout_switching: response.data.health_check_timeout_switching || 15,
-        smart_buffer_clear_enabled: response.data.smart_buffer_clear_enabled !== false,
-        buffer_clear_on_codec_change: response.data.buffer_clear_on_codec_change !== false,
-        buffer_clear_on_resolution_change: response.data.buffer_clear_on_resolution_change !== false,
+    if (settings) {
+      setLocalSettings({
+        buffer_chunks: settings.buffer_chunks ?? 10,
+        health_check_timeout: settings.health_check_timeout ?? 10,
+        health_check_timeout_switching: settings.health_check_timeout_switching ?? 15,
+        smart_buffer_clear_enabled: settings.smart_buffer_clear_enabled ?? true,
+        buffer_clear_on_codec_change: settings.buffer_clear_on_codec_change ?? true,
+        buffer_clear_on_resolution_change: settings.buffer_clear_on_resolution_change ?? true,
+        failover_total_timeout: settings.failover_total_timeout ?? 60,
+        failover_timeout_action: settings.failover_timeout_action ?? 'stop',
+        max_failover_attempts: settings.max_failover_attempts ?? 10,
       });
-      setSmartBufferEnabled(response.data.smart_buffer_clear_enabled !== false);
-    } catch (error) {
-      console.error('Error loading settings:', error);
-    } finally {
-      setLoading(false);
+      setHasChanges(false);
+    }
+  }, [settings]);
+
+  const handleChange = (field, value) => {
+    setLocalSettings(prev => ({
+      ...prev,
+      [field]: value,
+    }));
+    setHasChanges(true);
+  };
+
+  const handleSave = () => {
+    onSave(localSettings);
+    setHasChanges(false);
+  };
+
+  const handleReset = () => {
+    if (settings) {
+      setLocalSettings({
+        buffer_chunks: settings.buffer_chunks ?? 10,
+        health_check_timeout: settings.health_check_timeout ?? 10,
+        health_check_timeout_switching: settings.health_check_timeout_switching ?? 15,
+        smart_buffer_clear_enabled: settings.smart_buffer_clear_enabled ?? true,
+        buffer_clear_on_codec_change: settings.buffer_clear_on_codec_change ?? true,
+        buffer_clear_on_resolution_change: settings.buffer_clear_on_resolution_change ?? true,
+        failover_total_timeout: settings.failover_total_timeout ?? 60,
+        failover_timeout_action: settings.failover_timeout_action ?? 'stop',
+        max_failover_attempts: settings.max_failover_attempts ?? 10,
+      });
+      setHasChanges(false);
     }
   };
 
-  const saveSettings = async (values) => {
-    try {
-      setLoading(true);
-      await axios.patch('/api/mac-portal/settings/', values);
-      // Show success message
-    } catch (error) {
-      console.error('Error saving settings:', error);
-      // Show error message
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const bufferMarks = {
-    4: '4 (Fast)',
-    10: '10 (Balanced)',
-    20: '20 (Stable)',
-  };
-
-  const healthCheckMarks = {
-    5: '5s',
-    10: '10s',
-    30: '30s',
-  };
-
-  const healthCheckSwitchingMarks = {
-    10: '10s',
-    15: '15s',
-    60: '60s',
-  };
+  const FeatureSwitch = ({ field, label, description, disabled }) => (
+    <Group justify="space-between" wrap="nowrap">
+      <div>
+        <Text size="sm" fw={500}>{label}</Text>
+        <Text size="xs" c="dimmed">{description}</Text>
+      </div>
+      <Switch
+        checked={localSettings[field]}
+        onChange={(e) => handleChange(field, e.currentTarget.checked)}
+        disabled={disabled}
+      />
+    </Group>
+  );
 
   return (
-    <Card title="Stream Performance Settings" loading={loading}>
-      <Form
-        form={form}
-        layout="vertical"
-        onValuesChange={(changedValues, allValues) => {
-          if ('smart_buffer_clear_enabled' in changedValues) {
-            setSmartBufferEnabled(changedValues.smart_buffer_clear_enabled);
-          }
-          saveSettings(allValues);
-        }}
-      >
-        <Alert
-          message="Performance Tuning"
-          description="Adjust these settings based on your network conditions and hardware capabilities."
-          type="info"
-          icon={<InfoCircleOutlined />}
-          showIcon
-          style={{ marginBottom: 24 }}
-        />
+    <Stack gap="md">
+      <Alert icon={<IconInfoCircle size={16} />} color="blue">
+        Adjust these settings based on your network conditions and hardware capabilities.
+        Changes take effect immediately for new streams.
+      </Alert>
 
-        <Title level={5}>Buffer Settings</Title>
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Buffer Settings</Title>
+        <Stack gap="md">
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Buffer Size (Chunks)</Text>
+              <Text size="sm" c="dimmed">{localSettings.buffer_chunks} chunks (~{(localSettings.buffer_chunks * 0.25).toFixed(1)} MB)</Text>
+            </Group>
+            <Slider
+              value={localSettings.buffer_chunks}
+              onChange={(value) => handleChange('buffer_chunks', value)}
+              min={4}
+              max={20}
+              step={1}
+              marks={[
+                { value: 4, label: '4 (Fast)' },
+                { value: 10, label: '10' },
+                { value: 20, label: '20 (Stable)' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Higher = more buffering, better stability. Lower = less latency.
+            </Text>
+          </div>
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Health Check Settings</Title>
+        <Stack gap="md">
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Health Check Timeout</Text>
+              <Text size="sm" c="dimmed">{localSettings.health_check_timeout}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.health_check_timeout}
+              onChange={(value) => handleChange('health_check_timeout', value)}
+              min={5}
+              max={30}
+              step={1}
+              marks={[
+                { value: 5, label: '5s' },
+                { value: 10, label: '10s' },
+                { value: 30, label: '30s' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              How long without data before stream is marked unhealthy.
+            </Text>
+          </div>
+
+          <Divider />
+
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Health Check Timeout (During Switch)</Text>
+              <Text size="sm" c="dimmed">{localSettings.health_check_timeout_switching}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.health_check_timeout_switching}
+              onChange={(value) => handleChange('health_check_timeout_switching', value)}
+              min={10}
+              max={60}
+              step={1}
+              marks={[
+                { value: 10, label: '10s' },
+                { value: 15, label: '15s' },
+                { value: 60, label: '60s' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Timeout during stream switch - should be higher to allow FFmpeg startup.
+            </Text>
+          </div>
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Smart Buffer Clearing</Title>
         
-        <Form.Item
-          label="Buffer Size (Chunks)"
-          name="buffer_chunks"
-          help="Buffer size in chunks (4-20, ~250KB per chunk). Higher = more buffering, lower latency."
-        >
-          <Slider min={4} max={20} marks={bufferMarks} />
-        </Form.Item>
+        <Alert icon={<IconInfoCircle size={16} />} color="gray" mb="md">
+          When enabled, the buffer is only cleared when switching between streams with 
+          different codecs or resolutions. This provides seamless transitions when streams are compatible.
+        </Alert>
 
-        <Divider />
+        <Stack gap="sm">
+          <FeatureSwitch
+            field="smart_buffer_clear_enabled"
+            label="Enable Smart Buffer Clearing"
+            description="Only clear buffer when codec or resolution changes (recommended)"
+          />
 
-        <Title level={5}>Health Check Settings</Title>
+          {localSettings.smart_buffer_clear_enabled && (
+            <Box ml="md" mt="xs">
+              <Stack gap="sm">
+                <FeatureSwitch
+                  field="buffer_clear_on_codec_change"
+                  label="Clear on Codec Change"
+                  description="Clear buffer when codec changes (e.g., h264 → hevc)"
+                />
+                <FeatureSwitch
+                  field="buffer_clear_on_resolution_change"
+                  label="Clear on Resolution Change"
+                  description="Clear buffer when resolution changes (e.g., 720p → 1080p)"
+                />
+              </Stack>
+            </Box>
+          )}
+        </Stack>
+      </Paper>
 
-        <Form.Item
-          label="Health Check Timeout (seconds)"
-          name="health_check_timeout"
-          help="How long without data before stream is marked unhealthy (5-30s)"
-        >
-          <Slider min={5} max={30} marks={healthCheckMarks} />
-        </Form.Item>
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Failover Timeout</Title>
+        
+        <Alert icon={<IconInfoCircle size={16} />} color="gray" mb="md">
+          Configure what happens when no working stream can be found within the timeout period.
+        </Alert>
 
-        <Form.Item
-          label="Health Check Timeout During Switch (seconds)"
-          name="health_check_timeout_switching"
-          help="Timeout during stream switch - should be higher to allow FFmpeg startup (10-60s)"
-        >
-          <Slider min={10} max={60} marks={healthCheckSwitchingMarks} />
-        </Form.Item>
+        <Stack gap="md">
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Total Failover Timeout</Text>
+              <Text size="sm" c="dimmed">{localSettings.failover_total_timeout}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.failover_total_timeout}
+              onChange={(value) => handleChange('failover_total_timeout', value)}
+              min={10}
+              max={300}
+              step={5}
+              marks={[
+                { value: 30, label: '30s' },
+                { value: 60, label: '60s' },
+                { value: 120, label: '2m' },
+                { value: 300, label: '5m' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Maximum time to search for a working stream before giving up.
+            </Text>
+          </div>
 
-        <Divider />
+          <Divider />
 
-        <Title level={5}>Smart Buffer Clearing</Title>
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Max Failover Attempts</Text>
+              <Text size="sm" c="dimmed">{localSettings.max_failover_attempts} attempts</Text>
+            </Group>
+            <Slider
+              value={localSettings.max_failover_attempts}
+              onChange={(value) => handleChange('max_failover_attempts', value)}
+              min={1}
+              max={50}
+              step={1}
+              marks={[
+                { value: 5, label: '5' },
+                { value: 10, label: '10' },
+                { value: 25, label: '25' },
+                { value: 50, label: '50' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Maximum number of stream switch attempts (MAC → Profile → Stream).
+            </Text>
+          </div>
 
-        <Alert
-          message="What is Smart Buffer Clearing?"
-          description="When enabled, the buffer is only cleared when switching between streams with different codecs or resolutions. This provides seamless transitions when streams are compatible."
-          type="info"
-          icon={<InfoCircleOutlined />}
-          showIcon
-          style={{ marginBottom: 16 }}
-        />
+          <Divider />
 
-        <Form.Item
-          label="Enable Smart Buffer Clearing"
-          name="smart_buffer_clear_enabled"
-          valuePropName="checked"
-          help="Only clear buffer when codec or resolution changes (recommended)"
-        >
-          <Switch />
-        </Form.Item>
+          <div>
+            <Text size="sm" fw={500} mb="xs">Timeout Action</Text>
+            <Select
+              value={localSettings.failover_timeout_action}
+              onChange={(value) => handleChange('failover_timeout_action', value)}
+              data={[
+                { value: 'stop', label: 'Stop - Give up and show error' },
+                { value: 'loop', label: 'Loop - Keep trying indefinitely' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              What to do when the timeout is reached without finding a working stream.
+            </Text>
+          </div>
+        </Stack>
+      </Paper>
 
-        {smartBufferEnabled && (
-          <Space direction="vertical" style={{ width: '100%', marginLeft: 24 }}>
-            <Form.Item
-              label="Clear on Codec Change"
-              name="buffer_clear_on_codec_change"
-              valuePropName="checked"
-              help="Clear buffer when codec changes (e.g., h264 → hevc)"
-            >
-              <Switch />
-            </Form.Item>
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Recommended Settings</Title>
+        <Stack gap="xs">
+          <Group gap="xs">
+            <Text size="sm" fw={600}>Fast Network (Fiber, LAN):</Text>
+            <Text size="sm" c="dimmed">Buffer: 6-8, Health: 7s, Switch: 12s</Text>
+          </Group>
+          <Group gap="xs">
+            <Text size="sm" fw={600}>Standard Network (DSL, Cable):</Text>
+            <Text size="sm" c="dimmed">Buffer: 10, Health: 10s, Switch: 15s (Default)</Text>
+          </Group>
+          <Group gap="xs">
+            <Text size="sm" fw={600}>Slow Network (Mobile, Satellite):</Text>
+            <Text size="sm" c="dimmed">Buffer: 15-20, Health: 20-30s, Switch: 30-60s</Text>
+          </Group>
+        </Stack>
+      </Paper>
 
-            <Form.Item
-              label="Clear on Resolution Change"
-              name="buffer_clear_on_resolution_change"
-              valuePropName="checked"
-              help="Clear buffer when resolution changes (e.g., 720p → 1080p)"
-            >
-              <Switch />
-            </Form.Item>
-          </Space>
-        )}
-
-        <Divider />
-
-        <Alert
-          message="Recommended Settings"
-          description={
-            <div>
-              <Text strong>Fast Network (Fiber, LAN):</Text>
-              <br />
-              Buffer: 6-8, Health Check: 7s, Switching: 12s
-              <br />
-              <br />
-              <Text strong>Standard Network (DSL, Cable):</Text>
-              <br />
-              Buffer: 10, Health Check: 10s, Switching: 15s (Default)
-              <br />
-              <br />
-              <Text strong>Slow Network (Mobile, Satellite):</Text>
-              <br />
-              Buffer: 15-20, Health Check: 20-30s, Switching: 30-60s
-            </div>
-          }
-          type="success"
-        />
-      </Form>
-    </Card>
+      <Group justify="flex-end">
+        <Button variant="outline" onClick={handleReset} disabled={!hasChanges}>
+          Reset
+        </Button>
+        <Button onClick={handleSave} disabled={!hasChanges}>
+          Save Changes
+        </Button>
+      </Group>
+    </Stack>
   );
 };
 

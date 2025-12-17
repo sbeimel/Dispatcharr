@@ -183,6 +183,27 @@ class MACPortalGlobalSettings(models.Model):
         help_text="Clear buffer when resolution changes (e.g., 720p → 1080p)"
     )
     
+    # Failover Timeout Settings (Requirement 103.1)
+    failover_total_timeout = models.IntegerField(
+        default=60,
+        validators=[MinValueValidator(10), MaxValueValidator(300)],
+        help_text="Maximum time in seconds to find a working stream before giving up (10-300)"
+    )
+    failover_timeout_action = models.CharField(
+        max_length=20,
+        choices=[
+            ('stop', 'Stop - Give up and show error'),
+            ('loop', 'Loop - Keep trying indefinitely'),
+        ],
+        default='stop',
+        help_text="What to do when failover timeout is reached"
+    )
+    max_failover_attempts = models.IntegerField(
+        default=10,
+        validators=[MinValueValidator(1), MaxValueValidator(50)],
+        help_text="Maximum number of stream switch attempts (1-50)"
+    )
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

@@ -20,6 +20,7 @@ import API from '../../api';
 import TimeoutRetryConfig from './TimeoutRetryConfig';
 import CooldownConfig from './CooldownConfig';
 import FeatureToggles from './FeatureToggles';
+import StreamPerformanceSettings from './StreamPerformanceSettings';
 
 const MACPortalSettings = () => {
   const [loading, setLoading] = useState(true);
@@ -106,6 +107,7 @@ const MACPortalSettings = () => {
         <Tabs value={activeTab} onChange={setActiveTab}>
           <Tabs.List>
             <Tabs.Tab value="features">Features & Engine</Tabs.Tab>
+            <Tabs.Tab value="performance">Stream Performance</Tabs.Tab>
             <Tabs.Tab value="timeouts">Timeouts & Retries</Tabs.Tab>
             <Tabs.Tab value="cooldowns">Cooldowns</Tabs.Tab>
           </Tabs.List>
@@ -126,6 +128,13 @@ const MACPortalSettings = () => {
 
           <Tabs.Panel value="features" pt="md">
             <FeatureToggles 
+              settings={settings} 
+              onSave={handleSaveSettings} 
+            />
+          </Tabs.Panel>
+
+          <Tabs.Panel value="performance" pt="md">
+            <StreamPerformanceSettings 
               settings={settings} 
               onSave={handleSaveSettings} 
             />
