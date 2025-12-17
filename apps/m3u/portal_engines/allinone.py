@@ -442,7 +442,15 @@ class AllinOneStrategy(BasePortalStrategy):
                 
                 if response.status_code == 200:
                     data = response.json()
-                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    js = data.get("js", {})
+                    
+                    # Handle empty list response (channel not found/disabled)
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"AllinOne: Portal returned empty list for cmd={cmd}")
+                        continue
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and link.startswith("http"):
                         logger.info(f"AllinOne: create_link successful via GET")
                         return link
@@ -463,7 +471,15 @@ class AllinOneStrategy(BasePortalStrategy):
                 
                 if response.status_code == 200:
                     data = response.json()
-                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    js = data.get("js", {})
+                    
+                    # Handle empty list response (channel not found/disabled)
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"AllinOne: Portal returned empty list for cmd={cmd}")
+                        continue
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and link.startswith("http"):
                         logger.info(f"AllinOne: create_link successful via POST")
                         return link

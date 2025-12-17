@@ -397,6 +397,7 @@ def stream_ts(request, channel_id):
                                 )
                                 # Reset wait timer to allow the transition to complete
                                 wait_start = time.time()
+                                gevent.sleep(0.1)  # Avoid busy-wait loop
                                 continue
 
                             # Check if we're switching URLs
@@ -409,6 +410,7 @@ def stream_ts(request, channel_id):
                                 )
                                 # Reset wait timer to give the switch a chance
                                 wait_start = time.time()
+                                gevent.sleep(0.1)  # Avoid busy-wait loop
                                 continue
 
                             # If we reach here, we've exhausted retries and the channel isn't in a valid transitional state

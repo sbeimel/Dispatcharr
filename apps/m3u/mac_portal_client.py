@@ -864,7 +864,15 @@ class MacPortalClient:
                         raise ValueError("Non-JSON response")
                     
                     data = response.json()
-                    link = data["js"]["cmd"].split()[-1]
+                    js = data.get("js", {})
+                    
+                    # Handle case where portal returns empty list instead of dict
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"Portal returned empty list for cmd={cmd} (channel may not exist)")
+                        raise ValueError("Portal returned list instead of dict")
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
                 except ValueError as e:
@@ -901,7 +909,17 @@ class MacPortalClient:
                         raise ValueError("Non-JSON response")
                     
                     data = response.json()
-                    link = data["js"]["cmd"].split()[-1]
+                    js = data.get("js", {})
+                    
+                    # Handle empty list response (channel not found/disabled)
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"Portal returned empty list for cmd={cmd}")
+                        else:
+                            logger.debug(f"Portal returned non-empty list instead of dict: {js}")
+                        raise ValueError("Portal returned list instead of dict")
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         return link
                 except ValueError as e:

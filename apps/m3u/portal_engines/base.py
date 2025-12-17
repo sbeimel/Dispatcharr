@@ -339,7 +339,14 @@ class BasePortalStrategy(ABC):
             data = self._make_request(params, self.identity.token, method)
             if data:
                 try:
-                    link = data.get("js", {}).get("cmd", "").split()[-1]
+                    js = data.get("js", {})
+                    # Handle case where portal returns empty list instead of dict
+                    if isinstance(js, list):
+                        if not js:
+                            logger.debug(f"{self.NAME}: Portal returned empty list for cmd={cmd} (channel may not exist)")
+                        continue
+                    
+                    link = js.get("cmd", "").split()[-1]
                     if link and (link.startswith("http://") or link.startswith("https://")):
                         logger.info(f"{self.NAME}: create_link successful via {method}")
                         return link
