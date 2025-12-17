@@ -1384,6 +1384,10 @@ class StreamManager:
         self.url_switch_start_time = time.time()
 
         try:
+            # Clear MAC busy status before switching (normal channel change, not failover)
+            # This ensures the MAC is available for other channels immediately
+            self._clear_mac_busy_status()
+            
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:
                 logger.debug(f"Closing transcode process before URL change for channel {self.channel_id}")
@@ -1408,13 +1412,9 @@ class StreamManager:
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
 
-            # Also reset buffer position to prevent stale data after URL change
-            if hasattr(self.buffer, 'reset_buffer_position'):
-                try:
-                    self.buffer.reset_buffer_position()
-                    logger.debug("Reset buffer position for clean URL switch")
-                except Exception as e:
-                    logger.warning(f"Failed to reset buffer position: {e}")
+            # DON'T clear buffer - let old chunks play out for seamless transition
+            # This is how 0.12.0-04 does it and it works well
+            # The buffer will naturally fill with new stream data
 
             # Log stream switch event
             try:
@@ -2063,8 +2063,9 @@ class StreamManager:
             
             from .redis_keys import RedisKeys
             
-            # Set BUSY flag with cooldown duration
-            # Die MAC ist nicht kaputt, sie braucht nur eine Pause
+            # Set BUSY flag with cooldown duration from settings
+            # Die MAC hat ein Problem und braucht eine Pause
+            # Cooldown ist konfigurierbar in MAC Portal Settings
             cooldown_duration = 300  # Default 5 minutes
             try:
                 from apps.m3u.mac_portal_models import MACPortalGlobalSettings
@@ -2076,7 +2077,7 @@ class StreamManager:
             busy_key = RedisKeys.mac_busy(mac_entry.id)
             redis_client.setex(busy_key, cooldown_duration, "1")
             
-            logger.info(f"MAC {mac_address} marked as BUSY for {cooldown_duration}s (will be available again after cooldown)")
+            logger.info(f"MAC {mac_address} marked as BUSY for {cooldown_duration}s (cooldown after failover)")
             
         except Exception as e:
             logger.debug(f"Failed to mark current MAC as busy: {e}")

@@ -28,7 +28,6 @@ const FeatureToggles = ({ settings, onSave }) => {
     short_epg_enabled: true,
     picon_download_enabled: true,
     tmdb_integration_enabled: false,
-    stream_validation_enabled: true,
     multi_mac_rotation_enabled: true,
     token_auto_refresh_enabled: true,
     debug_logging_enabled: false,
@@ -47,7 +46,6 @@ const FeatureToggles = ({ settings, onSave }) => {
         short_epg_enabled: settings.short_epg_enabled ?? true,
         picon_download_enabled: settings.picon_download_enabled ?? true,
         tmdb_integration_enabled: settings.tmdb_integration_enabled ?? false,
-        stream_validation_enabled: settings.stream_validation_enabled ?? true,
         multi_mac_rotation_enabled: settings.multi_mac_rotation_enabled ?? true,
         token_auto_refresh_enabled: settings.token_auto_refresh_enabled ?? true,
         debug_logging_enabled: settings.debug_logging_enabled ?? false,
@@ -81,7 +79,6 @@ const FeatureToggles = ({ settings, onSave }) => {
         short_epg_enabled: settings.short_epg_enabled ?? true,
         picon_download_enabled: settings.picon_download_enabled ?? true,
         tmdb_integration_enabled: settings.tmdb_integration_enabled ?? false,
-        stream_validation_enabled: settings.stream_validation_enabled ?? true,
         multi_mac_rotation_enabled: settings.multi_mac_rotation_enabled ?? true,
         token_auto_refresh_enabled: settings.token_auto_refresh_enabled ?? true,
         debug_logging_enabled: settings.debug_logging_enabled ?? false,
@@ -122,11 +119,6 @@ const FeatureToggles = ({ settings, onSave }) => {
             field="cloudscraper_enabled"
             label="Cloudscraper"
             description="Automatically bypass Cloudflare protection"
-          />
-          <FeatureSwitch
-            field="stream_validation_enabled"
-            label="Stream Validation"
-            description="Validate stream URLs before playback"
           />
           <FeatureSwitch
             field="multi_mac_rotation_enabled"

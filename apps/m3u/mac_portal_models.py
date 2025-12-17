@@ -215,12 +215,6 @@ class FailoverSettings(models.Model):
         validators=[MinValueValidator(1), MaxValueValidator(10)],
         help_text="Maximum MAC failover attempts (1-10)"
     )
-    mac_selection_strategy = models.CharField(
-        max_length=20,
-        choices=MACSelectionStrategy.choices,
-        default=MACSelectionStrategy.HEALTH_BASED,
-        help_text="Strategy for selecting next MAC"
-    )
     mac_cooldown_failure = models.IntegerField(
         default=5,
         help_text="MAC cooldown after failure in minutes"
@@ -228,10 +222,6 @@ class FailoverSettings(models.Model):
     mac_cooldown_block = models.IntegerField(
         default=30,
         help_text="MAC cooldown after block in minutes"
-    )
-    mac_auto_recovery_interval = models.IntegerField(
-        default=15,
-        help_text="Auto-recovery check interval in minutes"
     )
 
     # Portal/Endpoint Failover Config (Requirement 57.1)

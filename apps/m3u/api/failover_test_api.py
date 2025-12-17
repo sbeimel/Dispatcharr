@@ -404,7 +404,6 @@ class SettingsViewSet(viewsets.ViewSet):
             'endpoint_failover_enabled': settings.endpoint_failover_enabled,
             'useragent_failover_enabled': settings.useragent_failover_enabled,
             'mac_max_attempts': settings.mac_max_attempts,
-            'stream_max_retries': settings.stream_max_retries,
             'failover_priority': settings.failover_priority,
         })
 

@@ -49,7 +49,6 @@ class MACPortalSettingsView(APIView):
             'short_epg_enabled': settings.short_epg_enabled,
             'picon_download_enabled': settings.picon_download_enabled,
             'tmdb_integration_enabled': settings.tmdb_integration_enabled,
-            'stream_validation_enabled': settings.stream_validation_enabled,
             'multi_mac_rotation_enabled': settings.multi_mac_rotation_enabled,
             'token_auto_refresh_enabled': settings.token_auto_refresh_enabled,
             'debug_logging_enabled': settings.debug_logging_enabled,
@@ -80,7 +79,7 @@ class MACPortalSettingsView(APIView):
         # Boolean fields
         for field in ['exponential_backoff', 'cloudscraper_enabled', 'vod_support_enabled',
                       'series_support_enabled', 'epg_download_enabled', 'short_epg_enabled',
-                      'picon_download_enabled', 'tmdb_integration_enabled', 'stream_validation_enabled',
+                      'picon_download_enabled', 'tmdb_integration_enabled',
                       'multi_mac_rotation_enabled', 'token_auto_refresh_enabled', 'debug_logging_enabled',
                       'ob2_2025_engine_enabled']:
             if field in data:
@@ -121,18 +120,11 @@ class FailoverSettingsView(APIView):
             'endpoint_failover_enabled': settings.endpoint_failover_enabled,
             'useragent_failover_enabled': settings.useragent_failover_enabled,
             'mac_max_attempts': settings.mac_max_attempts,
-            'mac_selection_strategy': settings.mac_selection_strategy,
             'mac_cooldown_failure': settings.mac_cooldown_failure,
             'mac_cooldown_block': settings.mac_cooldown_block,
-            'mac_auto_recovery_interval': settings.mac_auto_recovery_interval,
             'endpoint_priority': settings.endpoint_priority,
             'endpoint_timeout': settings.endpoint_timeout,
             'endpoint_cache_enabled': settings.endpoint_cache_enabled,
-            'stream_validation_enabled': settings.stream_validation_enabled,
-            'stream_validation_timeout': settings.stream_validation_timeout,
-            'stream_max_retries': settings.stream_max_retries,
-            'stream_retry_different_mac': settings.stream_retry_different_mac,
-            'stream_retry_different_cmd': settings.stream_retry_different_cmd,
             'useragent_rotation_order': settings.useragent_rotation_order,
             'useragent_rotate_on_auth_failure': settings.useragent_rotate_on_auth_failure,
             'useragent_rotate_on_403': settings.useragent_rotate_on_403,
@@ -155,20 +147,13 @@ class FailoverSettingsView(APIView):
         
         # Integer fields
         for field in ['mac_max_attempts', 'mac_cooldown_failure', 'mac_cooldown_block',
-                      'mac_auto_recovery_interval', 'endpoint_timeout', 'stream_validation_timeout',
-                      'stream_max_retries']:
+                      'endpoint_timeout']:
             if field in data:
                 setattr(settings, field, int(data[field]))
-        
-        # String fields
-        for field in ['mac_selection_strategy']:
-            if field in data:
-                setattr(settings, field, data[field])
         
         # Boolean fields
         for field in ['mac_failover_enabled', 'portal_failover_enabled', 'stream_failover_enabled',
                       'endpoint_failover_enabled', 'useragent_failover_enabled', 'endpoint_cache_enabled',
-                      'stream_validation_enabled', 'stream_retry_different_mac', 'stream_retry_different_cmd',
                       'useragent_rotate_on_auth_failure', 'useragent_rotate_on_403',
                       'useragent_rotate_on_cloudflare', 'useragent_remember_successful']:
             if field in data:

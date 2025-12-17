@@ -731,6 +731,18 @@ def _resolve_mac_stream_with_failover(
     if not candidates:
         logger.error(f"No candidate MACs available for account {m3u_account.id}")
         return None, None, "No candidate MACs available"
+    
+    # Limit to maximum attempts setting
+    try:
+        from apps.m3u.mac_portal_models import FailoverSettings
+        settings = FailoverSettings.get_settings()
+        max_attempts = settings.mac_max_attempts if settings.mac_max_attempts > 0 else len(candidates)
+        if len(candidates) > max_attempts:
+            logger.info(f"Limiting MAC attempts from {len(candidates)} to {max_attempts} for account {m3u_account.id}")
+            candidates = candidates[:max_attempts]
+    except Exception as e:
+        logger.debug(f"Could not check MAC max attempts setting: {e}")
+        # Continue with all candidates if settings can't be loaded
 
     # If Redis is available, prefer MACs that are not currently busy.
     # Busy MACs should only be used if the stream is already running; at start

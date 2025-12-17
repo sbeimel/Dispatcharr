@@ -168,7 +168,6 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
             'short_epg_enabled': settings.short_epg_enabled,
             'picon_download_enabled': settings.picon_download_enabled,
             'tmdb_integration_enabled': settings.tmdb_integration_enabled,
-            'stream_validation_enabled': settings.stream_validation_enabled,
             'multi_mac_rotation_enabled': settings.multi_mac_rotation_enabled,
             'token_auto_refresh_enabled': settings.token_auto_refresh_enabled,
             'debug_logging_enabled': settings.debug_logging_enabled,

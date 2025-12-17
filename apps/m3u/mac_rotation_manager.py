@@ -26,11 +26,6 @@ class MACRotationManager:
     Requirements: 23.1, 23.2, 23.3
     """
     
-    class SelectionStrategy:
-        ROUND_ROBIN = "round_robin"
-        HEALTH_BASED = "health_based"
-        RANDOM = "random"
-    
     def __init__(self, account_id: int):
         """
         Initialize MACRotationManager for a specific account.
@@ -41,7 +36,6 @@ class MACRotationManager:
         self.account_id = account_id
         self._current_index = 0
         self._lock = threading.Lock()
-        self._strategy = self.SelectionStrategy.HEALTH_BASED
         
         # Load settings
         self._load_settings()
@@ -56,13 +50,11 @@ class MACRotationManager:
             
             self._cooldown_failure_minutes = global_settings.mac_cooldown_failure
             self._cooldown_block_minutes = global_settings.mac_cooldown_block
-            self._strategy = failover_settings.mac_selection_strategy
             self._max_attempts = failover_settings.mac_max_attempts
         except Exception as e:
             logger.warning(f"Failed to load settings, using defaults: {e}")
             self._cooldown_failure_minutes = 5
             self._cooldown_block_minutes = 30
-            self._strategy = self.SelectionStrategy.HEALTH_BASED
             self._max_attempts = 3
     
     def _get_all_macs(self) -> List:
@@ -114,38 +106,23 @@ class MACRotationManager:
                 logger.warning(f"No available MACs for account {self.account_id} (all in cooldown or bad status)")
                 return None
             
-            # Select based on strategy
-            if self._strategy == self.SelectionStrategy.ROUND_ROBIN:
-                return self._select_round_robin(available)
-            elif self._strategy == self.SelectionStrategy.RANDOM:
-                return self._select_random(available)
-            else:  # HEALTH_BASED (default)
-                return self._select_health_based(available)
+            # Always use priority-order selection (health-based)
+            return self._select_by_priority(available)
     
-    def _select_round_robin(self, available: List) -> object:
-        """Select MAC using round-robin strategy."""
-        self._current_index = self._current_index % len(available)
-        mac = available[self._current_index]
-        self._current_index += 1
-        return mac
-    
-    def _select_random(self, available: List) -> object:
-        """Select MAC randomly."""
-        return random.choice(available)
-    
-    def _select_health_based(self, available: List) -> object:
+    def _select_by_priority(self, available: List) -> object:
         """
-        Select MAC with highest health score.
+        Select MAC by priority order with health score consideration.
+        MACs are already sorted by priority in _get_all_macs().
         
         Requirements: 23.1
         """
         # Get health scores for all available MACs
         mac_scores = [(mac, self._get_health_score(mac)) for mac in available]
         
-        # Sort by health score (descending)
-        mac_scores.sort(key=lambda x: x[1], reverse=True)
+        # Sort by health score (descending), then by priority (ascending)
+        mac_scores.sort(key=lambda x: (-x[1], x[0].priority))
         
-        # Return MAC with highest score
+        # Return MAC with highest score and best priority
         return mac_scores[0][0]
 
     def report_failure(self, mac, error_type: str = "failure", error_message: str = ""):

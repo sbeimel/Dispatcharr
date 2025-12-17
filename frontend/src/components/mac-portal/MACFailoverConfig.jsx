@@ -24,10 +24,8 @@ const MACFailoverConfig = ({ settings, onSave }) => {
   const [localSettings, setLocalSettings] = useState({
     mac_failover_enabled: true,
     mac_max_attempts: 3,
-    mac_selection_strategy: 'health_based',
     mac_cooldown_failure: 5,
     mac_cooldown_block: 30,
-    mac_auto_recovery_interval: 15,
   });
 
   useEffect(() => {
@@ -35,10 +33,8 @@ const MACFailoverConfig = ({ settings, onSave }) => {
       setLocalSettings({
         mac_failover_enabled: settings.mac_failover_enabled ?? true,
         mac_max_attempts: settings.mac_max_attempts ?? 3,
-        mac_selection_strategy: settings.mac_selection_strategy ?? 'health_based',
         mac_cooldown_failure: settings.mac_cooldown_failure ?? 5,
         mac_cooldown_block: settings.mac_cooldown_block ?? 30,
-        mac_auto_recovery_interval: settings.mac_auto_recovery_interval ?? 15,
       });
     }
   }, [settings]);
@@ -50,12 +46,6 @@ const MACFailoverConfig = ({ settings, onSave }) => {
   const handleSave = () => {
     onSave({ ...settings, ...localSettings });
   };
-
-  const selectionStrategies = [
-    { value: 'round_robin', label: 'Round Robin - Rotate through MACs sequentially' },
-    { value: 'health_based', label: 'Health Based - Prefer MACs with higher success rate' },
-    { value: 'random', label: 'Random - Select MACs randomly' },
-  ];
 
   return (
     <Stack gap="md">
@@ -91,15 +81,6 @@ const MACFailoverConfig = ({ settings, onSave }) => {
             disabled={!localSettings.mac_failover_enabled}
           />
 
-          <Select
-            label="Selection Strategy"
-            description="How to choose the next MAC address"
-            data={selectionStrategies}
-            value={localSettings.mac_selection_strategy}
-            onChange={(val) => handleChange('mac_selection_strategy', val)}
-            disabled={!localSettings.mac_failover_enabled}
-          />
-
           <Divider my="sm" label="Cooldown Settings" labelPosition="center" />
 
           <NumberInput
@@ -119,16 +100,6 @@ const MACFailoverConfig = ({ settings, onSave }) => {
             onChange={(val) => handleChange('mac_cooldown_block', val)}
             min={5}
             max={120}
-            disabled={!localSettings.mac_failover_enabled}
-          />
-
-          <NumberInput
-            label="Auto Recovery Interval (minutes)"
-            description="Interval to check if cooled-down MACs are available again"
-            value={localSettings.mac_auto_recovery_interval}
-            onChange={(val) => handleChange('mac_auto_recovery_interval', val)}
-            min={5}
-            max={60}
             disabled={!localSettings.mac_failover_enabled}
           />
         </Stack>
