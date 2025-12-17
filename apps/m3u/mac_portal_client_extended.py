@@ -489,7 +489,8 @@ class ExtendedMacPortalClient(MacPortalClient):
         self, 
         url: str, 
         timeout: int = 5,
-        check_content_type: bool = True
+        check_content_type: bool = True,
+        proxy: str = None
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Validate stream URL with HEAD request before playback.
@@ -519,12 +520,21 @@ class ExtendedMacPortalClient(MacPortalClient):
         try:
             session = _get_session(use_cloudscraper=self.use_cloudscraper)
             
+            # Configure proxy if provided
+            proxies = None
+            if proxy:
+                proxies = {
+                    'http': proxy,
+                    'https': proxy
+                }
+            
             # Try HEAD request first
             response = session.head(
                 url,
                 timeout=timeout,
                 allow_redirects=True,
                 headers={"User-Agent": self.user_agent},
+                proxies=proxies
             )
             
             details["status_code"] = response.status_code
@@ -663,10 +673,11 @@ class ExtendedMacPortalClient(MacPortalClient):
         if not validate:
             return stream_url, True, {}
         
-        # Validate the stream
+        # Validate the stream (use the same proxy as the client)
         is_valid, message, details = self.validate_stream_url(
             stream_url, 
-            timeout=validation_timeout
+            timeout=validation_timeout,
+            proxy=self.proxy
         )
         
         if not is_valid:

@@ -253,10 +253,14 @@ def stream_ts(request, channel_id):
                     get_stream_info_for_switch,
                 )
 
+                # Get proxy for this channel
+                from .url_utils import get_channel_proxy
+                channel_proxy = get_channel_proxy(channel)
+                
                 # Try initial URL
                 logger.info(f"[{client_id}] Validating redirect URL: {stream_url}")
                 is_valid, final_url, status_code, message = validate_stream_url(
-                    stream_url, user_agent=stream_user_agent, timeout=(5, 5)
+                    stream_url, user_agent=stream_user_agent, timeout=(5, 5), proxy=channel_proxy
                 )
 
                 # If first URL doesn't validate, try alternates
@@ -296,6 +300,7 @@ def stream_ts(request, channel_id):
                             alt_info["url"],
                             user_agent=alt_info["user_agent"],
                             timeout=(5, 5),
+                            proxy=channel_proxy
                         )
 
                         if is_valid:
