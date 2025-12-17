@@ -14,6 +14,7 @@ from typing import Dict, List
 
 from celery import shared_task
 from django.utils import timezone
+from django.db import IntegrityError
 
 from .models import M3UAccount
 from apps.channels.models import ChannelGroup, ChannelGroupM3UAccount
@@ -341,9 +342,17 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
         name = item.get('name') or item.get('title') or f"Item {item_id}"
         cmd = item.get('cmd', '')
         
+        # Ensure item_id is not empty - use a fallback based on name and cmd
         if not item_id or not cmd:
             logger.warning(f"VOD item missing id or cmd: {item}")
             return 'skipped'
+        
+        # If item_id is still empty, generate one from name and cmd to avoid unique constraint violations
+        if not item_id.strip():
+            import hashlib
+            fallback_data = f"{name}_{cmd}_{account.id}"
+            item_id = hashlib.md5(fallback_data.encode()).hexdigest()[:16]
+            logger.info(f"Generated fallback item_id: {item_id} for item: {name}")
         
         # Sanitize name
         name = sanitize_name(name)
@@ -429,12 +438,36 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
             )
             
             # Create relation to M3U account and category
-            M3USeriesRelation.objects.get_or_create(
-                series=series,
-                m3u_account=account,
-                category=category,
-                defaults={'custom_properties': {}}
-            )
+            try:
+                series_relation, series_relation_created = M3USeriesRelation.objects.get_or_create(
+                    series=series,
+                    m3u_account=account,
+                    external_series_id=item_id,  # FIX: external_series_id hinzufügen
+                    defaults={
+                        'category': category,
+                        'custom_properties': {}
+                    }
+                )
+                if not series_relation_created:
+                    # Update existing relation
+                    series_relation.category = category
+                    series_relation.last_seen = timezone.now()
+                    series_relation.save()
+            except IntegrityError as e:
+                # Handle duplicate key error by trying to find existing relation
+                logger.warning(f"Duplicate key error for series item {item_id}, trying to update existing relation: {e}")
+                try:
+                    series_relation = M3USeriesRelation.objects.get(
+                        m3u_account=account,
+                        external_series_id=item_id
+                    )
+                    series_relation.series = series
+                    series_relation.category = category
+                    series_relation.last_seen = timezone.now()
+                    series_relation.save()
+                except M3USeriesRelation.DoesNotExist:
+                    logger.error(f"Could not find or create series relation for item {item_id}")
+                    return 'error'
             
             # Also create a Stream for playback
             Stream.objects.update_or_create(
@@ -464,12 +497,36 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
             )
             
             # Create relation to M3U account and category
-            M3UMovieRelation.objects.get_or_create(
-                movie=movie,
-                m3u_account=account,
-                category=category,
-                defaults={'custom_properties': {}}
-            )
+            try:
+                relation, relation_created = M3UMovieRelation.objects.get_or_create(
+                    movie=movie,
+                    m3u_account=account,
+                    stream_id=item_id,  # FIX: stream_id hinzufügen
+                    defaults={
+                        'category': category,
+                        'custom_properties': {}
+                    }
+                )
+                if not relation_created:
+                    # Update existing relation
+                    relation.category = category
+                    relation.last_seen = timezone.now()
+                    relation.save()
+            except IntegrityError as e:
+                # Handle duplicate key error by trying to find existing relation
+                logger.warning(f"Duplicate key error for item {item_id}, trying to update existing relation: {e}")
+                try:
+                    relation = M3UMovieRelation.objects.get(
+                        m3u_account=account,
+                        stream_id=item_id
+                    )
+                    relation.movie = movie
+                    relation.category = category
+                    relation.last_seen = timezone.now()
+                    relation.save()
+                except M3UMovieRelation.DoesNotExist:
+                    logger.error(f"Could not find or create relation for item {item_id}")
+                    return 'error'
             
             # Also create a Stream for playback
             Stream.objects.update_or_create(
