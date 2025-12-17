@@ -401,13 +401,7 @@ def _save_vod_item(account, group: ChannelGroup, item: Dict, vod_type: str) -> s
         portal_category_id = group.custom_properties.get('portal_category_id')
         category, _ = VODCategory.objects.get_or_create(
             name=group.name,
-            defaults={
-                'category_type': 'movie' if vod_type == 'vod_movie' else 'series',
-                'custom_properties': {
-                    'portal_category_id': portal_category_id,
-                    'is_mac_category': True,
-                }
-            }
+            category_type='movie' if vod_type == 'vod_movie' else 'series',
         )
         
         # Custom properties
