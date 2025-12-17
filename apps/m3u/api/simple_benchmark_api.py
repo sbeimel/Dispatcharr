@@ -99,11 +99,8 @@ def run_benchmark(request, account_id):
             'error': 'No MAC addresses available for this account'
         }, status=400)
     
-    # Get proxy from custom_properties
-    props = account.custom_properties or {}
-    proxy = props.get('proxy')
-    if isinstance(proxy, str):
-        proxy = proxy.strip() or None
+    # Get proxy from account (uses get_proxy() method which handles account type)
+    proxy = account.get_proxy()
     
     logger.info(f"Starting benchmark for account {account_id} ({account.name})")
     logger.info(f"Portal URL: {account.server_url}")

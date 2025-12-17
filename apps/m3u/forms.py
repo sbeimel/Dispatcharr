@@ -17,7 +17,7 @@ class M3UAccountForm(forms.ModelForm):
             'name',
             'account_type',
             'server_url',
-            'uploaded_file',
+            'file_path',
             'username',
             'password',
             'server_group',
@@ -54,20 +54,20 @@ class M3UAccountForm(forms.ModelForm):
             instance.save()
         return instance
 
-    def clean_uploaded_file(self):
-        uploaded_file = self.cleaned_data.get('uploaded_file')
-        if uploaded_file:
-            if not uploaded_file.name.endswith('.m3u'):
-                raise forms.ValidationError("The uploaded file must be an M3U file.")
-        return uploaded_file
+    def clean_file_path(self):
+        file_path = self.cleaned_data.get('file_path')
+        if file_path:
+            if not file_path.endswith('.m3u'):
+                raise forms.ValidationError("The file must be an M3U file.")
+        return file_path
 
     def clean(self):
         cleaned_data = super().clean()
         url = cleaned_data.get('server_url')
-        file = cleaned_data.get('uploaded_file')
-        # Ensure either `server_url` or `uploaded_file` is provided
+        file = cleaned_data.get('file_path')
+        # Ensure either `server_url` or `file_path` is provided
         if not url and not file:
-            raise forms.ValidationError("Either an M3U URL or a file upload is required.")
+            raise forms.ValidationError("Either an M3U URL or a file path is required.")
         return cleaned_data
 
 

@@ -486,7 +486,7 @@ class VODImportManager:
         self._client = VODSeriesClient(
             base_url=account.server_url,
             mac=mac,
-            proxy=account.proxy_url,
+            proxy=account.get_proxy(),
         )
         
         return self._client
