@@ -7,28 +7,28 @@ def add_proxy_support_profiles(apps, schema_editor):
     
     # Update existing ffmpeg profile to support proxy
     try:
-        ffmpeg_profile = StreamProfile.objects.get(profile_name="ffmpeg")
+        ffmpeg_profile = StreamProfile.objects.get(name="ffmpeg")
         # Update parameters to include proxy support
         ffmpeg_profile.parameters = "-user_agent {userAgent} {proxy} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1"
         ffmpeg_profile.save()
     except StreamProfile.DoesNotExist:
         # Create new ffmpeg profile with proxy support if it doesn't exist
         StreamProfile.objects.create(
-            profile_name="ffmpeg",
+            name="ffmpeg",
             command="ffmpeg",
             parameters="-user_agent {userAgent} {proxy} -i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1",
             is_active=True,
-            user_agent="1",
+            user_agent_id=1,
         )
     
     # Create a new profile specifically for proxy-enabled streaming
     StreamProfile.objects.get_or_create(
-        profile_name="ffmpeg-proxy",
+        name="ffmpeg-proxy",
         defaults={
             "command": "ffmpeg",
             "parameters": "-user_agent {userAgent} {proxy} -i {streamUrl} -c copy -f mpegts pipe:1",
             "is_active": True,
-            "user_agent": "1",
+            "user_agent_id": 1,
         }
     )
 
@@ -37,7 +37,7 @@ def reverse_proxy_support_profiles(apps, schema_editor):
     
     # Revert ffmpeg profile to original parameters
     try:
-        ffmpeg_profile = StreamProfile.objects.get(profile_name="ffmpeg")
+        ffmpeg_profile = StreamProfile.objects.get(name="ffmpeg")
         ffmpeg_profile.parameters = "-i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1"
         ffmpeg_profile.save()
     except StreamProfile.DoesNotExist:
@@ -45,14 +45,14 @@ def reverse_proxy_support_profiles(apps, schema_editor):
     
     # Remove the proxy-specific profile
     try:
-        StreamProfile.objects.get(profile_name="ffmpeg-proxy").delete()
+        StreamProfile.objects.get(name="ffmpeg-proxy").delete()
     except StreamProfile.DoesNotExist:
         pass
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0007_create_proxy_and_redirect_stream_profiles'),
+        ('core', '0019_coresettings_value_textfield'),
     ]
 
     operations = [

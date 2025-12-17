@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('m3u', '0001_initial'),  # Adjust this to the latest migration
+        ('m3u', '0035_clear_cached_portal_engine'),  # Latest migration
     ]
 
     operations = [
