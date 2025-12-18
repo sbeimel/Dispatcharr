@@ -67,6 +67,10 @@ class OB2_2025Strategy(BasePortalStrategy):
                     
                     if token:
                         logger.info(f"OB2_2025: Handshake successful via GET on {endpoint}")
+                        
+                        # Update cache on success
+                        self._update_engine_cache()
+                        
                         return HandshakeResult(
                             success=True,
                             token=token,
@@ -93,6 +97,10 @@ class OB2_2025Strategy(BasePortalStrategy):
                     
                     if token:
                         logger.info(f"OB2_2025: Handshake successful via POST on {endpoint}")
+                        
+                        # Update cache on success
+                        self._update_engine_cache()
+                        
                         return HandshakeResult(
                             success=True,
                             token=token,

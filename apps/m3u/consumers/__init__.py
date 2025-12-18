@@ -1,21 +1,10 @@
 """
-WebSocket consumers for M3U app.
+WebSocket Consumers for M3U app.
+
+Provides real-time updates via WebSocket connections.
 """
 
-from .failover_test_consumer import (
-    FailoverTestConsumer,
-    broadcast_failover_event,
-    broadcast_log_entry,
-    broadcast_simulation_status,
-    sync_broadcast_failover_event,
-    sync_broadcast_log_entry,
-)
+# Failover Test Consumer removed - service was missing
+# Manual failover test (kill_stream) still works via proxy/views.py
 
-__all__ = [
-    'FailoverTestConsumer',
-    'broadcast_failover_event',
-    'broadcast_log_entry',
-    'broadcast_simulation_status',
-    'sync_broadcast_failover_event',
-    'sync_broadcast_log_entry',
-]
+__all__ = []

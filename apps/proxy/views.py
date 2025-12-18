@@ -179,31 +179,8 @@ def kill_stream(request, channel_id):
         metadata_key = f'ts_proxy:channel:{channel_uuid}:metadata'
         redis_client.delete(metadata_key)
         
-        # Log the kill event
-        from asgiref.sync import async_to_sync
-        from channels.layers import get_channel_layer
-        
-        try:
-            channel_layer = get_channel_layer()
-            if channel_layer:
-                async_to_sync(channel_layer.group_send)(
-                    'failover_test',
-                    {
-                        'type': 'failover_event',
-                        'data': {
-                            'id': f'kill_{channel_id}_{int(time.time() * 1000)}',
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'event_type': 'stream_killed',
-                            'channel_id': channel_id,
-                            'channel_uuid': channel_uuid,
-                            'channel_name': channel.name,
-                            'message': f'Stream für "{channel.name}" wurde manuell beendet',
-                            'success': True,
-                        }
-                    }
-                )
-        except Exception as e:
-            logger.debug(f"Could not send WebSocket event: {e}")
+        # Log the kill event (WebSocket removed - failover test system removed)
+        logger.info(f"Stream killed manually for channel {channel.name} (UUID: {channel_uuid})")
         
         return JsonResponse({
             'success': True,
@@ -253,31 +230,8 @@ def simulate_error(request, channel_id):
         }
         redis_client.publish(events_channel, json.dumps(failover_event))
         
-        # Sende WebSocket Event
-        from asgiref.sync import async_to_sync
-        from channels.layers import get_channel_layer
-        
-        try:
-            channel_layer = get_channel_layer()
-            if channel_layer:
-                async_to_sync(channel_layer.group_send)(
-                    'failover_test',
-                    {
-                        'type': 'failover_event',
-                        'data': {
-                            'id': f'failover_{channel_id}_{int(time.time() * 1000)}',
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'event_type': 'failover_triggered',
-                            'channel_id': channel_id,
-                            'channel_uuid': channel_uuid,
-                            'channel_name': channel.name,
-                            'message': f'Failover manuell ausgelöst für "{channel.name}"',
-                            'success': True,
-                        }
-                    }
-                )
-        except Exception as e:
-            logger.debug(f"Could not send WebSocket event: {e}")
+        # Log failover trigger (WebSocket removed - failover test system removed)
+        logger.info(f"Failover manually triggered for channel {channel.name} (UUID: {channel_uuid})")
         
         return JsonResponse({
             'success': True,

@@ -786,6 +786,14 @@ def _resolve_mac_stream_with_failover(
 
         for proxy in proxy_list:
             try:
+                # CRITICAL FIX: Mark MAC as BUSY *BEFORE* creating the link
+                # This prevents race conditions where multiple streams try to use the same MAC
+                if redis_client:
+                    busy_key = RedisKeys.mac_busy(mac_entry.id)
+                    # Set with 10 second expiry - will be extended by stream_manager if successful
+                    redis_client.setex(busy_key, 10, '1')
+                    logger.debug(f"Pre-marked MAC {mac_value} (id={mac_entry.id}) as BUSY before link creation")
+                
                 client = MacPortalClient(
                     base_url=m3u_account.server_url,
                     mac=mac_value,
@@ -827,6 +835,14 @@ def _resolve_mac_stream_with_failover(
                     mac_entry.save(update_fields=["status", "last_error", "last_checked"])
                 except Exception:
                     pass
+                # CRITICAL FIX: Clear BUSY flag since link creation failed
+                if redis_client:
+                    try:
+                        busy_key = RedisKeys.mac_busy(mac_entry.id)
+                        redis_client.delete(busy_key)
+                        logger.debug(f"Cleared BUSY flag for MAC {mac_value} after portal error")
+                    except Exception:
+                        pass
                 # MAC is obviously not valid → don't try other proxies
                 break
             except Exception as e:
@@ -840,6 +856,14 @@ def _resolve_mac_stream_with_failover(
                     msg,
                 )
                 last_error_for_mac = msg
+                # CRITICAL FIX: Clear BUSY flag since link creation failed
+                if redis_client:
+                    try:
+                        busy_key = RedisKeys.mac_busy(mac_entry.id)
+                        redis_client.delete(busy_key)
+                        logger.debug(f"Cleared BUSY flag for MAC {mac_value} after network error")
+                    except Exception:
+                        pass
                 continue
 
         # If we've tried all proxies and didn't get a URL, but it wasn't a

@@ -125,10 +125,8 @@ class MACPortalGlobalSettings(models.Model):
     )
     
     # Unified Portal Engine Selection (Requirement 100.1)
-    # Note: 'unified' was removed as it was identical to 'auto'
     PORTAL_ENGINE_CHOICES = [
-        ('auto', 'Auto-Detect (First Working)'),
-        ('fastest', 'Fastest (Benchmarked per Portal)'),
+        ('auto', 'Auto-Detect (Recommended)'),
         ('allinone', 'AllinOne Best-of-All'),
         ('macreplay', 'MacReplayXC (Standard)'),
         ('estalker', 'EStalker (Enigma2 Style)'),
@@ -141,7 +139,14 @@ class MACPortalGlobalSettings(models.Model):
         max_length=20,
         choices=PORTAL_ENGINE_CHOICES,
         default='auto',
-        help_text="Portal authentication engine to use. 'Fastest' uses benchmarked results per portal."
+        help_text="Portal authentication engine to use. AUTO mode automatically detects and caches the working engine."
+    )
+    
+    # Engine Cache (for AUTO mode intelligent caching)
+    engine_cache = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Cached working engines per portal URL. Format: {portal_url: engine_name}. Persists until manually cleared."
     )
     
     # Parental Control PIN (from migration 0025)
@@ -426,130 +431,6 @@ class VODResumePoint(models.Model):
         remaining = self.duration_seconds - self.position_seconds
         return remaining <= threshold_seconds
 
-
-
-class MACHealthRecord(models.Model):
-    """
-    Tracks MAC address health and history.
-    
-    Requirements: 49.1
-    """
-    
-    class EventType(models.TextChoices):
-        SUCCESS = "success", "Success"
-        FAILURE = "failure", "Failure"
-        COOLDOWN = "cooldown", "Cooldown"
-        BLOCK = "block", "Block"
-        RECOVERY = "recovery", "Recovery"
-        EXPIRED = "expired", "Expired"
-    
-    mac = models.ForeignKey(
-        'M3UAccountMac',
-        on_delete=models.CASCADE,
-        related_name='health_records',
-        help_text="The MAC address this record belongs to"
-    )
-    timestamp = models.DateTimeField(
-        auto_now_add=True,
-        help_text="When this event occurred"
-    )
-    event_type = models.CharField(
-        max_length=20,
-        choices=EventType.choices,
-        help_text="Type of health event"
-    )
-    error_message = models.TextField(
-        blank=True,
-        help_text="Error message if applicable"
-    )
-    response_time_ms = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="Response time in milliseconds"
-    )
-    http_status = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="HTTP status code if applicable"
-    )
-    endpoint_used = models.CharField(
-        max_length=255,
-        blank=True,
-        help_text="Endpoint that was used"
-    )
-    
-    class Meta:
-        ordering = ['-timestamp']
-        verbose_name = "MAC Health Record"
-        verbose_name_plural = "MAC Health Records"
-        indexes = [
-            models.Index(fields=['mac', 'timestamp']),
-            models.Index(fields=['mac', 'event_type']),
-        ]
-    
-    def __str__(self):
-        return f"{self.mac.address} - {self.event_type} @ {self.timestamp}"
-    
-    @classmethod
-    def record_success(cls, mac, response_time_ms=None, endpoint_used=""):
-        """Record a successful MAC operation."""
-        return cls.objects.create(
-            mac=mac,
-            event_type=cls.EventType.SUCCESS,
-            response_time_ms=response_time_ms,
-            endpoint_used=endpoint_used
-        )
-    
-    @classmethod
-    def record_failure(cls, mac, error_message="", http_status=None, endpoint_used=""):
-        """Record a failed MAC operation."""
-        return cls.objects.create(
-            mac=mac,
-            event_type=cls.EventType.FAILURE,
-            error_message=error_message,
-            http_status=http_status,
-            endpoint_used=endpoint_used
-        )
-    
-    @classmethod
-    def get_health_score(cls, mac, hours=24):
-        """Calculate health score for a MAC based on recent events and status."""
-        from django.db.models import Count
-        
-        # Check MAC status first - defective MACs get low scores regardless of history
-        if hasattr(mac, 'status'):
-            if mac.status in ['error', 'expired']:
-                return 0  # Completely broken MACs
-            elif mac.status == 'unknown':
-                return 10  # Unknown status MACs (untested but suspicious)
-            elif mac.status == 'blocked':
-                return 5   # Blocked MACs
-        
-        since = timezone.now() - timezone.timedelta(hours=hours)
-        
-        events = cls.objects.filter(
-            mac=mac,
-            timestamp__gte=since
-        ).values('event_type').annotate(count=Count('id'))
-        
-        success_count = 0
-        failure_count = 0
-        
-        for event in events:
-            if event['event_type'] == cls.EventType.SUCCESS:
-                success_count = event['count']
-            elif event['event_type'] in [cls.EventType.FAILURE, cls.EventType.BLOCK]:
-                failure_count = event['count']
-        
-        total = success_count + failure_count
-        if total == 0:
-            # No history - return score based on status
-            if hasattr(mac, 'status') and mac.status == 'valid':
-                return 50  # Valid but untested MACs get neutral score
-            else:
-                return 25  # Unknown status with no history gets lower score
-        
-        return int((success_count / total) * 100)
 
 
 class FailoverEvent(models.Model):

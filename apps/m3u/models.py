@@ -11,7 +11,6 @@ from apps.m3u.mac_portal_models import (
     MACPortalGlobalSettings,
     FailoverSettings,
     VODResumePoint,
-    MACHealthRecord,
     FailoverEvent,
     VODWatchedStatus,
     MACCooldown,
@@ -592,6 +591,14 @@ class M3UAccountMac(models.Model):
         unique_together = [("account", "address")]
         verbose_name = "MAC Address"
         verbose_name_plural = "MAC Addresses"
+        indexes = [
+            # Index for frequent queries: account + status
+            models.Index(fields=['account', 'status'], name='m3u_mac_acc_status_idx'),
+            # Index for priority-based selection: account + status + priority
+            models.Index(fields=['account', 'status', 'priority'], name='m3u_mac_acc_st_prio_idx'),
+            # Index for cleanup queries: account + last_checked
+            models.Index(fields=['account', 'last_checked'], name='m3u_mac_acc_checked_idx'),
+        ]
     
     def __str__(self):
         return f"{self.address} ({self.get_status_display()})"

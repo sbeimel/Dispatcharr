@@ -34,7 +34,6 @@ from ..models import M3UAccount, M3UAccountMac
 from ..mac_portal_models import (
     MACPortalGlobalSettings,
     FailoverSettings,
-    MACHealthRecord,
     FailoverEvent,
     MACCooldown,
 )
@@ -61,16 +60,6 @@ class FailoverSettingsSerializer(serializers.ModelSerializer):
         exclude = ['id', 'created_at', 'updated_at']
 
 
-class MACHealthRecordSerializer(serializers.ModelSerializer):
-    """Serializer for MACHealthRecord."""
-    mac_address = serializers.CharField(source='mac.address', read_only=True)
-    
-    class Meta:
-        model = MACHealthRecord
-        fields = ['id', 'mac_address', 'timestamp', 'event_type', 'error_message', 
-                  'response_time_ms', 'http_status', 'endpoint_used']
-
-
 class MACCooldownSerializer(serializers.ModelSerializer):
     """Serializer for MACCooldown."""
     mac_address = serializers.CharField(source='mac.address', read_only=True)
@@ -95,7 +84,6 @@ class MACStatusSerializer(serializers.Serializer):
     """Serializer for MAC status."""
     address = serializers.CharField()
     status = serializers.CharField()
-    health_score = serializers.IntegerField()
     in_cooldown = serializers.BooleanField()
     cooldown_remaining = serializers.IntegerField()
     cooldown_reason = serializers.CharField(allow_null=True)
@@ -267,15 +255,6 @@ class MACHealthViewSet(viewsets.ViewSet):
         
         status_data = manager.get_mac_status(mac)
         serializer = MACStatusSerializer(status_data)
-        return Response(serializer.data)
-    
-    @action(detail=True, methods=['get'])
-    def history(self, request, account_pk=None, pk=None):
-        """GET /api/m3u-accounts/{id}/macs/{mac_id}/health/history/ - Get MAC health history."""
-        mac = get_object_or_404(M3UAccountMac, pk=pk, account_id=account_pk)
-        
-        records = MACHealthRecord.objects.filter(mac=mac).order_by('-timestamp')[:100]
-        serializer = MACHealthRecordSerializer(records, many=True)
         return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
@@ -584,33 +563,8 @@ class DebugLogsViewSet(viewsets.ViewSet):
     
     def list(self, request):
         """GET /api/mac-portal/logs/ - Get debug logs."""
-        # Get recent health records as logs
-        limit = int(request.query_params.get('limit', 100))
-        event_type = request.query_params.get('type', None)
-        mac_id = request.query_params.get('mac_id', None)
-        
-        queryset = MACHealthRecord.objects.all().order_by('-timestamp')
-        
-        if event_type:
-            queryset = queryset.filter(event_type=event_type)
-        if mac_id:
-            queryset = queryset.filter(mac_id=mac_id)
-        
-        records = queryset[:limit]
-        serializer = MACHealthRecordSerializer(records, many=True)
-        return Response(serializer.data)
-    
-    @action(detail=False, methods=['delete'])
-    def clear(self, request):
-        """DELETE /api/mac-portal/logs/clear/ - Clear old logs."""
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        days = int(request.query_params.get('days', 7))
-        cutoff = timezone.now() - timedelta(days=days)
-        
-        deleted, _ = MACHealthRecord.objects.filter(timestamp__lt=cutoff).delete()
-        return Response({'deleted': deleted})
+        # Health records removed - this endpoint is deprecated
+        return Response({'message': 'Health records have been removed. Use MAC status and cooldown instead.'})
 
 
 class FailoverStatisticsViewSet(viewsets.ViewSet):
