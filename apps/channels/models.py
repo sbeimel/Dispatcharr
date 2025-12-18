@@ -136,14 +136,6 @@ class Stream(models.Model):
         verbose_name = "Stream"
         verbose_name_plural = "Streams"
         ordering = ["-updated_at"]
-        indexes = [
-            # Index for m3u_account lookups (very frequent)
-            models.Index(fields=['m3u_account'], name='stream_account_idx'),
-            # Index for stream_hash lookups (unique but needs index for speed)
-            models.Index(fields=['stream_hash'], name='stream_hash_idx'),
-            # Index for last_seen cleanup queries
-            models.Index(fields=['last_seen'], name='stream_last_seen_idx'),
-        ]
 
     def __str__(self):
         return self.name or self.url or f"Stream ID {self.id}"

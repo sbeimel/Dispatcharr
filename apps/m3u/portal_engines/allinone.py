@@ -204,10 +204,6 @@ class AllinOneStrategy(BasePortalStrategy):
                 
                 if token:
                     logger.info(f"AllinOne: Prehash handshake successful")
-                    
-                    # Update cache on success
-                    self._update_engine_cache()
-                    
                     return HandshakeResult(
                         success=True,
                         token=token,
@@ -222,22 +218,15 @@ class AllinOneStrategy(BasePortalStrategy):
     
     def perform_handshake(self) -> HandshakeResult:
         """
-        AllinOne Handshake - Versucht ALLE Methoden mit intelligentem Caching.
+        AllinOne Handshake - Versucht ALLE Methoden.
         
         Ablauf:
-        1. Prüfe Cache für bekannte funktionierende Engine
-        2. Portal-Typ-Erkennung via version.js
-        3. Standard Handshake mit GET
-        4. Standard Handshake mit POST
-        5. Bei "missing" Response: Prehash-Methode
-        6. Bei Fehler: User-Agent rotieren und wiederholen
-        7. Bei Erfolg: Cache aktualisieren
+        1. Portal-Typ-Erkennung via version.js
+        2. Standard Handshake mit GET
+        3. Standard Handshake mit POST
+        4. Bei "missing" Response: Prehash-Methode
+        5. Bei Fehler: User-Agent rotieren und wiederholen
         """
-        # Check cache first (inherited from base class)
-        cached_engine = self._get_cached_engine()
-        if cached_engine:
-            logger.info(f"AllinOne: Using cached engine hint: {cached_engine}")
-        
         # Detect portal type first
         detected_endpoint = self._detect_portal_type()
         
@@ -288,10 +277,6 @@ class AllinOneStrategy(BasePortalStrategy):
                         if token:
                             self._token_random = js.get("random", "")
                             logger.info(f"AllinOne: Handshake successful via GET on {endpoint}")
-                            
-                            # Update cache on success
-                            self._update_engine_cache()
-                            
                             return HandshakeResult(
                                 success=True,
                                 token=token,
@@ -329,10 +314,6 @@ class AllinOneStrategy(BasePortalStrategy):
                         if token:
                             self._token_random = js.get("random", "")
                             logger.info(f"AllinOne: Handshake successful via POST on {endpoint}")
-                            
-                            # Update cache on success
-                            self._update_engine_cache()
-                            
                             return HandshakeResult(
                                 success=True,
                                 token=token,

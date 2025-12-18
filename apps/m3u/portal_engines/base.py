@@ -163,19 +163,6 @@ class BasePortalStrategy(ABC):
         self._detected_portal_type = "stalker"
         self._detected_portal_version = None
     
-    def __del__(self):
-        """Cleanup session on destruction to prevent memory leaks."""
-        self.close()
-    
-    def close(self):
-        """Explicitly close HTTP session to free resources."""
-        if hasattr(self, 'session') and self.session:
-            try:
-                self.session.close()
-                logger.debug(f"{self.NAME}: Closed HTTP session")
-            except Exception as e:
-                logger.debug(f"{self.NAME}: Error closing session: {e}")
-    
     @property
     def portal_type(self) -> Optional[str]:
         """Return detected portal type for benchmark (stalker, xtream, xui, etc.)."""
@@ -221,47 +208,6 @@ class BasePortalStrategy(ABC):
         if not self.proxy:
             return None
         return {"http": self.proxy, "https": self.proxy}
-    
-    def _get_cached_engine(self) -> Optional[str]:
-        """Get cached working engine for this portal from global settings."""
-        try:
-            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
-            settings = MACPortalGlobalSettings.get_settings()
-            
-            if not settings.engine_cache:
-                return None
-            
-            engine = settings.engine_cache.get(self.portal_url)
-            if engine:
-                logger.info(f"{self.NAME}: Found cached engine '{engine}' for {self.portal_url}")
-            
-            return engine
-            
-        except Exception as e:
-            logger.debug(f"{self.NAME}: Error reading cache: {e}")
-            return None
-    
-    def _update_engine_cache(self):
-        """
-        Update the engine cache on successful handshake.
-        Simple: Just store which engine worked for this portal.
-        Cache persists until manually cleared.
-        """
-        try:
-            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
-            
-            settings = MACPortalGlobalSettings.get_settings()
-            
-            if not settings.engine_cache:
-                settings.engine_cache = {}
-            
-            settings.engine_cache[self.portal_url] = self.NAME
-            settings.save(update_fields=['engine_cache'])
-            
-            logger.info(f"{self.NAME}: Cached as working engine for {self.portal_url}")
-            
-        except Exception as e:
-            logger.debug(f"{self.NAME}: Error updating cache: {e}")
     
     @abstractmethod
     def perform_handshake(self) -> HandshakeResult:

@@ -11,8 +11,8 @@ from .api_views import (
     M3UAccountProfileViewSet,
 )
 from .api.mac_portal_api import get_mac_portal_urls, get_mac_management_urls
-from .api.clear_auto_cache_api import clear_auto_cache, get_auto_cache_status
-from .api.clear_engine_cache_api import clear_engine_cache, get_engine_cache
+from .api.failover_test_api import get_failover_test_urls
+from .api.simple_benchmark_api import run_benchmark, get_benchmark_result, clear_benchmark
 
 app_name = "m3u"
 
@@ -48,16 +48,14 @@ urlpatterns = [
 urlpatterns += get_mac_portal_urls()
 urlpatterns += get_mac_management_urls()
 
-# Clear AUTO Cache API endpoints
-urlpatterns += [
-    path('clear-auto-cache/<int:account_id>/', clear_auto_cache, name='clear-auto-cache'),
-    path('clear-auto-cache/<int:account_id>/status/', get_auto_cache_status, name='auto-cache-status'),
-]
+# Add Failover Test API endpoints
+urlpatterns += get_failover_test_urls()
 
-# Engine Cache API endpoints
+# Simple Benchmark API endpoints (standalone, guaranteed to work)
 urlpatterns += [
-    path('engine-cache/', get_engine_cache, name='engine-cache-get'),
-    path('engine-cache/clear/', clear_engine_cache, name='engine-cache-clear'),
+    path('benchmark/<int:account_id>/run/', run_benchmark, name='benchmark-run'),
+    path('benchmark/<int:account_id>/result/', get_benchmark_result, name='benchmark-result'),
+    path('benchmark/<int:account_id>/clear/', clear_benchmark, name='benchmark-clear'),
 ]
 
 urlpatterns += router.urls

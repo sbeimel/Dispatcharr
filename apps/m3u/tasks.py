@@ -501,8 +501,7 @@ def parse_extinf_line(line: str) -> dict:
 @shared_task
 def refresh_m3u_accounts():
     """Queue background parse for all active M3UAccounts."""
-    # OPTIMIZED: Only fetch id field since we only need account.id
-    active_accounts = M3UAccount.objects.filter(is_active=True).only('id')
+    active_accounts = M3UAccount.objects.filter(is_active=True)
     count = 0
     for account in active_accounts:
         refresh_single_m3u_account.delay(account.id)
@@ -1544,13 +1543,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             message="M3U groups loaded. Please select groups or refresh M3U to complete setup.",
         )
 
-    # Memory cleanup after refresh (especially important for large M3U files)
-    try:
-        gc.collect()
-        logger.info(f"Memory cleanup completed after refresh for account {account_id}")
-    except Exception as e:
-        logger.debug(f"Memory cleanup failed: {e}")
-
     return extinf_data, groups
 
 
@@ -1711,12 +1703,11 @@ def sync_auto_channels(account_id, scan_start_time=None):
             )
 
             # Get all current streams in this group for this M3U account, filter out stale streams
-            # OPTIMIZED: select_related to avoid additional queries for m3u_account
             current_streams = Stream.objects.filter(
                 m3u_account=account,
                 channel_group=channel_group,
                 last_seen__gte=scan_start_time,
-            ).select_related('m3u_account')
+            )
 
             # --- FILTER STREAMS BY NAME MATCH REGEX IF SPECIFIED ---
             if name_match_regex:
@@ -1761,25 +1752,23 @@ def sync_auto_channels(account_id, scan_start_time=None):
 
             # Get existing auto-created channels for this account (regardless of current group)
             # We'll find them by their stream associations instead of just group location
-            # OPTIMIZED: Use prefetch_related to avoid N+1 queries
             existing_channels = Channel.objects.filter(
                 auto_created=True, auto_created_by=account
-            ).select_related("logo", "epg_data").prefetch_related(
-                models.Prefetch(
-                    'channelstream_set',
-                    queryset=ChannelStream.objects.filter(
-                        stream__m3u_account=account,
-                        stream__channel_group=channel_group
-                    ).select_related('stream')
-                )
-            )
+            ).select_related("logo", "epg_data")
 
             # Create mapping of existing channels by their associated stream
             # This approach finds channels even if they've been moved to different groups
             existing_channel_map = {}
             for channel in existing_channels:
-                # Use prefetched data instead of additional queries
-                for channel_stream in channel.channelstream_set.all():
+                # Get streams associated with this channel that belong to our M3U account and original group
+                channel_streams = ChannelStream.objects.filter(
+                    channel=channel,
+                    stream__m3u_account=account,
+                    stream__channel_group=channel_group,  # Match streams from the original group
+                ).select_related("stream")
+
+                # Map each of our M3U account's streams to this channel
+                for channel_stream in channel_streams:
                     if channel_stream.stream:
                         existing_channel_map[channel_stream.stream.id] = channel
 
@@ -3171,23 +3160,19 @@ def _refresh_mac_account_with_groups(account_id):
         total_channels = 0
         groups = {}
         extinf_data = []
-        channels_fetched = False
+        working_mac_found = False
         
-        # OPTIMIZATION: Only use Prio 0 (highest priority) MAC for channel fetching
-        # Other MACs are only checked for status (failover purposes)
-        prio_0_mac = macs.first()  # First MAC is Prio 0 (highest priority)
-        
-        # Try Prio 0 MAC first for channel fetching
-        if prio_0_mac:
+        # Try each MAC and check all of them for status
+        for mac_obj in macs:
             try:
-                logger.info(f"Trying Prio 0 MAC {prio_0_mac.address} for channel fetching (account {account.name})")
+                logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
                 
                 # Use UnifiedMacPortalClient for all engines including 'auto'
                 # AUTO mode will try all engines in priority order
                 from .mac_portal_client import UnifiedMacPortalClient
                 client = UnifiedMacPortalClient(
                     base_url=account.server_url,
-                    mac=prio_0_mac.address,
+                    mac=mac_obj.address,
                     proxy=getattr(account, 'proxy', None),
                     portal_engine=portal_engine  # Use the resolved engine from benchmark/settings
                 )
@@ -3196,139 +3181,90 @@ def _refresh_mac_account_with_groups(account_id):
                 channels = client.get_channels()
                 
                 if channels:
-                    total_channels = len(channels)
-                    logger.info(f"Successfully got {total_channels} channels from Prio 0 MAC {prio_0_mac.address}")
-                    channels_fetched = True
-                    
-                    # Save portal type/version info to account custom_properties
-                    # NOTE: We do NOT save portal_engine here anymore!
-                    # portal_engine should only be set explicitly by user or benchmark,
-                    # not automatically from global settings (which caused the bug where
-                    # changing global engine didn't take effect because account had cached value)
-                    try:
-                        custom_props = account.custom_properties or {}
+                    if not working_mac_found:
+                        # Only process channels from first working MAC
+                        total_channels = len(channels)
+                        logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
                         
-                        # Try to get portal type/version from UnifiedMacPortalClient
-                        if hasattr(client, '_unified_client') and client._unified_client:
-                            result = getattr(client._unified_client, '_last_result', None)
-                            if result:
-                                if result.portal_type:
-                                    custom_props['portal_type'] = result.portal_type
-                                if result.portal_version:
-                                    custom_props['portal_version'] = result.portal_version
+                        # Save portal type/version info to account custom_properties
+                        # NOTE: We do NOT save portal_engine here anymore!
+                        # portal_engine should only be set explicitly by user or benchmark,
+                        # not automatically from global settings (which caused the bug where
+                        # changing global engine didn't take effect because account had cached value)
+                        try:
+                            custom_props = account.custom_properties or {}
+                            
+                            # Try to get portal type/version from UnifiedMacPortalClient
+                            if hasattr(client, '_unified_client') and client._unified_client:
+                                result = getattr(client._unified_client, '_last_result', None)
+                                if result:
+                                    if result.portal_type:
+                                        custom_props['portal_type'] = result.portal_type
+                                    if result.portal_version:
+                                        custom_props['portal_version'] = result.portal_version
+                            
+                            account.custom_properties = custom_props
+                            account.save(update_fields=['custom_properties'])
+                            logger.debug(f"Saved portal info: type={custom_props.get('portal_type')}, version={custom_props.get('portal_version')}")
+                        except Exception as e:
+                            logger.debug(f"Could not save portal info: {e}")
                         
-                        account.custom_properties = custom_props
-                        account.save(update_fields=['custom_properties'])
-                        logger.debug(f"Saved portal info: type={custom_props.get('portal_type')}, version={custom_props.get('portal_version')}")
-                    except Exception as e:
-                        logger.debug(f"Could not save portal info: {e}")
-                    
-                    # Convert MAC channels to EXTINF format and extract groups
-                    for channel in channels:
-                        group_name = channel.get('group', 'Default Group')
-                        if group_name not in groups:
-                            groups[group_name] = {}
+                        # Convert MAC channels to EXTINF format and extract groups
+                        for channel in channels:
+                            group_name = channel.get('group', 'Default Group')
+                            if group_name not in groups:
+                                groups[group_name] = {}
+                            
+                            # Convert MAC channel to EXTINF format
+                            # Use 'url' field which contains the properly extracted stream URL
+                            extinf_entry = {
+                                'name': channel.get('name', ''),
+                                'url': channel.get('url', ''),  # Use 'url' not 'cmd'
+                                'attributes': {
+                                    'group-title': group_name,
+                                    'tvg-id': str(channel.get('id', '')),
+                                    'tvg-logo': channel.get('logo', ''),
+                                    'tvg-name': channel.get('name', '')
+                                },
+                                'display_name': channel.get('name', '')
+                            }
+                            extinf_data.append(extinf_entry)
                         
-                        # Convert MAC channel to EXTINF format
-                        # Use 'url' field which contains the properly extracted stream URL
-                        extinf_entry = {
-                            'name': channel.get('name', ''),
-                            'url': channel.get('url', ''),  # Use 'url' not 'cmd'
-                            'attributes': {
-                                'group-title': group_name,
-                                'tvg-id': str(channel.get('id', '')),
-                                'tvg-logo': channel.get('logo', ''),
-                                'tvg-name': channel.get('name', '')
-                            },
-                            'display_name': channel.get('name', '')
-                        }
-                        extinf_data.append(extinf_entry)
-                    
-                    logger.info(f"Extracted {len(groups)} groups and {len(extinf_data)} channels from Prio 0 MAC")
+                        logger.info(f"Extracted {len(groups)} groups and {len(extinf_data)} channels from MAC")
+                        working_mac_found = True
+                    else:
+                        logger.info(f"MAC {mac_obj.address} is also working (backup)")
                     
                     # Update MAC status
-                    prio_0_mac.status = M3UAccountMac.Status.VALID
-                    prio_0_mac.last_checked = timezone.now()
-                    prio_0_mac.last_error = None
+                    mac_obj.status = M3UAccountMac.Status.VALID
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
                     
                     # Try to get expiry info
                     try:
                         expires_text = client.get_expires()
                         if expires_text:
-                            prio_0_mac.expires_text = expires_text
+                            mac_obj.expires_text = expires_text
                     except Exception as e:
-                        logger.debug(f"Could not get expiry for Prio 0 MAC {prio_0_mac.address}: {e}")
+                        logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
                     
+                    mac_obj.save()
                     success_count += 1
                     
             except MacPortalError as e:
-                logger.error(f"MAC Portal error for Prio 0 MAC {prio_0_mac.address}: {e}")
-                prio_0_mac.status = M3UAccountMac.Status.ERROR
-                prio_0_mac.last_checked = timezone.now()
-                prio_0_mac.last_error = str(e)
-            except Exception as e:
-                logger.error(f"Unexpected error for Prio 0 MAC {prio_0_mac.address}: {e}")
-                prio_0_mac.status = M3UAccountMac.Status.ERROR
-                prio_0_mac.last_checked = timezone.now()
-                prio_0_mac.last_error = str(e)
-        
-        # Check status of other MACs (for failover) - but don't fetch channels
-        other_macs = macs[1:]  # All MACs except Prio 0
-        macs_to_update = []  # Collect MACs for bulk update
-        
-        for mac_obj in other_macs:
-            try:
-                logger.info(f"Checking status of backup MAC {mac_obj.address} (account {account.name})")
-                
-                from .mac_portal_client import UnifiedMacPortalClient
-                client = UnifiedMacPortalClient(
-                    base_url=account.server_url,
-                    mac=mac_obj.address,
-                    proxy=getattr(account, 'proxy', None),
-                    portal_engine=portal_engine
-                )
-                
-                # Only get expiry/status, don't fetch channels
-                try:
-                    expires_text = client.get_expires()
-                    if expires_text:
-                        mac_obj.expires_text = expires_text
-                        mac_obj.status = M3UAccountMac.Status.VALID
-                        mac_obj.last_checked = timezone.now()
-                        mac_obj.last_error = None
-                        macs_to_update.append(mac_obj)
-                        success_count += 1
-                        logger.info(f"Backup MAC {mac_obj.address} is valid (expires: {expires_text})")
-                except Exception as e:
-                    logger.debug(f"Could not get expiry for backup MAC {mac_obj.address}: {e}")
-                    # Still mark as valid if we got here without exception
-                    mac_obj.status = M3UAccountMac.Status.VALID
-                    mac_obj.last_checked = timezone.now()
-                    mac_obj.last_error = None
-                    macs_to_update.append(mac_obj)
-                    success_count += 1
-                    
-            except MacPortalError as e:
-                logger.error(f"MAC Portal error for backup MAC {mac_obj.address}: {e}")
+                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
                 mac_obj.status = M3UAccountMac.Status.ERROR
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
-                macs_to_update.append(mac_obj)
+                mac_obj.save()
+                continue
             except Exception as e:
-                logger.error(f"Unexpected error for backup MAC {mac_obj.address}: {e}")
+                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
                 mac_obj.status = M3UAccountMac.Status.ERROR
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
-                macs_to_update.append(mac_obj)
-        
-        # Bulk update all MACs (including prio_0_mac)
-        macs_to_update.append(prio_0_mac)
-        if macs_to_update:
-            M3UAccountMac.objects.bulk_update(
-                macs_to_update,
-                ['status', 'last_checked', 'last_error', 'expires_text'],
-                batch_size=100
-            )
+                mac_obj.save()
+                continue
         
         # Memory cleanup after processing large channel lists (can be 20k+ channels)
         if total_channels > 2500:
@@ -3336,21 +3272,13 @@ def _refresh_mac_account_with_groups(account_id):
             from core.utils import cleanup_memory
             cleanup_memory(log_usage=True, force_collection=True)
         
-        if channels_fetched:
+        if success_count > 0:
             return {
                 "success": True,
                 "channels": total_channels,
                 "working_macs": success_count,
                 "groups": groups,
-                "extinf_data": extinf_data,
-                "prio_0_used": True
-            }
-        elif success_count > 0:
-            # Some MACs are valid but Prio 0 failed to fetch channels
-            return {
-                "success": False,
-                "error": "Prio 0 MAC failed, but backup MACs are available",
-                "working_macs": success_count
+                "extinf_data": extinf_data
             }
         else:
             return {"error": "All MAC addresses failed"}
@@ -3487,6 +3415,7 @@ def _refresh_mac_account_direct(account_id):
                     except Exception as e:
                         logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
                     
+                    mac_obj.save()
                     success_count += 1
                     
             except MacPortalError as e:
@@ -3494,21 +3423,15 @@ def _refresh_mac_account_direct(account_id):
                 mac_obj.status = M3UAccountMac.Status.ERROR
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
+                mac_obj.save()
                 continue
             except Exception as e:
                 logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
                 mac_obj.status = M3UAccountMac.Status.ERROR
                 mac_obj.last_checked = timezone.now()
                 mac_obj.last_error = str(e)
+                mac_obj.save()
                 continue
-        
-        # Bulk update all MACs at once (much faster than individual saves)
-        if macs:
-            M3UAccountMac.objects.bulk_update(
-                list(macs),
-                ['status', 'last_checked', 'last_error', 'expires_text'],
-                batch_size=100
-            )
         
         # Memory cleanup after MAC status check (especially with many MACs)
         if len(list(macs)) > 10:
@@ -3598,8 +3521,7 @@ def check_mac_expiry(account_id=None):
                 })
             
             # Also do individual MAC expiry checks
-            macs = list(account.macs.all())
-            macs_to_update = []
+            macs = account.macs.all()
             
             for mac_obj in macs:
                 try:
@@ -3626,7 +3548,7 @@ def check_mac_expiry(account_id=None):
                     
                     mac_obj.last_checked = timezone.now()
                     mac_obj.last_error = None
-                    macs_to_update.append(mac_obj)
+                    mac_obj.save()
                     
                     results.append({
                         "account": account.name,
@@ -3640,22 +3562,14 @@ def check_mac_expiry(account_id=None):
                     mac_obj.status = M3UAccountMac.Status.ERROR
                     mac_obj.last_checked = timezone.now()
                     mac_obj.last_error = str(e)
-                    macs_to_update.append(mac_obj)
+                    mac_obj.save()
                     
                 except Exception as e:
                     logger.error(f"Error checking expiry for MAC {mac_obj.address}: {e}")
                     mac_obj.status = M3UAccountMac.Status.ERROR
                     mac_obj.last_checked = timezone.now()
                     mac_obj.last_error = str(e)
-                    macs_to_update.append(mac_obj)
-            
-            # Bulk update all MACs at once (much faster than individual saves)
-            if macs_to_update:
-                M3UAccountMac.objects.bulk_update(
-                    macs_to_update,
-                    ['status', 'last_checked', 'last_error', 'expires_text'],
-                    batch_size=100
-                )
+                    mac_obj.save()
         
         except Exception as e:
             logger.error(f"Error checking MAC expiry for account {account.id}: {e}")
@@ -3764,7 +3678,34 @@ def recover_macs_from_cooldown():
         return {"error": str(e)}
 
 
-# cleanup_old_health_records task removed - Health Score System has been removed
+@shared_task
+def cleanup_old_health_records():
+    """
+    Cleanup old MAC health records to prevent database bloat.
+    
+    Requirements: 49.1
+    
+    This task should be scheduled to run daily to remove health records
+    older than 7 days.
+    """
+    from .mac_portal_models import MACHealthRecord
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=7)
+        
+        deleted_count, _ = MACHealthRecord.objects.filter(
+            timestamp__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old MAC health records")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up health records: {e}")
+        return {"error": str(e)}
 
 
 @shared_task

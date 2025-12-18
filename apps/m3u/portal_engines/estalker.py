@@ -85,10 +85,6 @@ class EStalkerStrategy(BasePortalStrategy):
                         logger.info(f"EStalker: Handshake successful via {endpoint}")
                         # Set portal type for benchmark detection
                         self._detected_portal_type = "stalker"
-                        
-                        # Update cache on success
-                        self._update_engine_cache()
-                        
                         return HandshakeResult(
                             success=True,
                             token=token,
@@ -143,10 +139,6 @@ class EStalkerStrategy(BasePortalStrategy):
                     logger.info(f"EStalker: Prehash handshake successful")
                     # Set portal type for benchmark detection
                     self._detected_portal_type = "stalker"
-                    
-                    # Update cache on success
-                    self._update_engine_cache()
-                    
                     return HandshakeResult(
                         success=True,
                         token=token,

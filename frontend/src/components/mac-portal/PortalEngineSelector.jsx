@@ -19,6 +19,7 @@ import {
   ThemeIcon,
   Button,
   Loader,
+  Table,
 } from '@mantine/core';
 import {
   IconRocket,
@@ -26,7 +27,10 @@ import {
   IconDeviceTv,
   IconFlask,
   IconInfoCircle,
+  IconPlayerPlay,
   IconCheck,
+  IconX,
+  IconBolt,
   IconTrash,
 } from '@tabler/icons-react';
 import API from '../../api';
@@ -35,10 +39,18 @@ const PORTAL_ENGINES = [
   {
     value: 'auto',
     label: 'Auto-Detect (Recommended)',
-    description: 'Automatically detects and caches the working engine for this portal. Persists until manually cleared.',
+    description: 'Automatically tries all strategies and caches the first working one',
     icon: IconRocket,
     color: 'green',
     badge: 'Recommended',
+  },
+  {
+    value: 'fastest',
+    label: 'Fastest (Benchmarked)',
+    description: 'Uses the fastest benchmarked engine per portal. Run benchmark first!',
+    icon: IconBolt,
+    color: 'yellow',
+    badge: 'Benchmark',
   },
   {
     value: 'allinone',
@@ -102,80 +114,72 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
   const selectedEngine = PORTAL_ENGINES.find(e => e.value === value) || PORTAL_ENGINES[0];
   const IconComponent = selectedEngine.icon;
   
-  // Engine Cache state
-  const [cachedEngine, setCachedEngine] = useState(null);
-  const [clearingCache, setClearingCache] = useState(false);
+  // Benchmark state
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkResults, setBenchmarkResults] = useState(null);
+  const [cachedBenchmark, setCachedBenchmark] = useState(null);
+  const [loadingCache, setLoadingCache] = useState(false);
   
-  // Load engine cache on mount
+  // Load cached benchmark on mount
   useEffect(() => {
     if (accountId) {
-      loadCachedEngine();
+      loadCachedBenchmark();
     }
   }, [accountId]);
   
-  // Load cached engine from AUTO mode
-  const loadCachedEngine = async () => {
+  const loadCachedBenchmark = async () => {
     if (!accountId) return;
+    setLoadingCache(true);
     try {
-      // Get account details to extract portal URL
-      const accountResponse = await API.get(`/api/m3u/accounts/${accountId}/`);
-      const portalUrl = accountResponse.data.server_url;
-      
-      if (!portalUrl) return;
-      
-      // Get cached engine for this portal
-      const response = await API.get(`/api/m3u/engine-cache/?portal_url=${encodeURIComponent(portalUrl)}`);
-      
-      if (response.data.success && response.data.cached) {
-        setCachedEngine(response.data.engine);
-      } else {
-        setCachedEngine(null);
-      }
+      // Simple Benchmark API - guaranteed to work
+      const response = await API.get(`/api/m3u/benchmark/${accountId}/result/`);
+      setCachedBenchmark(response.data);
     } catch (error) {
-      console.error('Failed to load cached engine:', error);
-      setCachedEngine(null);
+      console.error('Failed to load cached benchmark:', error);
+    } finally {
+      setLoadingCache(false);
     }
   };
   
-  // Clear engine cache and trigger refresh
-  const clearAndRefreshEngineCache = async () => {
-    if (!accountId) return;
-    
-    setClearingCache(true);
-    try {
-      // Get account details to extract portal URL
-      const accountResponse = await API.get(`/api/m3u/accounts/${accountId}/`);
-      const portalUrl = accountResponse.data.server_url;
-      
-      if (!portalUrl) {
-        alert('Portal URL not found');
-        return;
-      }
-      
-      // Clear cache and trigger refresh
-      const response = await API.post('/api/m3u/engine-cache/clear/', {
-        portal_url: portalUrl,
-        account_id: accountId,
-        trigger_refresh: true
-      });
-      
-      if (response.data.success) {
-        setCachedEngine(null);
-        alert(response.data.message);
-        
-        // Reload after a short delay to show new engine
-        setTimeout(() => {
-          loadCachedEngine();
-        }, 2000);
-      } else {
-        alert('Failed to clear cache: ' + (response.data.error || 'Unknown error'));
-      }
-    } catch (error) {
-      console.error('Failed to clear engine cache:', error);
-      alert('Failed to clear cache: ' + (error.response?.data?.error || error.message));
-    } finally {
-      setClearingCache(false);
+  const runBenchmark = async () => {
+    if (!accountId) {
+      alert('Account ID required for benchmark');
+      return;
     }
+    
+    setBenchmarkRunning(true);
+    setBenchmarkResults(null);
+    
+    try {
+      // Simple Benchmark API - guaranteed to work
+      const response = await API.post(`/api/m3u/benchmark/${accountId}/run/`);
+      setBenchmarkResults(response.data);
+      // Refresh cached data
+      loadCachedBenchmark();
+    } catch (error) {
+      console.error('Benchmark failed:', error);
+      setBenchmarkResults({ error: error.response?.data?.error || error.message || 'Benchmark failed' });
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  };
+  
+  const clearBenchmark = async () => {
+    if (!accountId) return;
+    try {
+      // Simple Benchmark API - clear cache
+      await API.delete(`/api/m3u/benchmark/${accountId}/clear/`);
+      setCachedBenchmark(null);
+      setBenchmarkResults(null);
+    } catch (error) {
+      console.error('Failed to clear benchmark:', error);
+    }
+  };
+  
+  const refreshAutoCache = async () => {
+    if (!accountId) return;
+    // Einfach neu laden
+    loadCachedBenchmark();
   };
 
   return (
@@ -216,82 +220,212 @@ const PortalEngineSelector = ({ value, onChange, disabled = false, accountId = n
         </Text>
       </Paper>
       
-      {/* Engine Cache Section (AUTO Mode) */}
-      {accountId && value === 'auto' && (
+      {/* Benchmark Section */}
+      {accountId && (
         <Paper withBorder p="md">
           <Group justify="space-between" mb="sm">
             <Group gap="xs">
-              <ThemeIcon color="green" variant="light" size="lg">
-                <IconRocket size={20} />
+              <ThemeIcon color="yellow" variant="light" size="lg">
+                <IconBolt size={20} />
               </ThemeIcon>
               <div>
-                <Text fw={500}>Cached Engine (AUTO Mode)</Text>
+                <Text fw={500}>Engine Benchmark</Text>
                 <Text size="xs" c="dimmed">
-                  The engine that worked for this portal (persists until manually cleared)
+                  Test all engines and find the fastest one for this portal
                 </Text>
               </div>
             </Group>
-            <Button
-              size="xs"
-              variant="light"
-              color="orange"
-              leftSection={clearingCache ? <Loader size={14} /> : <IconTrash size={14} />}
-              onClick={clearAndRefreshEngineCache}
-              disabled={clearingCache || !cachedEngine}
-              loading={clearingCache}
-            >
-              {clearingCache ? 'Clearing...' : 'Clear & Refresh'}
-            </Button>
+            <Group gap="xs">
+              <Button
+                size="xs"
+                variant="light"
+                color="red"
+                leftSection={<IconTrash size={14} />}
+                onClick={clearBenchmark}
+                disabled={benchmarkRunning || (!cachedBenchmark?.has_benchmark && !benchmarkResults)}
+              >
+                Clear
+              </Button>
+              <Button
+                size="xs"
+                leftSection={benchmarkRunning ? <Loader size={14} /> : <IconPlayerPlay size={14} />}
+                onClick={runBenchmark}
+                disabled={benchmarkRunning}
+                loading={benchmarkRunning}
+              >
+                {benchmarkRunning ? 'Running...' : 'Run Benchmark'}
+              </Button>
+            </Group>
           </Group>
           
-          {cachedEngine ? (
-            <Alert color="green" variant="light">
+          {/* Cached Auto Engine Info */}
+          {cachedBenchmark?.cached_auto_engine && !benchmarkResults && (
+            <Alert color="cyan" variant="light" mb="sm">
+              <Group justify="space-between">
+                <Group gap="xs">
+                  <IconCheck size={16} />
+                  <Text size="sm">
+                    Auto-detected engine: <strong>{cachedBenchmark.cached_auto_engine}</strong>
+                    {' '}(cached indefinitely until refresh)
+                  </Text>
+                </Group>
+                <Button size="xs" variant="subtle" color="cyan" onClick={refreshAutoCache}>
+                  Refresh
+                </Button>
+              </Group>
+            </Alert>
+          )}
+          
+          {/* Cached Benchmark Info */}
+          {cachedBenchmark?.has_benchmark && !benchmarkResults && (
+            <Alert color="green" variant="light" mb="sm">
               <Group gap="xs">
                 <IconCheck size={16} />
                 <Text size="sm">
-                  Cached engine: <strong>{cachedEngine.toUpperCase()}</strong>
+                  Fastest engine (benchmark): <strong>{cachedBenchmark.fastest_engine?.engine}</strong>
+                  {' '}({cachedBenchmark.fastest_engine?.time_ms}ms, {cachedBenchmark.fastest_engine?.channels} channels)
+                  {cachedBenchmark.fastest_engine?.stream_link_ok && (
+                    <Badge size="xs" color="green" ml="xs">Stream Link ✓</Badge>
+                  )}
                 </Text>
               </Group>
               <Text size="xs" c="dimmed" mt="xs">
-                This engine will be used for all connections until cache is cleared.
-                Click "Clear & Refresh" to detect a new engine.
+                Tested: {new Date(cachedBenchmark.fastest_engine?.tested_at).toLocaleString()}
+                {' '}(cached indefinitely until new benchmark)
               </Text>
             </Alert>
-          ) : (
-            <Alert color="blue" variant="light">
-              <Text size="sm">
-                No cached engine yet. Will auto-detect on next connection.
+          )}
+          
+          {/* Benchmark Results */}
+          {benchmarkResults && !benchmarkResults.error && (
+            <Stack gap="sm">
+              <Alert color="blue" variant="light">
+                <Text size="sm">
+                  <strong>Summary:</strong> {benchmarkResults.summary?.successful}/{benchmarkResults.summary?.total_tested} engines worked,
+                  {' '}{benchmarkResults.summary?.with_stream_link || 0} with stream link
+                  {benchmarkResults.fastest && (
+                    <> — Fastest: <strong>{benchmarkResults.fastest}</strong> ({benchmarkResults.summary?.fastest_time_ms}ms)
+                    {benchmarkResults.summary?.fastest_has_stream_link && (
+                      <Badge size="xs" color="green" ml="xs">Stream Link ✓</Badge>
+                    )}
+                    </>
+                  )}
+                </Text>
+                {benchmarkResults.portal_info && benchmarkResults.portal_info.portal_type !== 'unknown' && (
+                  <Text size="sm" mt="xs">
+                    <strong>Portal Type:</strong> {benchmarkResults.portal_info.portal_type.toUpperCase()}
+                    {benchmarkResults.portal_info.portal_version && (
+                      <> (v{benchmarkResults.portal_info.portal_version})</>
+                    )}
+                    {benchmarkResults.portal_info.detected_by && (
+                      <Text size="xs" c="dimmed" component="span"> — detected by {benchmarkResults.portal_info.detected_by}</Text>
+                    )}
+                  </Text>
+                )}
+              </Alert>
+              
+              <Text size="xs" c="dimmed">
+                Tests: Handshake → Genres → Channels → Stream Link → Portal Type Detection
               </Text>
+              
+              <Table striped highlightOnHover withTableBorder size="sm">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>Engine</Table.Th>
+                    <Table.Th>Status</Table.Th>
+                    <Table.Th>Stream Link</Table.Th>
+                    <Table.Th>Time</Table.Th>
+                    <Table.Th>Channels</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {benchmarkResults.results?.map((result) => (
+                    <Table.Tr key={result.engine}>
+                      <Table.Td>
+                        <Group gap="xs">
+                          {result.engine}
+                          {result.engine === benchmarkResults.fastest && (
+                            <Badge size="xs" color="yellow">Fastest</Badge>
+                          )}
+                          {result.full_success && (
+                            <Badge size="xs" color="green">Full</Badge>
+                          )}
+                        </Group>
+                      </Table.Td>
+                      <Table.Td>
+                        {result.success ? (
+                          <Badge color="green" size="sm" leftSection={<IconCheck size={12} />}>
+                            OK
+                          </Badge>
+                        ) : (
+                          <Badge color="red" size="sm" leftSection={<IconX size={12} />}>
+                            Failed
+                          </Badge>
+                        )}
+                      </Table.Td>
+                      <Table.Td>
+                        {result.stream_link_ok ? (
+                          <Badge color="green" size="sm" leftSection={<IconCheck size={12} />}>
+                            OK
+                          </Badge>
+                        ) : result.success ? (
+                          <Badge color="yellow" size="sm" leftSection={<IconX size={12} />}>
+                            No
+                          </Badge>
+                        ) : (
+                          <Text size="xs" c="dimmed">-</Text>
+                        )}
+                      </Table.Td>
+                      <Table.Td>
+                        {result.success ? `${result.time_ms}ms` : '-'}
+                      </Table.Td>
+                      <Table.Td>
+                        {result.success ? result.channels : (
+                          <Text size="xs" c="dimmed">{result.error?.substring(0, 25)}</Text>
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </Stack>
+          )}
+          
+          {benchmarkResults?.error && (
+            <Alert color="red" variant="light">
+              <Text size="sm">Benchmark failed: {benchmarkResults.error}</Text>
             </Alert>
           )}
         </Paper>
       )}
-      
 
       <Alert icon={<IconInfoCircle size={16} />} color="blue" variant="light">
         <Text size="sm">
           <strong>Engine Comparison:</strong>
         </Text>
         <Text size="xs" mt="xs">
-          • <strong>Auto-Detect:</strong> Automatically detects working engine and caches it (recommended for most users)
+          • <strong>Auto-Detect:</strong> Tries engines in order, stops at first working one
         </Text>
         <Text size="xs">
-          • <strong>AllinOne:</strong> Best-of-All - combines all techniques (prehash, signature, api_signature 263, UA rotation)
+          • <strong>Fastest:</strong> Uses benchmarked fastest engine (run benchmark first!)
+        </Text>
+        <Text size="xs">
+          • <strong>AllinOne:</strong> Best-of-All - combines prehash, signature, api_signature 263, UA rotation
         </Text>
         <Text size="xs">
           • <strong>MacReplayXC:</strong> Standard strategy, works with most portals
         </Text>
         <Text size="xs">
-          • <strong>EStalker:</strong> Enigma2 style with extended metrics (MAG254)
+          • <strong>EStalker:</strong> Better for portals requiring extended metrics (MAG254)
         </Text>
         <Text size="xs">
-          • <strong>BoxPirate:</strong> Dreambox-style with signature authentication
+          • <strong>BoxPirate:</strong> Dreambox-style, uses signature authentication
         </Text>
         <Text size="xs">
-          • <strong>OB2_2025:</strong> Extended checking logic with api_signature 263
+          • <strong>OB2_2025:</strong> Experimental, uses api_signature 263
         </Text>
         <Text size="xs">
-          • <strong>iSTB:</strong> iOS Emulator style (api_signature 263, prehash, metrics)
+          • <strong>iSTB:</strong> iOS Emulator style, api_signature 263, prehash, metrics
         </Text>
         <Text size="xs">
           • <strong>MacAttack:</strong> X-Random header, api_sig 262, auth_second_step 1

@@ -73,11 +73,14 @@ class MACRotationManager:
         from apps.m3u.mac_portal_models import MACCooldown
         return MACCooldown.is_mac_in_cooldown(mac)
     
+    def _get_health_score(self, mac) -> int:
+        """Get health score for a MAC."""
+        from apps.m3u.mac_portal_models import MACHealthRecord
+        return MACHealthRecord.get_health_score(mac)
+    
     def get_next_mac(self) -> Optional[object]:
         """
         Get next available MAC, excluding those in cooldown.
-        
-        Uses priority-based selection: MACs are sorted by priority (0 = highest).
         
         Requirements: 23.1, 23.2
         """
@@ -96,14 +99,31 @@ class MACRotationManager:
                 if mac.status in ['expired', 'error', 'blocked']:
                     logger.debug(f"MAC {mac.address} has status {mac.status}, skipping")
                     continue
+                # Allow 'unknown' and 'valid' status MACs, but they'll get appropriate health scores
                 available.append(mac)
             
             if not available:
                 logger.warning(f"No available MACs for account {self.account_id} (all in cooldown or bad status)")
                 return None
             
-            # Return first available MAC (already sorted by priority)
-            return available[0]
+            # Always use priority-order selection (health-based)
+            return self._select_by_priority(available)
+    
+    def _select_by_priority(self, available: List) -> object:
+        """
+        Select MAC by priority order with health score consideration.
+        MACs are already sorted by priority in _get_all_macs().
+        
+        Requirements: 23.1
+        """
+        # Get health scores for all available MACs
+        mac_scores = [(mac, self._get_health_score(mac)) for mac in available]
+        
+        # Sort by health score (descending), then by priority (ascending)
+        mac_scores.sort(key=lambda x: (-x[1], x[0].priority))
+        
+        # Return MAC with highest score and best priority
+        return mac_scores[0][0]
 
     def report_failure(self, mac, error_type: str = "failure", error_message: str = ""):
         """
@@ -111,7 +131,10 @@ class MACRotationManager:
         
         Requirements: 23.3, 46.1, 46.2
         """
-        from apps.m3u.mac_portal_models import MACCooldown
+        from apps.m3u.mac_portal_models import MACHealthRecord, MACCooldown
+        
+        # Record the failure
+        MACHealthRecord.record_failure(mac, error_message=error_message)
         
         # Determine cooldown duration based on error type
         if error_type in ['block', 'device_conflict']:
@@ -139,6 +162,11 @@ class MACRotationManager:
         
         Requirements: 49.1
         """
+        from apps.m3u.mac_portal_models import MACHealthRecord
+        
+        # Record the success
+        MACHealthRecord.record_success(mac, response_time_ms=response_time_ms, endpoint_used=endpoint_used)
+        
         # Update MAC status if needed
         if mac.status != 'valid':
             mac.status = 'valid'
@@ -158,13 +186,15 @@ class MACRotationManager:
     
     def get_mac_status(self, mac) -> Dict:
         """Get detailed status for a MAC."""
-        from apps.m3u.mac_portal_models import MACCooldown
+        from apps.m3u.mac_portal_models import MACCooldown, MACHealthRecord
         
         cooldown = MACCooldown.get_active_cooldown(mac)
+        health_score = MACHealthRecord.get_health_score(mac)
         
         return {
             'address': mac.address,
             'status': mac.status,
+            'health_score': health_score,
             'in_cooldown': cooldown is not None,
             'cooldown_remaining': cooldown.remaining_seconds if cooldown else 0,
             'cooldown_reason': cooldown.reason if cooldown else None,

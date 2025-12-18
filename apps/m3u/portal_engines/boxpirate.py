@@ -67,10 +67,6 @@ class BoxPirateStrategy(BasePortalStrategy):
                     
                     if token:
                         logger.info(f"BoxPirate: Handshake successful via {endpoint}")
-                        
-                        # Update cache on success
-                        self._update_engine_cache()
-                        
                         return HandshakeResult(
                             success=True,
                             token=token,

@@ -299,9 +299,6 @@ class iSTBStrategy(BasePortalStrategy):
             # Extract expiry info
             expire_date = profile_data.get("phone", "") or profile_data.get("expire_billing_date", "")
             
-            # Update cache on success
-            self._update_engine_cache()
-            
             return HandshakeResult(
                 success=True,
                 token=self._token,

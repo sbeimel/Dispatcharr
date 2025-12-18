@@ -567,8 +567,6 @@ class StreamManager:
         - Auto-expires after 1 hour (safety net)
         
         This is different from COOLDOWN which means MAC failed and shouldn't be retried.
-        
-        NOTE: This extends the BUSY flag that was pre-set during URL generation.
         """
         try:
             if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
@@ -584,8 +582,7 @@ class StreamManager:
             if not mac_entry:
                 return
 
-            # Extend the BUSY flag (was pre-set with 10s expiry during URL generation)
-            # Now extend it to 1 hour since stream is actually running
+            # Mark as busy in Redis with expiry (safety net - auto-clears if stream crashes)
             busy_key = RedisKeys.mac_busy(mac_entry.id)
             self.buffer.redis_client.setex(busy_key, 3600, '1')  # 1 hour max
             
@@ -593,10 +590,10 @@ class StreamManager:
             self.mac_address = mac_address
             self.mac_entry_id = mac_entry.id
             
-            logger.debug(f"Extended BUSY flag for MAC {mac_address} (id={mac_entry.id}) to 1 hour for channel {self.channel_id}")
+            logger.debug(f"Marked MAC {mac_address} (id={mac_entry.id}) as BUSY for channel {self.channel_id}")
             
         except Exception as e:
-            logger.debug(f"Failed to extend MAC busy flag for channel {self.channel_id}: {e}")
+            logger.debug(f"Failed to mark MAC as busy for channel {self.channel_id}: {e}")
 
     def _clear_mac_busy_status(self):
         """Clear the busy status for the current MAC address."""
@@ -1325,9 +1322,6 @@ class StreamManager:
         # Add at the beginning of your stop method
         self.stopping = True
 
-        # Clear MAC busy status when stopping
-        self._clear_mac_busy_status()
-
         # Release stream resources if we're the owner
         if self.current_stream_id and hasattr(self, 'worker_id') and self.worker_id:
             if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
@@ -1418,19 +1412,6 @@ class StreamManager:
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:
                 logger.debug(f"Closing transcode process before URL change for channel {self.channel_id}")
-                # Give FFmpeg time to flush its buffers before closing
-                if self.transcode_process and self.transcode_process.poll() is None:
-                    try:
-                        # Send SIGTERM first for graceful shutdown
-                        self.transcode_process.terminate()
-                        # Wait briefly for graceful termination
-                        gevent.sleep(0.1)
-                        # Force kill if still running
-                        if self.transcode_process.poll() is None:
-                            self.transcode_process.kill()
-                            gevent.sleep(0.05)
-                    except Exception as e:
-                        logger.debug(f"Error during graceful FFmpeg shutdown: {e}")
                 self._close_socket()
             else:
                 logger.debug(f"Closing HTTP connection before URL change for channel {self.channel_id}")
@@ -1457,10 +1438,8 @@ class StreamManager:
                 self.current_profile_id = m3u_profile_id
                 logger.info(f"Updated profile ID from {old_profile_id} to {m3u_profile_id} for channel {self.channel_id}")
 
-            # Small delay to ensure clean state after closing old connection
-            # This prevents "Broken pipe" errors when switching streams
-            gevent.sleep(0.25)
-  
+            # Reset retry counter to allow immediate reconnect
+            self.retry_count = 0
 
             # Intelligent buffer clearing decision
             # Clear buffer if:

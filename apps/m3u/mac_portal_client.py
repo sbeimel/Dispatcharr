@@ -1474,12 +1474,22 @@ class UnifiedMacPortalClient:
     # None means no expiration in Django cache
     ENGINE_CACHE_TIMEOUT = None
     
+    # Cache timeout for fastest engine benchmark - UNLIMITED (until new benchmark)
+    FASTEST_ENGINE_CACHE_TIMEOUT = None
+    
     @staticmethod
     def _get_engine_cache_key(portal_url: str) -> str:
         """Generate cache key for portal engine."""
         import hashlib
         url_hash = hashlib.md5(portal_url.encode()).hexdigest()[:16]
         return f"portal_engine:{url_hash}"
+    
+    @staticmethod
+    def _get_fastest_engine_cache_key(portal_url: str) -> str:
+        """Generate cache key for fastest benchmarked engine."""
+        import hashlib
+        url_hash = hashlib.md5(portal_url.encode()).hexdigest()[:16]
+        return f"fastest_engine:{url_hash}"
     
     @staticmethod
     def get_cached_engine(portal_url: str) -> Optional[str]:
@@ -1501,6 +1511,35 @@ class UnifiedMacPortalClient:
         cache_key = UnifiedMacPortalClient._get_engine_cache_key(portal_url)
         cache.delete(cache_key)
         logger.info(f"Cleared cached engine for portal {portal_url[:50]}...")
+    
+    @staticmethod
+    def get_fastest_engine(portal_url: str) -> Optional[Dict[str, Any]]:
+        """Get fastest benchmarked engine for portal URL.
+        
+        Returns:
+            Dict with 'engine', 'time_ms', 'channels', 'tested_at' or None
+        """
+        cache_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(portal_url)
+        return cache.get(cache_key)
+    
+    @staticmethod
+    def set_fastest_engine(portal_url: str, engine_name: str, time_ms: float, channels: int,
+                          stream_link_ok: bool = False, full_success: bool = False):
+        """Cache fastest benchmarked engine for portal URL (unlimited duration until new benchmark)."""
+        from django.utils import timezone
+        
+        cache_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(portal_url)
+        data = {
+            'engine': engine_name,
+            'time_ms': time_ms,
+            'channels': channels,
+            'stream_link_ok': stream_link_ok,
+            'full_success': full_success,
+            'tested_at': timezone.now().isoformat(),
+        }
+        # None = unlimited cache duration (until manually cleared or new benchmark)
+        cache.set(cache_key, data, UnifiedMacPortalClient.FASTEST_ENGINE_CACHE_TIMEOUT)
+        logger.info(f"Cached fastest engine '{engine_name}' ({time_ms:.0f}ms, {channels} ch, link={stream_link_ok}) for portal {portal_url[:50]}...")
     
     @staticmethod
     def benchmark_all_engines(portal_url: str, mac: str, proxy: Optional[str] = None) -> Dict[str, Any]:
@@ -1553,7 +1592,6 @@ class UnifiedMacPortalClient:
                 'error': None,
             }
             
-            client = None
             try:
                 logger.info(f"Benchmark: Testing engine '{engine_name}'...")
                 
@@ -1793,21 +1831,6 @@ class UnifiedMacPortalClient:
             except Exception as e:
                 result['error'] = str(e)[:100]
                 logger.warning(f"Benchmark: '{engine_name}' failed: {e}")
-            finally:
-                # MEMORY FIX: Close strategy session after each test to prevent memory leaks
-                if client and hasattr(client, 'close'):
-                    try:
-                        client.close()
-                        logger.debug(f"Benchmark: Closed session for engine '{engine_name}'")
-                    except Exception as e:
-                        logger.debug(f"Benchmark: Error closing session for '{engine_name}': {e}")
-                elif client and hasattr(client, 'session'):
-                    try:
-                        client.session.close()
-                        logger.debug(f"Benchmark: Closed session for engine '{engine_name}'")
-                    except Exception as e:
-                        logger.debug(f"Benchmark: Error closing session for '{engine_name}': {e}")
-                del client
             
             results.append(result)
         
@@ -1843,14 +1866,6 @@ class UnifiedMacPortalClient:
                    f"{summary['with_stream_link']} with stream link, fastest: {fastest_engine}, "
                    f"portal_type: {portal_info['portal_type']}")
         
-        # CLEANUP: Force memory cleanup after benchmark to prevent memory buildup
-        try:
-            from core.utils import cleanup_memory
-            cleanup_memory(log_usage=True, force_collection=True)
-            logger.info("Benchmark: Memory cleanup completed")
-        except Exception as e:
-            logger.debug(f"Benchmark: Memory cleanup failed: {e}")
-        
         return {
             'results': results,
             'fastest': fastest_engine,
@@ -1883,26 +1898,6 @@ class UnifiedMacPortalClient:
         self._successful_engine = None  # Track which engine worked
         self._original_engine_mode = self.portal_engine  # Remember original setting
         self._is_fastest_mode = False  # Track if we're using fastest mode
-    
-    def __del__(self):
-        """Cleanup strategy session on destruction to prevent memory leaks."""
-        self.close()
-    
-    def close(self):
-        """Explicitly close strategy session to free resources."""
-        if self._engine_client and hasattr(self._engine_client, 'close'):
-            try:
-                self._engine_client.close()
-                logger.debug("UnifiedMacPortalClient: Closed engine strategy session")
-            except Exception as e:
-                logger.debug(f"UnifiedMacPortalClient: Error closing engine session: {e}")
-        elif self._engine_client and hasattr(self._engine_client, 'session'):
-            try:
-                self._engine_client.session.close()
-                logger.debug("UnifiedMacPortalClient: Closed engine strategy session")
-            except Exception as e:
-                logger.debug(f"UnifiedMacPortalClient: Error closing engine session: {e}")
-        self._engine_client = None
         
         # Handle "fastest" mode - use benchmarked engine if available, else fall back to auto
         if self.portal_engine == 'fastest':
@@ -2001,7 +1996,6 @@ class UnifiedMacPortalClient:
         cached_engine = self.get_cached_engine(self.base_url)
         if cached_engine:
             logger.info(f"AUTO: Using cached engine '{cached_engine}' for {self.base_url[:50]}...")
-            client = None
             try:
                 client = create_engine(
                     engine_name=cached_engine,
@@ -2014,7 +2008,6 @@ class UnifiedMacPortalClient:
                     if raw_channels and len(raw_channels) > 0:
                         self._successful_engine = cached_engine
                         self._engine_client = client
-                        client = None  # Don't delete successful client
                         logger.info(f"AUTO: Cached engine '{cached_engine}' SUCCESS - {len(raw_channels)} channels")
                         return self._normalize_channels(raw_channels)
                     else:
@@ -2023,27 +2016,11 @@ class UnifiedMacPortalClient:
             except Exception as e:
                 logger.warning(f"AUTO: Cached engine '{cached_engine}' failed: {e}, clearing cache")
                 self.clear_cached_engine(self.base_url)
-            finally:
-                # MEMORY FIX: Close failed cached engine session
-                if client and hasattr(client, 'close'):
-                    try:
-                        client.close()
-                        logger.debug(f"AUTO: Closed failed cached engine session for '{cached_engine}'")
-                    except Exception:
-                        pass
-                elif client and hasattr(client, 'session'):
-                    try:
-                        client.session.close()
-                        logger.debug(f"AUTO: Closed failed cached engine session for '{cached_engine}'")
-                    except Exception:
-                        pass
-                del client
         
         # No cache or cache failed - try all engines in order
         logger.info(f"AUTO mode: Trying engines in order: {self.AUTO_ENGINE_ORDER}")
         
         for engine_name in self.AUTO_ENGINE_ORDER:
-            client = None
             try:
                 logger.info(f"AUTO: Trying engine '{engine_name}'...")
                 
@@ -2065,7 +2042,6 @@ class UnifiedMacPortalClient:
                 if raw_channels and len(raw_channels) > 0:
                     self._successful_engine = engine_name
                     self._engine_client = client  # Keep for later use (genres, expiry)
-                    client = None  # Don't delete successful client
                     
                     # Cache successful engine for future requests
                     self.set_cached_engine(self.base_url, engine_name)
@@ -2078,21 +2054,6 @@ class UnifiedMacPortalClient:
             except Exception as e:
                 logger.warning(f"AUTO: Engine '{engine_name}' failed: {e}")
                 continue
-            finally:
-                # MEMORY FIX: Close failed strategy session to prevent memory leaks
-                if client and hasattr(client, 'close'):
-                    try:
-                        client.close()
-                        logger.debug(f"AUTO: Closed failed session for engine '{engine_name}'")
-                    except Exception:
-                        pass
-                elif client and hasattr(client, 'session'):
-                    try:
-                        client.session.close()
-                        logger.debug(f"AUTO: Closed failed session for engine '{engine_name}'")
-                    except Exception:
-                        pass
-                del client
         
         # All engines failed - try MacPortalClient as last resort
         logger.warning("AUTO: All engines failed, trying MacPortalClient fallback")

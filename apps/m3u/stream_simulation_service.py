@@ -102,12 +102,20 @@ class StreamSimulationService:
         except ValueError:
             error_enum = ErrorType.STREAM_ERROR
         
-        # Failover test service removed - this functionality is deprecated
-        # Use manual failover test (kill_stream) in proxy/views.py instead
-        return {
-            'success': False,
-            'error': 'Failover test service removed - use manual failover test (kill_stream) instead',
-        }
+        # Trigger failover through the FailoverManager
+        from apps.m3u.failover_test_service import get_failover_test_service, LogEntry
+        
+        service = get_failover_test_service()
+        channel = service.get_test_channel(channel_id)
+        
+        if not channel:
+            return {
+                'success': False,
+                'error': f"Channel {channel_id} not found",
+            }
+        
+        # Execute failover test
+        result = self._execute_failover_test(channel, error_enum)
         
         duration_ms = int((time.time() - start_time) * 1000)
         

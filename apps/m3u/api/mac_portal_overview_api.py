@@ -163,10 +163,13 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'cooldown_macs': 0,
                     'expired_macs': 0,
                     'expiring_soon': 0,
+                    'avg_health_score': 0,
                     'total_active_streams': 0,
                     'total_failovers_24h': 0,
                 }
             }
+            
+            health_scores = []
             
             for portal in portals:
                 portal_data = self._get_portal_data(portal)
@@ -198,6 +201,15 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                         result['statistics']['cooldown_macs'] += 1
                     elif mac_status in ('expired', 'error'):
                         result['statistics']['expired_macs'] += 1
+                    
+                    if mac.get('health_score') is not None:
+                        health_scores.append(mac['health_score'])
+            
+            # Durchschnittlicher Health Score
+            if health_scores:
+                result['statistics']['avg_health_score'] = round(
+                    sum(health_scores) / len(health_scores), 1
+                )
             
             return Response(result)
             
@@ -267,6 +279,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'status': mac_obj.status or 'unknown',
                     'priority': mac_obj.priority,
                     'expiry_date': None,
+                    'health_score': 100,
                     'last_used': mac_obj.last_checked.isoformat() if mac_obj.last_checked else None,
                     'cooldown_until': None,
                     'max_connections': max_conn,
@@ -304,6 +317,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'status': 'unknown',
                     'priority': i,
                     'expiry_date': None,
+                    'health_score': 100,
                     'last_used': None,
                     'cooldown_until': None,
                     'max_connections': 1,
