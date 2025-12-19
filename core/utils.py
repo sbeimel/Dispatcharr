@@ -42,38 +42,58 @@ def natural_sort_key(text):
     return [convert(c) for c in re.split('([0-9]+)', text)]
 
 class RedisClient:
+    _pool = None  # Connection pool for reusing connections
     _client = None
     _pubsub_client = None
 
     @classmethod
+    def _get_pool(cls):
+        """Get or create Redis connection pool for better performance."""
+        if cls._pool is None:
+            redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
+            redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
+            redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
+            
+            # Use standardized settings
+            socket_timeout = getattr(settings, 'REDIS_SOCKET_TIMEOUT', 5)
+            socket_connect_timeout = getattr(settings, 'REDIS_SOCKET_CONNECT_TIMEOUT', 5)
+            health_check_interval = getattr(settings, 'REDIS_HEALTH_CHECK_INTERVAL', 30)
+            socket_keepalive = getattr(settings, 'REDIS_SOCKET_KEEPALIVE', True)
+            retry_on_timeout = getattr(settings, 'REDIS_RETRY_ON_TIMEOUT', True)
+            
+            # Create connection pool with 50 max connections
+            cls._pool = redis.ConnectionPool(
+                host=redis_host,
+                port=redis_port,
+                db=redis_db,
+                max_connections=50,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                socket_keepalive=socket_keepalive,
+                health_check_interval=health_check_interval,
+                retry_on_timeout=retry_on_timeout,
+                decode_responses=False
+            )
+            logger.info(f"Redis connection pool created: {redis_host}:{redis_port}/{redis_db} (max_connections=50)")
+        
+        return cls._pool
+
+    @classmethod
     def get_client(cls, max_retries=5, retry_interval=1):
         if cls._client is None:
+            # Get connection parameters for logging
+            redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
+            redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
+            redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
+            
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    # Get connection parameters from settings or environment
-                    redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
-                    redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
-                    redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
+                    # Get connection pool
+                    pool = cls._get_pool()
 
-                    # Use standardized settings
-                    socket_timeout = getattr(settings, 'REDIS_SOCKET_TIMEOUT', 5)
-                    socket_connect_timeout = getattr(settings, 'REDIS_SOCKET_CONNECT_TIMEOUT', 5)
-                    health_check_interval = getattr(settings, 'REDIS_HEALTH_CHECK_INTERVAL', 30)
-                    socket_keepalive = getattr(settings, 'REDIS_SOCKET_KEEPALIVE', True)
-                    retry_on_timeout = getattr(settings, 'REDIS_RETRY_ON_TIMEOUT', True)
-
-                    # Create Redis client with better defaults
-                    client = redis.Redis(
-                        host=redis_host,
-                        port=redis_port,
-                        db=redis_db,
-                        socket_timeout=socket_timeout,
-                        socket_connect_timeout=socket_connect_timeout,
-                        socket_keepalive=socket_keepalive,
-                        health_check_interval=health_check_interval,
-                        retry_on_timeout=retry_on_timeout
-                    )
+                    # Create Redis client using connection pool
+                    client = redis.Redis(connection_pool=pool)
 
                     # Validate connection with ping
                     client.ping()

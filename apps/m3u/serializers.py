@@ -150,7 +150,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     profiles = M3UAccountProfileSerializer(many=True, read_only=True)
-    macs = M3UAccountMacSerializer(many=True, read_only=True)
+    macs = serializers.SerializerMethodField()
     read_only_fields = ["locked", "created_at", "updated_at"]
     # Separate channel groups by type: live TV vs VOD categories
     channel_groups = serializers.SerializerMethodField()
@@ -364,6 +364,11 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         ).select_related('channel_group')
         
         return ChannelGroupM3UAccountSerializer(vod_series_groups, many=True).data
+    
+    def get_macs(self, obj):
+        """Get MACs sorted by priority (ascending) and then by ID."""
+        macs = obj.macs.all().order_by('priority', 'id')
+        return M3UAccountMacSerializer(macs, many=True).data
 
 
 class ServerGroupSerializer(serializers.ModelSerializer):

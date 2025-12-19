@@ -438,7 +438,7 @@ const M3U = ({
   return (
     <>
       <Modal
-        size={900}
+        size={1200}
         opened={isOpen}
         onClose={close}
         title="M3U Account"
@@ -632,11 +632,12 @@ const M3U = ({
                       <Table striped highlightOnHover withTableBorder withColumnBorders>
                         <Table.Thead>
                           <Table.Tr>
-                            <Table.Th>#</Table.Th>
-                            <Table.Th>MAC</Table.Th>
-                            <Table.Th>Status</Table.Th>
-                            <Table.Th>Valid Until</Table.Th>
-                            <Table.Th>Actions</Table.Th>
+                            <Table.Th style={{ width: '50px' }}>#</Table.Th>
+                            <Table.Th style={{ width: '180px' }}>MAC</Table.Th>
+                            <Table.Th style={{ width: '100px' }}>Status</Table.Th>
+                            <Table.Th style={{ width: '120px' }}>Valid Until</Table.Th>
+                            <Table.Th style={{ width: '100px' }}>Days Left</Table.Th>
+                            <Table.Th style={{ width: '140px' }}>Actions</Table.Th>
                           </Table.Tr>
                         </Table.Thead>
                         <Table.Tbody>
@@ -645,6 +646,36 @@ const M3U = ({
                             if (mac.status === 'valid') color = 'green';
                             if (mac.status === 'expired') color = 'red';
                             if (mac.status === 'error') color = 'orange';
+
+                            // Format date as DD.MM.YYYY
+                            let formattedDate = 'unknown';
+                            let daysLeft = null;
+                            
+                            if (mac.expires_at) {
+                              try {
+                                const expiryDate = new Date(mac.expires_at);
+                                if (!isNaN(expiryDate.getTime())) {
+                                  // Format: DD.MM.YYYY
+                                  const day = String(expiryDate.getDate()).padStart(2, '0');
+                                  const month = String(expiryDate.getMonth() + 1).padStart(2, '0');
+                                  const year = expiryDate.getFullYear();
+                                  formattedDate = `${day}.${month}.${year}`;
+                                  
+                                  // Calculate days left
+                                  const today = new Date();
+                                  today.setHours(0, 0, 0, 0);
+                                  const expiry = new Date(expiryDate);
+                                  expiry.setHours(0, 0, 0, 0);
+                                  const diffTime = expiry - today;
+                                  daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                }
+                              } catch (e) {
+                                // Fallback to expires_text if date parsing fails
+                                formattedDate = mac.expires_text || 'unknown';
+                              }
+                            } else if (mac.expires_text) {
+                              formattedDate = mac.expires_text;
+                            }
 
                             return (
                               <Table.Tr
@@ -656,16 +687,31 @@ const M3U = ({
                                 }
                               >
                                 <Table.Td>{mac.priority + 1}</Table.Td>
-                                <Table.Td>{mac.address}</Table.Td>
+                                <Table.Td style={{ fontFamily: 'monospace', fontSize: '0.9em' }}>
+                                  {mac.address}
+                                </Table.Td>
                                 <Table.Td>
                                   <Badge color={color} size="sm">
                                     {mac.status}
                                   </Badge>
                                 </Table.Td>
+                                <Table.Td>{formattedDate}</Table.Td>
                                 <Table.Td>
-                                  {mac.expires_text ||
-                                    mac.expires_at ||
-                                    'unknown'}
+                                  {daysLeft !== null ? (
+                                    <Badge 
+                                      color={
+                                        daysLeft < 0 ? 'red' : 
+                                        daysLeft < 7 ? 'orange' : 
+                                        daysLeft < 30 ? 'yellow' : 
+                                        'green'
+                                      }
+                                      size="sm"
+                                    >
+                                      {daysLeft < 0 ? `${Math.abs(daysLeft)}d ago` : `${daysLeft}d`}
+                                    </Badge>
+                                  ) : (
+                                    '-'
+                                  )}
                                 </Table.Td>
                                 <Table.Td>
                                   <Group gap="xs" justify="flex-end">

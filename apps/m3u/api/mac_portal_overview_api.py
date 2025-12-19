@@ -163,13 +163,10 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'cooldown_macs': 0,
                     'expired_macs': 0,
                     'expiring_soon': 0,
-                    'avg_health_score': 0,
                     'total_active_streams': 0,
                     'total_failovers_24h': 0,
                 }
             }
-            
-            health_scores = []
             
             for portal in portals:
                 portal_data = self._get_portal_data(portal)
@@ -197,19 +194,8 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                         result['statistics']['available_macs'] += 1
                     elif mac_status == 'in_use':
                         result['statistics']['in_use_macs'] += 1
-                    elif mac_status == 'cooldown':
-                        result['statistics']['cooldown_macs'] += 1
                     elif mac_status in ('expired', 'error'):
                         result['statistics']['expired_macs'] += 1
-                    
-                    if mac.get('health_score') is not None:
-                        health_scores.append(mac['health_score'])
-            
-            # Durchschnittlicher Health Score
-            if health_scores:
-                result['statistics']['avg_health_score'] = round(
-                    sum(health_scores) / len(health_scores), 1
-                )
             
             return Response(result)
             
@@ -223,6 +209,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
     def _get_portal_data(self, portal) -> Dict[str, Any]:
         """Holt alle Daten für ein Portal."""
         from apps.m3u.models import M3UAccountMac
+        from apps.m3u.mac_portal_models import MACPortalGlobalSettings
         
         # Hole Portal-Typ und Version aus custom_properties
         custom_props = portal.custom_properties or {}
@@ -235,6 +222,18 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
         fastest_engine_time_ms = custom_props.get('fastest_engine_time_ms')
         fastest_has_stream_link = custom_props.get('fastest_has_stream_link', False)
         benchmark_date = custom_props.get('benchmark_date')
+        
+        # Hole cached engine aus MACPortalGlobalSettings.engine_cache
+        cached_engine = None
+        engine_cache_date = None
+        try:
+            settings = MACPortalGlobalSettings.get_settings()
+            if settings.engine_cache and portal.server_url:
+                cached_engine = settings.engine_cache.get(portal.server_url)
+                # Try to get cache date from custom_properties if available
+                engine_cache_date = custom_props.get('engine_cache_date')
+        except Exception as e:
+            logger.debug(f"Could not load cached engine for portal {portal.id}: {e}")
         
         # Hole max_connections aus custom_properties
         portal_max_conn = custom_props.get('max_connections', getattr(portal, 'max_streams', 1))
@@ -253,6 +252,9 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
             'fastest_engine_time_ms': fastest_engine_time_ms,
             'fastest_has_stream_link': fastest_has_stream_link,
             'benchmark_date': benchmark_date,
+            # Cached engine from AUTO mode
+            'cached_engine': cached_engine,
+            'engine_cache_date': engine_cache_date,
             'status': 'online' if portal.is_active and getattr(portal, 'status', '') != 'error' else 'offline',
             'last_check': portal.updated_at.isoformat() if portal.updated_at else None,
             'macs': [],
@@ -273,33 +275,32 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                 mac_custom_props = getattr(mac_obj, 'custom_properties', {}) or {}
                 max_conn = mac_custom_props.get('max_connections', 1)
                 
+                # Berechne verbleibende Tage bis Ablauf
+                days_remaining = None
+                if mac_obj.expires_at:
+                    try:
+                        from datetime import datetime
+                        now = timezone.now()
+                        delta = mac_obj.expires_at - now
+                        days_remaining = delta.days
+                        # Wenn negativ, ist abgelaufen
+                        if days_remaining < 0:
+                            days_remaining = 0
+                    except Exception as e:
+                        logger.debug(f"Could not calculate days remaining for MAC {mac_obj.address}: {e}")
+                
                 mac_data = {
                     'id': mac_obj.id,
                     'mac_address': mac_obj.address,
                     'status': mac_obj.status or 'unknown',
                     'priority': mac_obj.priority,
-                    'expiry_date': None,
-                    'health_score': 100,
+                    'expiry_date': mac_obj.expires_at.isoformat() if mac_obj.expires_at else None,
+                    'days_remaining': days_remaining,
                     'last_used': mac_obj.last_checked.isoformat() if mac_obj.last_checked else None,
-                    'cooldown_until': None,
                     'max_connections': max_conn,
-                    'expires_text': getattr(mac_obj, 'expires_text', '') or '',
-                    'last_error': getattr(mac_obj, 'last_error', '') or '',
+                    'expires_text': mac_obj.expires_text or '',
+                    'last_error': mac_obj.last_error or '',
                 }
-                
-                # Versuche Cooldown-Status zu laden
-                try:
-                    from apps.m3u.mac_portal_models import MACCooldown
-                    cooldown = MACCooldown.objects.filter(
-                        mac=mac_obj,
-                        is_active=True,
-                        expires_at__gt=timezone.now()
-                    ).first()
-                    if cooldown:
-                        mac_data['status'] = 'cooldown'
-                        mac_data['cooldown_until'] = cooldown.expires_at.isoformat()
-                except Exception as e:
-                    logger.debug(f"Could not load cooldown for MAC {mac_obj.address}: {e}")
                 
                 portal_data['macs'].append(mac_data)
                 portal_data['mac_count'] += 1
@@ -317,9 +318,7 @@ class MACPortalOverviewViewSet(viewsets.ViewSet):
                     'status': 'unknown',
                     'priority': i,
                     'expiry_date': None,
-                    'health_score': 100,
                     'last_used': None,
-                    'cooldown_until': None,
                     'max_connections': 1,
                 }
                 

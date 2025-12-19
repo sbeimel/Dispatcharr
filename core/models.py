@@ -238,6 +238,7 @@ class CoreSettings(models.Model):
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 5,
+                "max_stream_retries": 3,
             }
 
     @classmethod

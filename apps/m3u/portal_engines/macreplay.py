@@ -51,6 +51,9 @@ class MacReplayStrategy(BasePortalStrategy):
             profile = client.get_profile()
             
             if profile:
+                # Update cache on success
+                self._update_engine_cache()
+                
                 return HandshakeResult(
                     success=True,
                     token=client.token,

@@ -14,6 +14,11 @@ from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 
 
+def get_default_failover_priority():
+    """Helper function for default failover priority - Django can serialize this."""
+    return ['mac', 'useragent', 'endpoint', 'stream']
+
+
 class MACPortalGlobalSettings(models.Model):
     """
     Global settings for MAC Portal functionality.
@@ -26,45 +31,45 @@ class MACPortalGlobalSettings(models.Model):
     connection_timeout = models.IntegerField(
         default=30,
         validators=[MinValueValidator(5), MaxValueValidator(120)],
-        help_text="Connection timeout in seconds (5-120)"
+        help_text="Time to wait for stream connection. After timeout → retry with same stream. Range: 5-120 seconds."
     )
     read_timeout = models.IntegerField(
         default=60,
         validators=[MinValueValidator(10), MaxValueValidator(300)],
-        help_text="Read timeout in seconds (10-300)"
+        help_text="Time to wait for data during stream. After timeout → stream is dead → failover to next MAC/profile. Range: 10-300 seconds."
     )
     
     # Retries (Requirement 45.1)
     max_retries = models.IntegerField(
         default=3,
         validators=[MinValueValidator(1), MaxValueValidator(10)],
-        help_text="Maximum retry attempts (1-10)"
+        help_text="Retries with SAME stream before switching to next MAC/profile. After X retries → failover. Range: 1-10."
     )
     retry_delay = models.IntegerField(
         default=2,
         validators=[MinValueValidator(1), MaxValueValidator(30)],
-        help_text="Base retry delay in seconds (1-30)"
+        help_text="Base delay between retries. With backoff: 2s → 4s → 8s. Range: 1-30 seconds."
     )
     exponential_backoff = models.BooleanField(
         default=True,
-        help_text="Use exponential backoff for retries"
+        help_text="Double delay after each retry (2s → 4s → 8s). Disabled = constant delay."
     )
     
     # Cooldowns (Requirement 46.1)
     mac_cooldown_failure = models.IntegerField(
         default=5,
         validators=[MinValueValidator(1), MaxValueValidator(60)],
-        help_text="MAC cooldown after failure in minutes (1-60)"
+        help_text="Cooldown for individual MAC address after streaming failure (connection lost, timeout). Other MACs in same account remain available. Range: 1-60 minutes."
     )
     mac_cooldown_block = models.IntegerField(
         default=30,
         validators=[MinValueValidator(5), MaxValueValidator(1440)],
-        help_text="MAC cooldown after block in minutes (5-1440)"
+        help_text="Cooldown for individual MAC address when portal blocks it ('Device in use', 'Trial ended', 'MAC blocked'). Other MACs remain available. Range: 5-1440 minutes."
     )
     portal_cooldown_error = models.IntegerField(
         default=10,
         validators=[MinValueValidator(1), MaxValueValidator(120)],
-        help_text="Portal cooldown after error in minutes (1-120)"
+        help_text="Cooldown for entire M3U profile after portal/server error (HTTP 500/503, API errors). All MACs in this profile are affected. Other profiles remain available. Range: 1-120 minutes."
     )
     token_refresh_threshold = models.IntegerField(
         default=80,
@@ -105,9 +110,11 @@ class MACPortalGlobalSettings(models.Model):
         default=True,
         help_text="Enable stream link validation before playback"
     )
+    # DEPRECATED: multi_mac_rotation_enabled - use mac_failover_enabled in FailoverSettings instead
+    # Kept for backwards compatibility with existing database
     multi_mac_rotation_enabled = models.BooleanField(
         default=True,
-        help_text="Enable multi-MAC rotation"
+        help_text="DEPRECATED: Use 'Enable Failover' in Account Failover settings instead."
     )
     token_auto_refresh_enabled = models.BooleanField(
         default=True,
@@ -125,10 +132,8 @@ class MACPortalGlobalSettings(models.Model):
     )
     
     # Unified Portal Engine Selection (Requirement 100.1)
-    # Note: 'unified' was removed as it was identical to 'auto'
     PORTAL_ENGINE_CHOICES = [
-        ('auto', 'Auto-Detect (First Working)'),
-        ('fastest', 'Fastest (Benchmarked per Portal)'),
+        ('auto', 'Auto-Detect (Recommended)'),
         ('allinone', 'AllinOne Best-of-All'),
         ('macreplay', 'MacReplayXC (Standard)'),
         ('estalker', 'EStalker (Enigma2 Style)'),
@@ -141,7 +146,14 @@ class MACPortalGlobalSettings(models.Model):
         max_length=20,
         choices=PORTAL_ENGINE_CHOICES,
         default='auto',
-        help_text="Portal authentication engine to use. 'Fastest' uses benchmarked results per portal."
+        help_text="Portal authentication engine to use. AUTO mode automatically detects and caches the working engine."
+    )
+    
+    # Engine Cache (for AUTO mode intelligent caching)
+    engine_cache = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Cached working engines per portal URL. Format: {portal_url: engine_name}. Persists until manually cleared."
     )
     
     # Parental Control PIN (from migration 0025)
@@ -156,56 +168,58 @@ class MACPortalGlobalSettings(models.Model):
     buffer_chunks = models.IntegerField(
         default=10,
         validators=[MinValueValidator(4), MaxValueValidator(20)],
-        help_text="Buffer size in chunks (4-20, ~250KB per chunk)"
+        help_text="Buffer size (~250KB per chunk). Higher = more stable, but more delay. Recommended: 8-12. Range: 4-20."
     )
     health_check_timeout = models.IntegerField(
         default=10,
         validators=[MinValueValidator(5), MaxValueValidator(30)],
-        help_text="Health check timeout in seconds (5-30)"
+        help_text="ZERO data for X seconds → stream dead → failover. Detects completely dead streams. Recommended: 8-15s. Range: 5-30s."
     )
     health_check_timeout_switching = models.IntegerField(
         default=15,
         validators=[MinValueValidator(10), MaxValueValidator(60)],
-        help_text="Health check timeout during stream switch in seconds (10-60)"
+        help_text="Longer timeout during stream switch (FFmpeg startup). Prevents false failovers. Recommended: 15-20s. Range: 10-60s."
+    )
+    buffering_timeout = models.IntegerField(
+        default=15,
+        validators=[MinValueValidator(5), MaxValueValidator(300)],
+        help_text="Stream below speed for X seconds → failover. 15s=schnell, 30s=normal, 60s=sehr tolerant. Range: 5-300s."
+    )
+    buffering_speed = models.FloatField(
+        default=1.0,
+        validators=[MinValueValidator(0.1), MaxValueValidator(2.0)],
+        help_text="Min speed. 1.0=Echtzeit (streng), 0.8=20% langsamer OK, 0.5=sehr tolerant. Niedriger=weniger Failovers. Range: 0.1-2.0."
     )
     
     # Smart Buffer Clearing (Requirement 102.1)
     smart_buffer_clear_enabled = models.BooleanField(
         default=True,
-        help_text="Enable smart buffer clearing on stream switch (only when codec/resolution changes)"
+        help_text="Only clear buffer when codec/resolution changes. Disabled = always clear on switch (more interruptions)."
     )
     buffer_clear_on_codec_change = models.BooleanField(
         default=True,
-        help_text="Clear buffer when codec changes (e.g., h264 → hevc)"
+        help_text="Clear buffer when codec changes (h264 → hevc). Prevents decoder errors and artifacts."
     )
     buffer_clear_on_resolution_change = models.BooleanField(
         default=True,
-        help_text="Clear buffer when resolution changes (e.g., 720p → 1080p)"
+        help_text="Clear buffer when resolution changes (720p → 1080p). Prevents display glitches."
     )
     legacy_buffer_mode = models.BooleanField(
         default=False,
-        help_text="Use legacy buffer clearing (0.12.0-04 style): always clear buffer on stream switch"
+        help_text="Always clear buffer on stream switch (0.12.0-04 style). Use if smart mode causes playback issues."
     )
     
     # Failover Timeout Settings (Requirement 103.1)
     failover_total_timeout = models.IntegerField(
         default=60,
         validators=[MinValueValidator(10), MaxValueValidator(300)],
-        help_text="Maximum time in seconds to find a working stream before giving up (10-300)"
+        help_text="Max total time for failover search. After timeout → STOP (no working stream found). Range: 10-300 seconds."
     )
-    failover_timeout_action = models.CharField(
-        max_length=20,
-        choices=[
-            ('stop', 'Stop - Give up and show error'),
-            ('loop', 'Loop - Keep trying indefinitely'),
-        ],
-        default='stop',
-        help_text="What to do when failover timeout is reached"
-    )
+    # failover_timeout_action removed - always STOP now
     max_failover_attempts = models.IntegerField(
         default=10,
         validators=[MinValueValidator(1), MaxValueValidator(50)],
-        help_text="Maximum number of stream switch attempts (1-50)"
+        help_text="Max switches between MACs/profiles/backup-streams before giving up. After X attempts → STOP. Range: 1-50."
     )
     
     created_at = models.DateTimeField(auto_now_add=True)
@@ -243,41 +257,51 @@ class FailoverSettings(models.Model):
         HEALTH_BASED = "health_based", "Health Based"
         RANDOM = "random", "Random"
     
-    # Failover Toggles (Requirement 55.1)
+    # Failover Toggles (Requirement 55.1) - applies to MAC AND Profile failover
     mac_failover_enabled = models.BooleanField(
         default=True,
-        help_text="Enable MAC-level failover"
+        help_text="Enable failover to other MACs/profiles on error. Disabled = only use primary MAC/profile."
     )
     portal_failover_enabled = models.BooleanField(
         default=True,
-        help_text="Enable Portal/Endpoint failover"
+        help_text="Enable Portal/Endpoint failover (try different portal endpoints)."
     )
     stream_failover_enabled = models.BooleanField(
         default=True,
-        help_text="Enable Stream-level failover"
+        help_text="Enable backup stream failover (switch to streams from other accounts)."
     )
     endpoint_failover_enabled = models.BooleanField(
         default=True,
-        help_text="Enable Endpoint failover"
+        help_text="Enable Endpoint failover (try different API endpoints)."
     )
     useragent_failover_enabled = models.BooleanField(
         default=False,
-        help_text="Enable User-Agent failover"
+        help_text="Enable User-Agent failover (try different STB models)."
     )
     
-    # MAC Failover Config (Requirement 56.1)
+    # MAC/Profile Failover Config (Requirement 56.1) - applies to both MAC and Profile
     mac_max_attempts = models.IntegerField(
         default=3,
         validators=[MinValueValidator(1), MaxValueValidator(10)],
-        help_text="Maximum MAC failover attempts (1-10)"
+        help_text="Max MACs/profiles to try before backup stream. After X attempts → switch to backup. Range: 1-10."
+    )
+    mac_selection_strategy = models.CharField(
+        max_length=20,
+        choices=MACSelectionStrategy.choices,
+        default=MACSelectionStrategy.HEALTH_BASED,
+        help_text="Strategy for selecting next MAC/profile (round-robin, health-based, random)."
     )
     mac_cooldown_failure = models.IntegerField(
         default=5,
-        help_text="MAC cooldown after failure in minutes"
+        help_text="Cooldown after auth failure (minutes). MAC/profile unavailable for X minutes after error."
     )
     mac_cooldown_block = models.IntegerField(
         default=30,
-        help_text="MAC cooldown after block in minutes"
+        help_text="Cooldown after block (minutes). MAC/profile unavailable for X minutes after 'Device in use' etc."
+    )
+    mac_auto_recovery_interval = models.IntegerField(
+        default=15,
+        help_text="Auto-recovery check interval (minutes). How often to check if cooled-down MACs are available again."
     )
 
     # Portal/Endpoint Failover Config (Requirement 57.1)
@@ -340,7 +364,7 @@ class FailoverSettings(models.Model):
     
     # Failover Priority Order (Requirement 60.1)
     failover_priority = models.JSONField(
-        default=lambda: ['mac', 'useragent', 'endpoint', 'stream'],
+        default=get_default_failover_priority,
         help_text="Order of failover strategies to try"
     )
     
@@ -426,130 +450,6 @@ class VODResumePoint(models.Model):
         remaining = self.duration_seconds - self.position_seconds
         return remaining <= threshold_seconds
 
-
-
-class MACHealthRecord(models.Model):
-    """
-    Tracks MAC address health and history.
-    
-    Requirements: 49.1
-    """
-    
-    class EventType(models.TextChoices):
-        SUCCESS = "success", "Success"
-        FAILURE = "failure", "Failure"
-        COOLDOWN = "cooldown", "Cooldown"
-        BLOCK = "block", "Block"
-        RECOVERY = "recovery", "Recovery"
-        EXPIRED = "expired", "Expired"
-    
-    mac = models.ForeignKey(
-        'M3UAccountMac',
-        on_delete=models.CASCADE,
-        related_name='health_records',
-        help_text="The MAC address this record belongs to"
-    )
-    timestamp = models.DateTimeField(
-        auto_now_add=True,
-        help_text="When this event occurred"
-    )
-    event_type = models.CharField(
-        max_length=20,
-        choices=EventType.choices,
-        help_text="Type of health event"
-    )
-    error_message = models.TextField(
-        blank=True,
-        help_text="Error message if applicable"
-    )
-    response_time_ms = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="Response time in milliseconds"
-    )
-    http_status = models.IntegerField(
-        null=True,
-        blank=True,
-        help_text="HTTP status code if applicable"
-    )
-    endpoint_used = models.CharField(
-        max_length=255,
-        blank=True,
-        help_text="Endpoint that was used"
-    )
-    
-    class Meta:
-        ordering = ['-timestamp']
-        verbose_name = "MAC Health Record"
-        verbose_name_plural = "MAC Health Records"
-        indexes = [
-            models.Index(fields=['mac', 'timestamp']),
-            models.Index(fields=['mac', 'event_type']),
-        ]
-    
-    def __str__(self):
-        return f"{self.mac.address} - {self.event_type} @ {self.timestamp}"
-    
-    @classmethod
-    def record_success(cls, mac, response_time_ms=None, endpoint_used=""):
-        """Record a successful MAC operation."""
-        return cls.objects.create(
-            mac=mac,
-            event_type=cls.EventType.SUCCESS,
-            response_time_ms=response_time_ms,
-            endpoint_used=endpoint_used
-        )
-    
-    @classmethod
-    def record_failure(cls, mac, error_message="", http_status=None, endpoint_used=""):
-        """Record a failed MAC operation."""
-        return cls.objects.create(
-            mac=mac,
-            event_type=cls.EventType.FAILURE,
-            error_message=error_message,
-            http_status=http_status,
-            endpoint_used=endpoint_used
-        )
-    
-    @classmethod
-    def get_health_score(cls, mac, hours=24):
-        """Calculate health score for a MAC based on recent events and status."""
-        from django.db.models import Count
-        
-        # Check MAC status first - defective MACs get low scores regardless of history
-        if hasattr(mac, 'status'):
-            if mac.status in ['error', 'expired']:
-                return 0  # Completely broken MACs
-            elif mac.status == 'unknown':
-                return 10  # Unknown status MACs (untested but suspicious)
-            elif mac.status == 'blocked':
-                return 5   # Blocked MACs
-        
-        since = timezone.now() - timezone.timedelta(hours=hours)
-        
-        events = cls.objects.filter(
-            mac=mac,
-            timestamp__gte=since
-        ).values('event_type').annotate(count=Count('id'))
-        
-        success_count = 0
-        failure_count = 0
-        
-        for event in events:
-            if event['event_type'] == cls.EventType.SUCCESS:
-                success_count = event['count']
-            elif event['event_type'] in [cls.EventType.FAILURE, cls.EventType.BLOCK]:
-                failure_count = event['count']
-        
-        total = success_count + failure_count
-        if total == 0:
-            # No history - return score based on status
-            if hasattr(mac, 'status') and mac.status == 'valid':
-                return 50  # Valid but untested MACs get neutral score
-            else:
-                return 25  # Unknown status with no history gets lower score
-        
-        return int((success_count / total) * 100)
 
 
 class FailoverEvent(models.Model):

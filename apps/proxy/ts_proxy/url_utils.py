@@ -12,6 +12,7 @@ from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
 import requests
+from .mac_state_manager import MACStateManager
 
 logger = get_logger()
 
@@ -96,7 +97,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
             # Get stream URL with the selected profile's URL transformation
-            stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
+            stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern, stream, m3u_account)
 
             # Check if the stream has its own stream_profile set, otherwise use default
             if stream.stream_profile:
@@ -150,7 +151,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 
         # Generate stream URL based on the selected profile
         input_url = stream.url
-        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern, stream, m3u_account)
 
         # Check if transcoding is needed
         stream_profile = channel.get_stream_profile()
@@ -166,16 +167,19 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
         logger.error(f"Error generating stream URL: {e}")
         return None, None, False, None
 
-def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
+def transform_url(input_url: str, search_pattern: str, replace_pattern: str, stream_obj=None, m3u_account_obj=None) -> str:
     """
     Transform a URL using regex pattern replacement.
     
     For MAC portal URLs (mac://...), resolves the URL via create_link API first.
+    IMPORTANT: For MAC accounts, this now uses the failover path to ensure BUSY flag is set.
 
     Args:
         input_url: The base URL to transform
         search_pattern: The regex search pattern
         replace_pattern: The replacement pattern
+        stream_obj: Optional Stream object (needed for MAC failover)
+        m3u_account_obj: Optional M3UAccount object (needed for MAC failover)
 
     Returns:
         str: The transformed URL
@@ -185,10 +189,26 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         if input_url and input_url.startswith("mac://"):
             logger.info(f"Resolving MAC portal URL...")
             try:
-                from apps.m3u.mac_portal_client import MacPortalClient
-                resolved_url = MacPortalClient.resolve_mac_url(input_url)
-                logger.info(f"Resolved MAC URL to: {resolved_url[:80]}...")
-                input_url = resolved_url
+                # CRITICAL FIX: Use failover path for MAC URLs to ensure BUSY flag is set
+                # This prevents multiple streams from using the same MAC simultaneously
+                if stream_obj and m3u_account_obj:
+                    resolved_url, mac_entry, error_msg = _resolve_mac_stream_with_failover(
+                        m3u_account=m3u_account_obj,
+                        stream=stream_obj
+                    )
+                    if resolved_url:
+                        logger.info(f"Resolved MAC URL with BUSY flag to: {resolved_url[:80]}...")
+                        input_url = resolved_url
+                    else:
+                        logger.error(f"Failed to resolve MAC URL via failover: {error_msg}")
+                        raise Exception(f"MAC failover failed: {error_msg}")
+                else:
+                    # CRITICAL: DO NOT use fallback that bypasses BUSY check!
+                    # This would allow multiple streams to use the same MAC simultaneously.
+                    # If we get here, it's a bug in the calling code.
+                    logger.error("MAC URL resolution without stream/account objects - REFUSING to resolve!")
+                    logger.error("This is a BUG: MAC URLs must be resolved with stream/account objects to ensure BUSY flag is checked")
+                    raise Exception("Cannot resolve MAC URL without stream/account objects - BUSY check would be bypassed")
             except Exception as e:
                 logger.error(f"Failed to resolve MAC URL: {e}")
                 raise
@@ -209,7 +229,12 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         return stream_url
     except Exception as e:
         logger.error(f"Error transforming URL: {e}")
-        return input_url  # Return original URL on error
+        # For MAC URLs, we MUST NOT return the original mac:// URL
+        # because FFmpeg cannot handle it - re-raise the exception instead
+        if input_url and input_url.startswith("mac://"):
+            logger.error("Cannot return unresolved mac:// URL - re-raising exception")
+            raise
+        return input_url  # Return original URL on error (only for non-MAC URLs)
 
 def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] = None) -> dict:
     """
@@ -313,7 +338,7 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
         user_agent = m3u_account.get_user_agent().user_agent
 
         # Generate URL using the transform function directly
-        stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern)
+        stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern, stream, m3u_account)
 
         # Get transcode info from the channel's stream profile
         stream_profile = channel.get_stream_profile()
@@ -427,10 +452,32 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                         break
 
                 if selected_profile:
+                    # For MAC accounts, also check if any MACs are available (not all busy)
+                    if m3u_account.account_type == M3UAccount.Types.MAC and redis_client:
+                        try:
+                            # Check if at least one MAC is available (not busy and not in cooldown)
+                            mac_available = False
+                            for mac in m3u_account.macs.all():
+                                busy_key = f"mac:busy:{mac.id}"
+                                cooldown_key = f"mac:cooldown:{mac.id}"
+                                is_busy = redis_client.exists(busy_key)
+                                is_cooldown = redis_client.exists(cooldown_key)
+                                if not is_busy and not is_cooldown:
+                                    mac_available = True
+                                    break
+                            
+                            if not mac_available:
+                                logger.debug(f"Stream {stream.id}: All MACs busy/cooldown for MAC account {m3u_account.id}, skipping")
+                                continue
+                        except Exception as mac_e:
+                            logger.debug(f"Error checking MAC availability for stream {stream.id}: {mac_e}")
+                            # Continue anyway - let transform_url handle it
+                    
                     alternate_streams.append({
                         'stream_id': stream.id,
                         'profile_id': selected_profile.id,
-                        'name': stream.name
+                        'name': stream.name,
+                        'account_type': m3u_account.account_type
                     })
                 else:
                     logger.debug(f"No available profiles for stream ID {stream.id}")
@@ -682,7 +729,8 @@ def _resolve_mac_stream_with_failover(
         return stream.url, None, None
 
     props = m3u_account.custom_properties or {}
-    proxy_value = props.get("proxy")
+    # Proxy is a direct field on M3UAccount, not in custom_properties
+    proxy_value = getattr(m3u_account, 'proxy', None) or props.get("proxy")
     timezone = props.get("timezone", "Europe/Berlin")
 
     # Parse proxy list: support comma, whitespace or newline separated values
@@ -717,7 +765,59 @@ def _resolve_mac_stream_with_failover(
 
     # determine command for the portal
     stream_props = stream.custom_properties or {}
-    cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
+    cmd = stream_props.get("mac_cmd") or stream_props.get("cmd")
+    
+    # CRITICAL FIX: If cmd is not set, extract from mac:// URL or stream.url
+    if not cmd:
+        import re
+        import base64
+        from urllib.parse import urlparse, parse_qs
+        
+        try:
+            # First check if stream.url is a mac:// URL
+            if stream.url and stream.url.startswith("mac://"):
+                # Extract cmd from mac:// URL format: mac://base64(portal_url|mac|cmd|proxy)
+                encoded_data = stream.url[6:]  # Remove "mac://" prefix
+                decoded_data = base64.urlsafe_b64decode(encoded_data).decode()
+                parts = decoded_data.split("|", 3)
+                if len(parts) >= 3:
+                    cmd = parts[2]  # cmd is the third part
+                    logger.debug(f"Extracted cmd '{cmd[:50]}...' from mac:// URL")
+            
+            # If still no cmd, try to extract stream ID from URL query parameters
+            if not cmd:
+                parsed = urlparse(stream.url)
+                qs = parse_qs(parsed.query)
+                stream_id_from_url = qs.get("stream", [None])[0] or qs.get("ch", [None])[0]
+                
+                if stream_id_from_url:
+                    # Check if it's a simple numeric ID or base64-encoded
+                    if stream_id_from_url.isdigit():
+                        cmd = stream_id_from_url
+                        logger.debug(f"Extracted stream ID '{cmd}' from URL for MAC failover")
+                    else:
+                        # It's base64 or complex - try to decode and extract
+                        try:
+                            decoded = base64.b64decode(stream_id_from_url).decode('utf-8')
+                            # Look for stream ID pattern in decoded string
+                            match = re.search(r'/ch/(\d+)', decoded)
+                            if match:
+                                cmd = match.group(1)
+                                logger.debug(f"Extracted stream ID '{cmd}' from base64-encoded URL")
+                            else:
+                                # Fallback: use the original URL
+                                cmd = stream.url
+                                logger.warning(f"Could not extract stream ID from base64, using full URL as cmd")
+                        except Exception:
+                            cmd = stream.url
+                            logger.warning(f"Could not decode base64 stream parameter, using full URL as cmd")
+                else:
+                    # No stream parameter found, use full URL as fallback
+                    cmd = stream.url
+                    logger.debug(f"No stream parameter in URL, using full URL as cmd")
+        except Exception as e:
+            logger.warning(f"Error extracting stream ID from URL: {e}, using full URL as cmd")
+            cmd = stream.url
 
     error_messages = []
 
@@ -744,36 +844,43 @@ def _resolve_mac_stream_with_failover(
         logger.debug(f"Could not check MAC max attempts setting: {e}")
         # Continue with all candidates if settings can't be loaded
 
-    # If Redis is available, prefer MACs that are not currently busy.
-    # Busy MACs should only be used if the stream is already running; at start
-    # they should be skipped. If all MACs are busy, return an error so the
-    # profile/backup stream logic can kick in.
+    # If Redis is available, filter out MACs that are:
+    # 1. BUSY (actively streaming on another channel)
+    # 2. In COOLDOWN (failed recently and need a break)
     if redis_client:
         free_candidates: List[M3UAccountMac] = []
-        busy_candidates: List[M3UAccountMac] = []
+        busy_or_cooldown_candidates: List[M3UAccountMac] = []
         try:
             for m in candidates:
                 try:
-                    busy_key = RedisKeys.mac_busy(m.id)
-                    is_busy = bool(redis_client.exists(busy_key))
+                    # Use MACStateManager to check BUSY and COOLDOWN flags
+                    mac_state = MACStateManager(redis_client)
+                    is_busy = mac_state.is_busy(m.id)
+                    is_cooldown = mac_state.is_in_cooldown(m.id)
+                    
+                    if is_busy or is_cooldown:
+                        busy_or_cooldown_candidates.append(m)
+                        if is_busy:
+                            logger.debug(f"MAC {m.address} (id={m.id}) is BUSY (actively streaming)")
+                        if is_cooldown:
+                            logger.debug(f"MAC {m.address} (id={m.id}) is in COOLDOWN (failed recently)")
+                    else:
+                        free_candidates.append(m)
                 except Exception:
-                    is_busy = False
-                if is_busy:
-                    busy_candidates.append(m)
-                else:
+                    # If check fails, assume MAC is free (fail-safe)
                     free_candidates.append(m)
         except Exception:
             # Fallback: if anything goes wrong, use the original list
             free_candidates = candidates
-            busy_candidates = []
+            busy_or_cooldown_candidates = []
 
         if free_candidates:
             candidates = free_candidates
         elif candidates:
-            # All MACs are busy → don't force it, return error immediately
+            # All MACs are busy or in cooldown → return error
             # so the caller can fall back to backup streams/other profiles.
             logger.warning(
-                "All candidate MACs are currently busy for MAC account %s – skipping MAC usage",
+                "All candidate MACs are currently busy or in cooldown for MAC account %s – skipping MAC usage",
                 m3u_account.id,
             )
             return None, None, "All MACs busy"
@@ -783,6 +890,24 @@ def _resolve_mac_stream_with_failover(
     for mac_entry in candidates:
         mac_value = mac_entry.address
         last_error_for_mac: Optional[str] = None
+        
+        # RACE CONDITION FIX: Set a temporary BUSY flag BEFORE trying to resolve URL
+        # This prevents two streams from selecting the same MAC simultaneously.
+        # The temporary flag expires after 30 seconds if connection fails.
+        # stream_manager.py will set the permanent BUSY flag after connection succeeds.
+        if redis_client:
+            try:
+                mac_state = MACStateManager(redis_client)
+                # Double-check: is this MAC still free? (another stream might have grabbed it)
+                if mac_state.is_busy(mac_entry.id):
+                    logger.debug(f"MAC {mac_value} (id={mac_entry.id}) was grabbed by another stream, skipping")
+                    continue
+                # Set temporary BUSY with 30 second TTL (auto-expires if connection fails)
+                temp_busy_key = f"mac:busy:{mac_entry.id}"
+                redis_client.setex(temp_busy_key, 30, "1")
+                logger.debug(f"MAC {mac_value} (id={mac_entry.id}) temporary BUSY set (30s TTL)")
+            except Exception as e:
+                logger.warning(f"Failed to set temporary BUSY for MAC {mac_value}: {e}")
 
         for proxy in proxy_list:
             try:
@@ -793,6 +918,12 @@ def _resolve_mac_stream_with_failover(
                     timezone=timezone,
                 )
                 url = client.create_link(cmd)
+                
+                # URL successfully resolved!
+                # The temporary BUSY flag (30s TTL) is already set.
+                # stream_manager.py will upgrade it to permanent BUSY after connection succeeds.
+                # If connection fails within 30s, the temporary flag auto-expires.
+                
                 # Successfully built link → mark valid and return
                 try:
                     mac_entry.status = M3UAccountMac.Status.VALID
@@ -805,7 +936,7 @@ def _resolve_mac_stream_with_failover(
                 return url, mac_entry, None
 
             except MacPortalError as e:
-                # MAC-level error (expired / unauthorized / etc.) → mark MAC and stop trying further proxies for it
+                # MAC-level error (expired / unauthorized / blocked / etc.) → mark MAC and stop trying further proxies for it
                 msg = str(e)
                 logger.warning(
                     "MAC portal error for MAC %s on account %s with proxy %s: %s",
@@ -818,8 +949,18 @@ def _resolve_mac_stream_with_failover(
                 last_error_for_mac = msg
                 status = M3UAccountMac.Status.ERROR
                 lowered = msg.lower()
+                
+                # Detect error type for appropriate cooldown
+                is_block_error = False
                 if "expir" in lowered or "no active" in lowered or "trial ended" in lowered:
                     status = M3UAccountMac.Status.EXPIRED
+                elif any(keyword in lowered for keyword in [
+                    "device in use", "device conflict", "already connected",
+                    "mac blocked", "blocked", "banned", "max connections"
+                ]):
+                    is_block_error = True
+                    logger.warning(f"MAC {mac_value}: Block/Device conflict detected")
+                
                 try:
                     mac_entry.status = status
                     mac_entry.last_error = msg
@@ -827,6 +968,18 @@ def _resolve_mac_stream_with_failover(
                     mac_entry.save(update_fields=["status", "last_error", "last_checked"])
                 except Exception:
                     pass
+                
+                # Set COOLDOWN with appropriate duration
+                # Note: No need to clear BUSY flag here since it's not set yet
+                # (BUSY flag is set by stream_manager.py after connection succeeds)
+                if redis_client:
+                    try:
+                        mac_state = MACStateManager(redis_client)
+                        mac_state.mark_cooldown(mac_entry.id, is_block=is_block_error)
+                        cooldown_type = "block (30 min)" if is_block_error else "failure (5 min)"
+                        logger.info(f"MAC {mac_value}: COOLDOWN set ({cooldown_type})")
+                    except Exception:
+                        pass
                 # MAC is obviously not valid → don't try other proxies
                 break
             except Exception as e:
@@ -840,6 +993,8 @@ def _resolve_mac_stream_with_failover(
                     msg,
                 )
                 last_error_for_mac = msg
+                # Note: No need to clear BUSY flag here since it's not set yet
+                # (BUSY flag is set by stream_manager.py after connection succeeds)
                 continue
 
         # If we've tried all proxies and didn't get a URL, but it wasn't a
@@ -883,7 +1038,7 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
                 return {"error": error or "Failed to resolve MAC stream"}
         else:
             input_url = stream.url
-            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+            stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern, stream, m3u_account)
 
         stream_profile = channel.get_stream_profile()
         transcode = False if (stream_profile is None or stream_profile.is_proxy()) else True

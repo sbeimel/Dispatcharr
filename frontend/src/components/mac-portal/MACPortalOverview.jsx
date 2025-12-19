@@ -55,46 +55,61 @@ const API_BASE = '/api/mac-portal';
  */
 const StatusBadge = ({ status }) => {
   const statusConfig = {
-    active: { color: 'green', label: 'Available' },
-    in_use: { color: 'blue', label: 'In Use' },
-    cooldown: { color: 'yellow', label: 'Cooldown' },
-    expired: { color: 'red', label: 'Expired' },
-    blocked: { color: 'red', label: 'Blocked' },
-    unknown: { color: 'gray', label: 'Unknown' },
+    valid: { color: 'green', label: 'Valid', icon: IconCircleCheck },
+    active: { color: 'green', label: 'Valid', icon: IconCircleCheck },
+    in_use: { color: 'blue', label: 'In Use', icon: IconActivity },
+    cooldown: { color: 'yellow', label: 'Cooldown', icon: IconClock },
+    expired: { color: 'red', label: 'Expired', icon: IconCircleX },
+    error: { color: 'orange', label: 'Error', icon: IconAlertTriangle },
+    blocked: { color: 'red', label: 'Blocked', icon: IconCircleX },
+    unknown: { color: 'gray', label: 'Unknown', icon: IconAlertTriangle },
   };
 
   const config = statusConfig[status] || statusConfig.unknown;
+  const Icon = config.icon;
 
   return (
-    <Badge size="sm" color={config.color} variant="outline">
+    <Badge size="sm" color={config.color} variant="outline" leftSection={<Icon size={12} />}>
       {config.label}
     </Badge>
   );
 };
 
 /**
- * Health Score Anzeige
+ * Days Remaining Display (ersetzt Health Score)
  */
-const HealthScore = ({ score }) => {
-  const getColor = (s) => {
-    if (s >= 80) return 'green';
-    if (s >= 50) return 'yellow';
-    return 'red';
+const DaysRemaining = ({ days, expiresText }) => {
+  // Wenn expires_text vorhanden ist, zeige das an
+  if (expiresText && expiresText.trim()) {
+    return (
+      <Text size="sm" c="dimmed">
+        {expiresText}
+      </Text>
+    );
+  }
+
+  // Sonst zeige verbleibende Tage
+  if (days === null || days === undefined) {
+    return <Text size="sm" c="dimmed">-</Text>;
+  }
+
+  const getColor = () => {
+    if (days <= 0) return 'red';
+    if (days <= 7) return 'orange';
+    if (days <= 30) return 'yellow';
+    return 'green';
+  };
+
+  const getText = () => {
+    if (days <= 0) return 'Expired';
+    if (days === 1) return '1 day left';
+    return `${days} days left`;
   };
 
   return (
-    <Group gap="xs">
-      <Progress
-        value={score}
-        color={getColor(score)}
-        size="sm"
-        w={60}
-        radius="xl"
-      />
-      <Text size="sm" c="dimmed">
-        {score}%
-      </Text>
-    </Group>
+    <Badge size="sm" color={getColor()} variant="light">
+      {getText()}
+    </Badge>
   );
 };
 
@@ -130,92 +145,63 @@ const ExpiryCountdown = ({ days }) => {
  */
 const PortalCard = ({ portal, onRefresh }) => {
   const [expanded, setExpanded] = useState(false);
-  const [benchmarking, setBenchmarking] = useState(false);
-  const [fastestEngine, setFastestEngine] = useState(null);
+  const [calibrating, setCalibrating] = useState(false);
 
   const isOnline = portal.status === 'online';
 
-  // Initialize from portal data (comes from overview API)
-  useEffect(() => {
-    if (portal.fastest_engine) {
-      setFastestEngine({
-        engine: portal.fastest_engine,
-        time_ms: portal.fastest_engine_time_ms,
-        stream_link_ok: portal.fastest_has_stream_link,
+  const calibrateAutoMode = async () => {
+    if (!portal.id) return;
+    setCalibrating(true);
+    
+    try {
+      // Step 1: Clear cache
+      notifications.show({
+        id: 'calibrate-progress',
+        title: 'Calibrating AUTO Mode',
+        message: 'Step 1/2: Clearing engine cache...',
+        color: 'blue',
+        loading: true,
+        autoClose: false,
       });
-    }
-  }, [portal.fastest_engine, portal.fastest_engine_time_ms, portal.fastest_has_stream_link]);
-
-  const loadCachedBenchmark = async () => {
-    if (!portal.id) return;
-    try {
-      // New simple benchmark API
-      const response = await API.get(`/api/m3u/benchmark/${portal.id}/result/`);
-      if (response.data?.fastest_engine) {
-        setFastestEngine({
-          engine: response.data.fastest_engine,
-          time_ms: response.data.fastest_engine_time_ms,
-          stream_link_ok: response.data.fastest_has_stream_link,
-        });
-      } else if (response.data?.cached_fastest) {
-        setFastestEngine(response.data.cached_fastest);
-      }
-    } catch (error) {
-      // Ignore errors - benchmark may not exist
-    }
-  };
-
-  const runBenchmark = async () => {
-    if (!portal.id) return;
-    setBenchmarking(true);
-    try {
-      // New simple benchmark API with extended timeout (benchmark can take 2+ minutes)
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
       
-      const response = await API.post(`/api/m3u/benchmark/${portal.id}/run/`, {
-        signal: controller.signal,
+      await API.post(`/api/m3u/clear-engine-cache/${portal.id}/`);
+      
+      // Step 2: Test AUTO mode
+      notifications.update({
+        id: 'calibrate-progress',
+        title: 'Calibrating AUTO Mode',
+        message: 'Step 2/2: Testing engines and finding fastest...',
+        color: 'blue',
+        loading: true,
       });
-      clearTimeout(timeoutId);
-      if (response.data?.fastest) {
-        const timeMs = response.data.summary?.fastest_time_ms;
-        const timeSec = timeMs ? (timeMs / 1000).toFixed(2) : '?';
-        setFastestEngine({
-          engine: response.data.fastest,
-          time_ms: timeMs,
-          stream_link_ok: response.data.summary?.fastest_has_stream_link,
-        });
-        const portalType = response.data.portal_info?.portal_type || 'unknown';
-        notifications.show({
-          title: 'Benchmark Complete',
-          message: `Fastest: ${response.data.fastest} (${timeSec}s)${response.data.summary?.fastest_has_stream_link ? ' ✓' : ''} | Portal: ${portalType.toUpperCase()}`,
-          color: 'green',
-        });
-      } else {
-        notifications.show({
-          title: 'Benchmark Complete',
-          message: 'No working engine found',
-          color: 'yellow',
-        });
-      }
+      
+      const response = await API.post(`/api/m3u/test-auto-mode/${portal.id}/`);
+      const data = response.data;
+      
+      // Show result
+      notifications.update({
+        id: 'calibrate-progress',
+        title: 'Calibration Complete',
+        message: data.success && data.working_engine
+          ? `Best engine: ${data.working_engine} (${data.channels_found} channels)`
+          : 'No working engine found',
+        color: data.success ? 'green' : 'red',
+        loading: false,
+        autoClose: 5000,
+      });
+      
+      if (onRefresh) onRefresh();
     } catch (error) {
-      if (error.name === 'AbortError') {
-        notifications.show({
-          title: 'Benchmark Timeout',
-          message: 'Benchmark took too long. Results may still be saved - try refreshing.',
-          color: 'yellow',
-        });
-        // Try to load cached result anyway
-        loadCachedBenchmark();
-      } else {
-        notifications.show({
-          title: 'Benchmark Failed',
-          message: error.response?.data?.error || error.message || 'Failed to run benchmark',
-          color: 'red',
-        });
-      }
+      notifications.update({
+        id: 'calibrate-progress',
+        title: 'Calibration Failed',
+        message: error.response?.data?.error || error.message || 'Failed to calibrate AUTO mode',
+        color: 'red',
+        loading: false,
+        autoClose: 5000,
+      });
     } finally {
-      setBenchmarking(false);
+      setCalibrating(false);
     }
   };
 
@@ -247,16 +233,15 @@ const PortalCard = ({ portal, onRefresh }) => {
               v{portal.portal_version}
             </Badge>
           )}
-          {fastestEngine && (
+          {portal.cached_engine && (
             <Badge 
               size="sm" 
               variant="light" 
-              color={fastestEngine.stream_link_ok ? "green" : "yellow"} 
+              color="green"
               leftSection={<IconBolt size={12} />}
-              title={`${fastestEngine.stream_link_ok ? "Stream Link OK" : "Stream Link not tested"}${portal.benchmark_date ? ` | Benchmark: ${new Date(portal.benchmark_date).toLocaleDateString()}` : ''}`}
+              title={`Cached working engine${portal.engine_cache_date ? ` | Cached: ${new Date(portal.engine_cache_date).toLocaleDateString()}` : ''}`}
             >
-              {fastestEngine.engine} ({(fastestEngine.time_ms / 1000).toFixed(2)}s)
-              {fastestEngine.stream_link_ok && " ✓"}
+              {portal.cached_engine}
             </Badge>
           )}
         </Group>
@@ -279,15 +264,17 @@ const PortalCard = ({ portal, onRefresh }) => {
               Max {portal.max_connections} Streams
             </Badge>
           )}
-          <ActionIcon 
-            variant="subtle" 
-            color="yellow"
-            onClick={runBenchmark}
-            loading={benchmarking}
-            title="Run Engine Benchmark"
+          <Button
+            size="xs"
+            variant="light"
+            color="blue"
+            onClick={calibrateAutoMode}
+            loading={calibrating}
+            title="Calibrate AUTO mode - clears cache and finds the fastest working engine"
+            leftSection={<IconBolt size={14} />}
           >
-            <IconBolt size={16} />
-          </ActionIcon>
+            Calibrate AUTO
+          </Button>
           <ActionIcon variant="subtle" onClick={() => setExpanded(!expanded)}>
             {expanded ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
           </ActionIcon>
@@ -307,29 +294,40 @@ const PortalCard = ({ portal, onRefresh }) => {
               <Table.Tr>
                 <Table.Th>MAC Address</Table.Th>
                 <Table.Th>Status</Table.Th>
-                <Table.Th>Health</Table.Th>
-                <Table.Th>Expiry</Table.Th>
+                <Table.Th>Days Remaining</Table.Th>
+                <Table.Th>Expiry Date</Table.Th>
                 <Table.Th>Streams</Table.Th>
-                <Table.Th>Activity</Table.Th>
-                <Table.Th>Watchdog</Table.Th>
+                <Table.Th>Last Checked</Table.Th>
+                <Table.Th>Error</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
               {(portal.macs || []).map((mac) => (
                 <Table.Tr key={mac.id}>
                   <Table.Td>
-                    <Text size="sm" ff="monospace">
-                      {mac.mac_address}
-                    </Text>
+                    <Group gap="xs">
+                      <Badge size="xs" variant="light" color="gray">
+                        #{mac.priority + 1}
+                      </Badge>
+                      <Text size="sm" ff="monospace">
+                        {mac.mac_address}
+                      </Text>
+                    </Group>
                   </Table.Td>
                   <Table.Td>
                     <StatusBadge status={mac.status} />
                   </Table.Td>
                   <Table.Td>
-                    <HealthScore score={mac.health_score || 0} />
+                    <DaysRemaining days={mac.days_remaining} expiresText={mac.expires_text} />
                   </Table.Td>
                   <Table.Td>
-                    <ExpiryCountdown days={mac.days_until_expiry} />
+                    {mac.expiry_date ? (
+                      <Text size="sm" c="dimmed">
+                        {new Date(mac.expiry_date).toLocaleDateString()}
+                      </Text>
+                    ) : (
+                      <Text size="sm" c="dimmed">-</Text>
+                    )}
                   </Table.Td>
                   <Table.Td>
                     <Group gap={4}>
@@ -340,17 +338,19 @@ const PortalCard = ({ portal, onRefresh }) => {
                     </Group>
                   </Table.Td>
                   <Table.Td>
-                    {mac.activity_level !== null && mac.activity_level !== undefined ? (
-                      <Badge size="sm" variant="outline">
-                        Level {mac.activity_level}
-                      </Badge>
+                    {mac.last_used ? (
+                      <Text size="sm" c="dimmed">
+                        {new Date(mac.last_used).toLocaleString()}
+                      </Text>
                     ) : (
-                      <Text size="sm" c="dimmed">-</Text>
+                      <Text size="sm" c="dimmed">Never</Text>
                     )}
                   </Table.Td>
                   <Table.Td>
-                    {mac.watchdog_timeout !== null && mac.watchdog_timeout !== undefined ? (
-                      <Text size="sm">{mac.watchdog_timeout}s</Text>
+                    {mac.last_error ? (
+                      <Text size="xs" c="red" lineClamp={1} title={mac.last_error}>
+                        {mac.last_error}
+                      </Text>
                     ) : (
                       <Text size="sm" c="dimmed">-</Text>
                     )}

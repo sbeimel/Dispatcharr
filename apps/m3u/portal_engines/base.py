@@ -163,6 +163,19 @@ class BasePortalStrategy(ABC):
         self._detected_portal_type = "stalker"
         self._detected_portal_version = None
     
+    def __del__(self):
+        """Cleanup session on destruction to prevent memory leaks."""
+        self.close()
+    
+    def close(self):
+        """Explicitly close HTTP session to free resources."""
+        if hasattr(self, 'session') and self.session:
+            try:
+                self.session.close()
+                logger.debug(f"{self.NAME}: Closed HTTP session")
+            except Exception as e:
+                logger.debug(f"{self.NAME}: Error closing session: {e}")
+    
     @property
     def portal_type(self) -> Optional[str]:
         """Return detected portal type for benchmark (stalker, xtream, xui, etc.)."""
@@ -208,6 +221,47 @@ class BasePortalStrategy(ABC):
         if not self.proxy:
             return None
         return {"http": self.proxy, "https": self.proxy}
+    
+    def _get_cached_engine(self) -> Optional[str]:
+        """Get cached working engine for this portal from global settings."""
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            
+            if not settings.engine_cache:
+                return None
+            
+            engine = settings.engine_cache.get(self.portal_url)
+            if engine:
+                logger.info(f"{self.NAME}: Found cached engine '{engine}' for {self.portal_url}")
+            
+            return engine
+            
+        except Exception as e:
+            logger.debug(f"{self.NAME}: Error reading cache: {e}")
+            return None
+    
+    def _update_engine_cache(self):
+        """
+        Update the engine cache on successful handshake.
+        Simple: Just store which engine worked for this portal.
+        Cache persists until manually cleared.
+        """
+        try:
+            from apps.m3u.mac_portal_models import MACPortalGlobalSettings
+            
+            settings = MACPortalGlobalSettings.get_settings()
+            
+            if not settings.engine_cache:
+                settings.engine_cache = {}
+            
+            settings.engine_cache[self.portal_url] = self.NAME
+            settings.save(update_fields=['engine_cache'])
+            
+            logger.info(f"{self.NAME}: Cached as working engine for {self.portal_url}")
+            
+        except Exception as e:
+            logger.debug(f"{self.NAME}: Error updating cache: {e}")
     
     @abstractmethod
     def perform_handshake(self) -> HandshakeResult:
@@ -385,6 +439,88 @@ class BasePortalStrategy(ABC):
         
         return []
 
+    # ============== Account Info Methods ==============
+    
+    def get_expires(self) -> Optional[str]:
+        """
+        Get account expiry information from portal.
+        Uses account_info/get_main_info endpoint, returns 'phone' field.
+        
+        Returns:
+            Expiry date string or None
+        """
+        if not self.identity.token:
+            result = self.perform_handshake()
+            if not result.success:
+                return None
+            self.identity.token = result.token
+        
+        params = {
+            "type": "account_info",
+            "action": "get_main_info",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, self.identity.token, method)
+            if data:
+                try:
+                    js = data.get("js", {})
+                    if isinstance(js, dict):
+                        # Try 'phone' field first (standard STB format)
+                        expires = js.get("phone")
+                        if expires:
+                            logger.info(f"{self.NAME}: Got expiry: {expires}")
+                            return expires
+                        # Try 'expire_date' as fallback
+                        expires = js.get("expire_date")
+                        if expires:
+                            logger.info(f"{self.NAME}: Got expiry from expire_date: {expires}")
+                            return expires
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_expires parse failed: {e}")
+        
+        return None
+    
+    def get_profile(self) -> Optional[Dict[str, Any]]:
+        """
+        Get user profile information from portal.
+        
+        Returns:
+            Profile dict or None
+        """
+        if not self.identity.token:
+            result = self.perform_handshake()
+            if not result.success:
+                return None
+            self.identity.token = result.token
+        
+        params = {
+            "type": "stb",
+            "action": "get_profile",
+        }
+        
+        for method in ["GET", "POST"]:
+            data = self._make_request(params, self.identity.token, method)
+            if data:
+                try:
+                    profile = data.get("js", {})
+                    if profile:
+                        logger.info(f"{self.NAME}: Got profile")
+                        return profile
+                except Exception as e:
+                    logger.debug(f"{self.NAME}: get_profile parse failed: {e}")
+        
+        return None
+    
+    def get_channels(self) -> list:
+        """
+        Alias for get_all_channels() for compatibility.
+        
+        Returns:
+            List of channel dicts
+        """
+        return self.get_all_channels()
+    
     # ============== VOD Methods ==============
     
     def get_genres(self, token: Optional[str] = None) -> list:

@@ -7,7 +7,6 @@ Requirements: 41.1, 41.2, 41.3, 41.4, 100.1
 from typing import Dict, Optional, List, Any
 from .token_manager import TokenManager
 from .mac_rotation_manager import MACRotationManager
-from .failover_manager import FailoverManager
 from .portal_type_detector import PortalTypeDetector, PortalType, XtreamCredentialExtractor
 from .multi_portal_support import HandshakeStrategySelector, HandshakeResult
 from .ob2_2025_engine import OB2_2025Engine, ErrorPatternRecognizer, HandshakeType
@@ -33,7 +32,6 @@ class MACPortalIntegration:
         # Core managers
         self.token_manager = TokenManager(account_id)
         self.mac_manager = MACRotationManager(account_id)
-        self.failover_manager = FailoverManager(account_id)
         
         # Extended features
         self.favorites = FavoritesManager(account_id)

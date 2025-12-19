@@ -86,7 +86,7 @@ class StalkerHandshake(BaseHandshakeStrategy):
                 headers = self.get_headers()
                 headers['Cookie'] = f'mac={self.mac}; stb_lang=en; timezone=Europe/London'
                 
-                response = session.get(url, params=params, headers=headers, timeout=30)
+                response = session.get(url, params=params, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -119,7 +119,7 @@ class StalkerHandshake(BaseHandshakeStrategy):
                 headers['Cookie'] = f'mac={self.mac}; stb_lang=en; timezone=Europe/London'
                 headers['Authorization'] = f'Bearer {token}'
                 
-                response = session.get(url, params=params, headers=headers, timeout=30)
+                response = session.get(url, params=params, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -156,7 +156,7 @@ class XUIHandshake(BaseHandshakeStrategy):
         headers['Cookie'] = f'mac={self.mac}; stb_lang=en; timezone=Europe/London'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -201,7 +201,7 @@ class XUIHandshake(BaseHandshakeStrategy):
         headers['Authorization'] = f'Bearer {token}'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 return data.get('js', {}).get('token', token)
@@ -225,7 +225,7 @@ class XUIHandshake(BaseHandshakeStrategy):
         headers['Authorization'] = f'Bearer {token}'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 profile = data.get('js', {})
@@ -266,7 +266,7 @@ class MagLoadHandshake(BaseHandshakeStrategy):
         headers = self.get_headers()
         
         try:
-            response = session.post(url, data=data, headers=headers, timeout=30)
+            response = session.post(url, data=data, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 result = response.json()
@@ -299,7 +299,7 @@ class MagLoadHandshake(BaseHandshakeStrategy):
         headers = self.get_headers()
         
         try:
-            response = session.post(url, data=data, headers=headers, timeout=30)
+            response = session.post(url, data=data, headers=headers, timeout=10)
             if response.status_code == 200:
                 return response.json()
         except Exception:
@@ -339,7 +339,7 @@ class StalkerUserPassHandshake(BaseHandshakeStrategy):
         headers['Cookie'] = f'mac={self.mac}; stb_lang=en; timezone=Europe/London'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -372,7 +372,7 @@ class StalkerUserPassHandshake(BaseHandshakeStrategy):
         headers['Authorization'] = f'Bearer {token}'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 data = response.json()
@@ -404,7 +404,7 @@ class StalkerUserPassHandshake(BaseHandshakeStrategy):
         headers['Authorization'] = f'Bearer {token}'
         
         try:
-            response = session.get(url, params=params, headers=headers, timeout=30)
+            response = session.get(url, params=params, headers=headers, timeout=10)
             if response.status_code == 200:
                 return response.json().get('js', {})
         except Exception:

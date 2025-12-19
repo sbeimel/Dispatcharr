@@ -453,12 +453,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     def reorder_macs(self, request, pk=None):
         """
         Adjust the order (priority) of MACs.
-        Expects in body: {"order": [mac_id1, mac_id2, ...]} in desired order.
+        Expects in body: {"mac_ids": [mac_id1, mac_id2, ...]} or {"order": [mac_id1, mac_id2, ...]} in desired order.
         """
         from .models import M3UAccountMac
 
         account = self.get_object()
-        order = request.data.get("order", [])
+        # Support both 'mac_ids' (from frontend) and 'order' (legacy)
+        order = request.data.get("mac_ids") or request.data.get("order", [])
         if not isinstance(order, list):
             return Response(
                 {"error": "Field 'order' must be a list of MAC IDs."},

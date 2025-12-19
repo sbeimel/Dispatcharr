@@ -36,6 +36,10 @@ import {
   USER_LEVELS,
   NETWORK_ACCESS_OPTIONS,
   PROXY_SETTINGS_OPTIONS,
+  STREAM_SETTINGS_OPTIONS,
+  RETRY_FAILOVER_OPTIONS,
+  SMART_BUFFER_OPTIONS,
+  CHANNEL_LIFECYCLE_OPTIONS,
   REGION_CHOICES,
 } from '../constants';
 import ConfirmationDialog from '../components/ConfirmationDialog';
@@ -303,10 +307,32 @@ const SettingsPage = () => {
 
   const proxySettingsForm = useForm({
     mode: 'controlled',
-    initialValues: Object.keys(PROXY_SETTINGS_OPTIONS).reduce((acc, key) => {
-      acc[key] = '';
-      return acc;
-    }, {}),
+    initialValues: {
+      // Stream Settings
+      connection_timeout: 30,
+      read_timeout: 60,
+      buffer_chunks: 10,
+      health_check_timeout: 10,
+      health_check_timeout_switching: 15,
+      // Retry & Failover
+      max_stream_retries: 3,
+      retry_delay: 2,
+      exponential_backoff: true,
+      max_failover_attempts: 10,
+      failover_total_timeout: 60,
+      // Smart Buffer
+      smart_buffer_clear_enabled: true,
+      buffer_clear_on_codec_change: true,
+      buffer_clear_on_resolution_change: true,
+      legacy_buffer_mode: false,
+      // Channel Lifecycle
+      channel_shutdown_delay: 0,
+      channel_init_grace_period: 5,
+      redis_chunk_ttl: 60,
+      // Legacy (kept for compatibility)
+      buffering_timeout: 15,
+      buffering_speed: 1.0,
+    },
   });
 
   useEffect(() => {
@@ -570,11 +596,30 @@ const SettingsPage = () => {
 
   const resetProxySettingsToDefaults = () => {
     const defaultValues = {
-      buffering_timeout: 15,
-      buffering_speed: 1.0,
-      redis_chunk_ttl: 60,
+      // Stream Settings
+      connection_timeout: 30,
+      read_timeout: 60,
+      buffer_chunks: 10,
+      health_check_timeout: 10,
+      health_check_timeout_switching: 15,
+      // Retry & Failover
+      max_stream_retries: 3,
+      retry_delay: 2,
+      exponential_backoff: true,
+      max_failover_attempts: 10,
+      failover_total_timeout: 60,
+      // Smart Buffer
+      smart_buffer_clear_enabled: true,
+      buffer_clear_on_codec_change: true,
+      buffer_clear_on_resolution_change: true,
+      legacy_buffer_mode: false,
+      // Channel Lifecycle
       channel_shutdown_delay: 0,
       channel_init_grace_period: 5,
+      redis_chunk_ttl: 60,
+      // Legacy (kept for compatibility)
+      buffering_timeout: 15,
+      buffering_speed: 1.0,
     };
 
     proxySettingsForm.setValues(defaultValues);
@@ -1210,13 +1255,13 @@ const SettingsPage = () => {
 
               <Accordion.Item value="proxy-settings">
                 <Accordion.Control>
-                  <Box>Proxy Settings</Box>
+                  <Box>Stream & Failover Settings</Box>
                 </Accordion.Control>
                 <Accordion.Panel>
                   <form
                     onSubmit={proxySettingsForm.onSubmit(onProxySettingsSubmit)}
                   >
-                    <Stack gap="sm">
+                    <Stack gap="md">
                       {proxySettingsSaved && (
                         <Alert
                           variant="light"
@@ -1224,62 +1269,74 @@ const SettingsPage = () => {
                           title="Saved Successfully"
                         ></Alert>
                       )}
-                      {Object.entries(PROXY_SETTINGS_OPTIONS).map(
-                        ([key, config]) => {
-                          // Determine if this field should be a NumberInput
-                          const isNumericField = [
-                            'buffering_timeout',
-                            'redis_chunk_ttl',
-                            'channel_shutdown_delay',
-                            'channel_init_grace_period',
-                          ].includes(key);
 
-                          const isFloatField = key === 'buffering_speed';
-
-                          if (isNumericField) {
-                            return (
-                              <NumberInput
-                                key={key}
-                                label={config.label}
-                                {...proxySettingsForm.getInputProps(key)}
-                                description={config.description || null}
-                                min={0}
-                                max={
-                                  key === 'buffering_timeout'
-                                    ? 300
-                                    : key === 'redis_chunk_ttl'
-                                      ? 3600
-                                      : key === 'channel_shutdown_delay'
-                                        ? 300
-                                        : 60
-                                }
-                              />
-                            );
-                          } else if (isFloatField) {
-                            return (
-                              <NumberInput
-                                key={key}
-                                label={config.label}
-                                {...proxySettingsForm.getInputProps(key)}
-                                description={config.description || null}
-                                min={0.0}
-                                max={10.0}
-                                step={0.01}
-                                precision={1}
-                              />
-                            );
-                          } else {
-                            return (
-                              <TextInput
-                                key={key}
-                                label={config.label}
-                                {...proxySettingsForm.getInputProps(key)}
-                                description={config.description || null}
-                              />
-                            );
-                          }
-                        }
+                      {/* STREAM SETTINGS */}
+                      <Text fw={600} size="sm" c="dimmed">
+                        Stream Connection & Buffer
+                      </Text>
+                      {Object.entries(STREAM_SETTINGS_OPTIONS).map(
+                        ([key, config]) => (
+                          <NumberInput
+                            key={key}
+                            label={config.label}
+                            description={config.description}
+                            {...proxySettingsForm.getInputProps(key)}
+                            min={config.min}
+                            max={config.max}
+                            step={config.step || 1}
+                            decimalScale={config.type === 'float' ? 1 : 0}
+                          />
+                        )
                       )}
+
+                      {/* RETRY & FAILOVER */}
+                      <Text fw={600} size="sm" c="dimmed" mt="md">Retry & Failover</Text>
+                      {Object.entries(RETRY_FAILOVER_OPTIONS).map(([key, config]) => {
+                        if (config.type === 'switch') {
+                          return (
+                            <Switch
+                              key={key}
+                              label={config.label}
+                              description={config.description}
+                              {...proxySettingsForm.getInputProps(key, { type: 'checkbox' })}
+                            />
+                          );
+                        }
+                        return (
+                          <NumberInput
+                            key={key}
+                            label={config.label}
+                            description={config.description}
+                            {...proxySettingsForm.getInputProps(key)}
+                            min={config.min}
+                            max={config.max}
+                          />
+                        );
+                      })}
+
+                      {/* SMART BUFFER CLEARING */}
+                      <Text fw={600} size="sm" c="dimmed" mt="md">Smart Buffer Clearing</Text>
+                      {Object.entries(SMART_BUFFER_OPTIONS).map(([key, config]) => (
+                        <Switch
+                          key={key}
+                          label={config.label}
+                          description={config.description}
+                          {...proxySettingsForm.getInputProps(key, { type: 'checkbox' })}
+                        />
+                      ))}
+
+                      {/* CHANNEL LIFECYCLE */}
+                      <Text fw={600} size="sm" c="dimmed" mt="md">Channel Lifecycle</Text>
+                      {Object.entries(CHANNEL_LIFECYCLE_OPTIONS).map(([key, config]) => (
+                        <NumberInput
+                          key={key}
+                          label={config.label}
+                          description={config.description}
+                          {...proxySettingsForm.getInputProps(key)}
+                          min={config.min}
+                          max={config.max}
+                        />
+                      ))}
 
                       <Flex
                         mih={50}

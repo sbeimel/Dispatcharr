@@ -254,27 +254,14 @@ class FailoverTestService:
         return self._sessions[sid]
     
     def create_test_channel(self, config: dict, session_id: str = None) -> TestChannel:
-        """
-        Create a new test channel.
-        
-        Requirements: 2.1, 2.3
-        
-        Args:
-            config: Channel configuration dict
-            session_id: Optional session ID
-            
-        Returns:
-            Created TestChannel
-        """
+        """Create a new test channel."""
         session = self._get_or_create_session(session_id)
         
-        # Validate required fields
         if not config.get('name'):
             raise ValueError("Channel name is required")
         if not config.get('primary_stream_url'):
             raise ValueError("Primary stream URL is required")
         
-        # Create channel
         channel_id = str(uuid.uuid4())
         backup_streams = []
         for i, bs_data in enumerate(config.get('backup_streams', [])):
@@ -310,24 +297,12 @@ class FailoverTestService:
         return list(session.test_channels.values())
     
     def delete_test_channel(self, channel_id: str, session_id: str = None) -> bool:
-        """
-        Delete a test channel.
-        
-        Requirements: 2.5
-        
-        Args:
-            channel_id: Channel ID to delete
-            session_id: Optional session ID
-            
-        Returns:
-            True if deleted, False if not found
-        """
+        """Delete a test channel."""
         session = self._get_or_create_session(session_id)
         
         if channel_id not in session.test_channels:
             return False
         
-        # Stop any active simulations for this channel
         if channel_id in session.active_simulations:
             del session.active_simulations[channel_id]
         
@@ -337,31 +312,16 @@ class FailoverTestService:
         return True
     
     def import_channel(self, channel_id: int, session_id: str = None) -> TestChannel:
-        """
-        Import an existing channel as a test copy.
-        
-        Requirements: 8.2, 8.3, 8.4
-        
-        Args:
-            channel_id: Database channel ID to import
-            session_id: Optional session ID
-            
-        Returns:
-            Created TestChannel copy
-        """
+        """Import an existing channel as a test copy."""
         from apps.channels.models import Channel, ChannelStream
-        from apps.m3u.models import M3UAccount
         
-        # Get original channel
         try:
             original = Channel.objects.get(pk=channel_id)
         except Channel.DoesNotExist:
             raise ValueError(f"Channel {channel_id} not found")
         
-        # Get streams for this channel
         streams = ChannelStream.objects.filter(channel=original).order_by('priority')
         
-        # Build backup streams list
         backup_streams = []
         primary_url = ""
         
@@ -377,7 +337,6 @@ class FailoverTestService:
                     name=f"Backup {i}",
                 ))
         
-        # Check for MAC portal config
         mac_config = None
         if streams.exists():
             first_stream = streams.first()
@@ -389,15 +348,10 @@ class FailoverTestService:
                         account_id=account.id,
                         portal_url=account.server_url or "",
                         macs=macs,
-                        endpoints=[
-                            "/server/load.php",
-                            "/stalker_portal/server/load.php",
-                            "/portal.php",
-                        ],
+                        endpoints=["/server/load.php", "/stalker_portal/server/load.php", "/portal.php"],
                         user_agents=["MAG250", "MAG254", "MAG322", "MAG424"],
                     )
         
-        # Create test channel
         config = {
             'name': f"[TEST] {original.name}",
             'primary_stream_url': primary_url,
@@ -414,20 +368,12 @@ class FailoverTestService:
         return channel
     
     def get_available_channels(self) -> List[dict]:
-        """
-        Get list of available channels for import.
-        
-        Requirements: 8.1
-        """
+        """Get list of available channels for import."""
         from apps.channels.models import Channel
         
         channels = Channel.objects.all().order_by('name')[:100]
         return [
-            {
-                'id': ch.id,
-                'name': ch.name,
-                'channel_number': ch.channel_number,
-            }
+            {'id': ch.id, 'name': ch.name, 'channel_number': ch.channel_number}
             for ch in channels
         ]
     
@@ -435,8 +381,6 @@ class FailoverTestService:
         """Add a log entry to the session."""
         session = self._get_or_create_session(session_id)
         session.log_entries.append(entry)
-        
-        # Update statistics
         session.statistics.record_event(
             strategy=entry.strategy,
             success=entry.success,
@@ -490,7 +434,6 @@ class FailoverTestService:
             logger.info(f"Cleaned up session {sid}")
 
 
-# Singleton instance
 _service_instance: Optional[FailoverTestService] = None
 
 

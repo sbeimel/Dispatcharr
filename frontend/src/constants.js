@@ -30,30 +30,192 @@ export const NETWORK_ACCESS_OPTIONS = {
   },
 };
 
+// =============================================================================
+// STREAM SETTINGS (Global) - Connection, Buffer & Health
+// =============================================================================
+export const STREAM_SETTINGS_OPTIONS = {
+  connection_timeout: {
+    label: 'Connection Timeout (seconds)',
+    description:
+      'Time to wait for stream connection. After timeout → retry with same stream. Recommended: 15-30s.',
+    min: 5,
+    max: 120,
+    default: 30,
+  },
+  read_timeout: {
+    label: 'Read Timeout (seconds)',
+    description:
+      'Time to wait for data during stream. After timeout → stream is dead → failover. Recommended: 30-60s.',
+    min: 10,
+    max: 300,
+    default: 60,
+  },
+  buffer_chunks: {
+    label: 'Buffer Chunks',
+    description:
+      'Buffer size (~250KB per chunk). Higher = more stable, but more delay. Recommended: 8-12 chunks.',
+    min: 4,
+    max: 20,
+    default: 10,
+  },
+  health_check_timeout: {
+    label: 'Health Check Timeout (seconds)',
+    description:
+      'ZERO data for X seconds → stream dead → failover. Detects completely dead streams. Recommended: 8-15s.',
+    min: 5,
+    max: 30,
+    default: 10,
+  },
+  health_check_timeout_switching: {
+    label: 'Switching Timeout (seconds)',
+    description:
+      'Longer timeout during stream switch (FFmpeg startup). Prevents false failovers. Recommended: 15-20s.',
+    min: 10,
+    max: 60,
+    default: 15,
+  },
+  buffering_timeout: {
+    label: 'Buffering Timeout (seconds)',
+    description:
+      'Stream below speed threshold for X seconds → failover. Detects SLOW streams. 15s=schnelle Reaktion, 30s=normal, 60s=sehr tolerant. Je höher, desto länger wird Buffering akzeptiert.',
+    min: 5,
+    max: 300,
+    default: 15,
+  },
+  buffering_speed: {
+    label: 'Buffering Speed Threshold',
+    description:
+      'Min speed before buffering detected. 1.0=Echtzeit (streng), 0.8=toleriert 20% langsamer, 0.5=sehr tolerant (50% Speed OK). Niedriger = weniger Failovers aber längeres Buffering möglich.',
+    min: 0.1,
+    max: 2.0,
+    step: 0.1,
+    default: 1.0,
+    type: 'float',
+  },
+};
+
+// =============================================================================
+// RETRY & FAILOVER SETTINGS
+// =============================================================================
+export const RETRY_FAILOVER_OPTIONS = {
+  max_stream_retries: {
+    label: 'Max Stream Retries',
+    description: 'Retries with SAME stream before switching to next MAC/profile. After X retries → failover.',
+    min: 1,
+    max: 10,
+    default: 3,
+  },
+  retry_delay: {
+    label: 'Retry Delay (seconds)',
+    description: 'Base delay between retries. With backoff: 2s → 4s → 8s.',
+    min: 1,
+    max: 30,
+    default: 2,
+  },
+  exponential_backoff: {
+    label: 'Exponential Backoff',
+    description: 'Double delay after each retry (2s → 4s → 8s). Disabled = constant delay.',
+    type: 'switch',
+    default: true,
+  },
+  max_failover_attempts: {
+    label: 'Max Failover Attempts',
+    description: 'Max switches between MACs/profiles/backup-streams before giving up. After X attempts → STOP.',
+    min: 1,
+    max: 50,
+    default: 10,
+  },
+  failover_total_timeout: {
+    label: 'Failover Timeout (seconds)',
+    description: 'Max total time for failover search. After timeout → STOP (no working stream found).',
+    min: 10,
+    max: 300,
+    default: 60,
+  },
+};
+
+// =============================================================================
+// SMART BUFFER CLEARING
+// =============================================================================
+export const SMART_BUFFER_OPTIONS = {
+  smart_buffer_clear_enabled: {
+    label: 'Smart Buffer Clear',
+    description: 'Only clear buffer when codec/resolution changes. Disabled = always clear on switch.',
+    type: 'switch',
+    default: true,
+  },
+  buffer_clear_on_codec_change: {
+    label: 'Clear on Codec Change',
+    description: 'Clear buffer when codec changes (h264 → hevc). Prevents decoder errors.',
+    type: 'switch',
+    default: true,
+  },
+  buffer_clear_on_resolution_change: {
+    label: 'Clear on Resolution Change',
+    description: 'Clear buffer when resolution changes (720p → 1080p). Prevents display glitches.',
+    type: 'switch',
+    default: true,
+  },
+  legacy_buffer_mode: {
+    label: 'Legacy Buffer Mode',
+    description: 'Always clear buffer on stream switch (0.12.0-04 style). Use if smart mode causes issues.',
+    type: 'switch',
+    default: false,
+  },
+};
+
+// =============================================================================
+// CHANNEL LIFECYCLE (kept separate - less frequently changed)
+// =============================================================================
+export const CHANNEL_LIFECYCLE_OPTIONS = {
+  channel_shutdown_delay: {
+    label: 'Channel Shutdown Delay (seconds)',
+    description: 'Delay before shutting down channel after last client disconnects. 0 = immediate.',
+    min: 0,
+    max: 300,
+    default: 0,
+  },
+  channel_init_grace_period: {
+    label: 'Channel Init Grace Period (seconds)',
+    description: 'Grace period during channel startup. Prevents premature failover on slow starts.',
+    min: 0,
+    max: 60,
+    default: 5,
+  },
+  redis_chunk_ttl: {
+    label: 'Buffer Chunk TTL (seconds)',
+    description: 'How long stream data is cached in Redis. Higher = more rewind possible.',
+    min: 10,
+    max: 3600,
+    default: 60,
+  },
+};
+
+// Legacy export for backwards compatibility (combines all for existing code)
 export const PROXY_SETTINGS_OPTIONS = {
   buffering_timeout: {
     label: 'Buffering Timeout',
-    description:
-      'Maximum time (in seconds) to wait for buffering before switching streams',
+    description: 'Maximum time (in seconds) to wait for buffering before switching streams',
   },
   buffering_speed: {
     label: 'Buffering Speed',
-    description:
-      'Speed threshold below which buffering is detected (1.0 = normal speed)',
+    description: 'Speed threshold below which buffering is detected (1.0 = normal speed)',
   },
   redis_chunk_ttl: {
     label: 'Buffer Chunk TTL',
-    description:
-      'Time-to-live for buffer chunks in seconds (how long stream data is cached)',
+    description: 'Time-to-live for buffer chunks in seconds (how long stream data is cached)',
   },
   channel_shutdown_delay: {
     label: 'Channel Shutdown Delay',
-    description:
-      'Delay in seconds before shutting down a channel after last client disconnects',
+    description: 'Delay in seconds before shutting down a channel after last client disconnects',
   },
   channel_init_grace_period: {
     label: 'Channel Initialization Grace Period',
     description: 'Grace period in seconds during channel initialization',
+  },
+  max_stream_retries: {
+    label: 'Max Stream Retries',
+    description: 'Retries with SAME stream before failover to next MAC/profile. After X retries → switch.',
   },
 };
 

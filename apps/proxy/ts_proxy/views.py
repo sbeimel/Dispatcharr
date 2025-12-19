@@ -149,10 +149,11 @@ def stream_ts(request, channel_id):
                 )
                 ChannelService.stop_channel(channel_id)
 
-            # Use fixed retry interval and timeout
-            retry_timeout = 3  # 3 seconds total timeout
-            retry_interval = 0.1  # 100ms between attempts
-            wait_start_time = time.time()
+            # Get max retries from settings (default 3)
+            from core.models import CoreSettings
+            proxy_settings = CoreSettings.get_proxy_settings()
+            max_retries = proxy_settings.get("max_stream_retries", 3)
+            retry_interval = 0.2  # 200ms between attempts
 
             stream_url = None
             stream_user_agent = None
@@ -160,10 +161,12 @@ def stream_ts(request, channel_id):
             profile_value = None
             error_reason = None
             attempt = 0
-            should_retry = True
+            all_macs_busy = False
+            backup_stream_id = None  # Track if we switched to a backup stream
+            backup_profile_id = None
 
-            # Try to get a stream with fixed interval retries
-            while should_retry and time.time() - wait_start_time < retry_timeout:
+            # Try to get a stream with limited retries
+            while attempt < max_retries:
                 attempt += 1
                 stream_url, stream_user_agent, transcode, profile_value = (
                     generate_stream_url(channel_id)
@@ -175,86 +178,104 @@ def stream_ts(request, channel_id):
                     )
                     break
 
-                # On first failure, check if the error is retryable
-                if attempt == 1:
-                    _, _, error_reason = channel.get_stream()
-                    if error_reason and "maximum connection limits" not in error_reason:
-                        logger.warning(
-                            f"[{client_id}] Can't retry - error not related to connection limits: {error_reason}"
-                        )
-                        should_retry = False
-                        break
-
-                # Check if we have time remaining for another sleep cycle
-                elapsed_time = time.time() - wait_start_time
-                remaining_time = retry_timeout - elapsed_time
-
-                # If we don't have enough time for the next sleep interval, break
-                # but only after we've already made an attempt (the while condition will try one more time)
-                if remaining_time <= retry_interval:
+                # Check the error reason
+                _, _, error_reason = channel.get_stream()
+                
+                # "All MACs busy" → instant backup, no retry
+                if error_reason and "All MACs busy" in error_reason:
                     logger.info(
-                        f"[{client_id}] Insufficient time ({remaining_time:.1f}s) for another sleep cycle, will make one final attempt"
+                        f"[{client_id}] All MACs busy - skipping retries, trying backup streams immediately"
+                    )
+                    all_macs_busy = True
+                    break
+                
+                # Other non-retryable errors
+                if error_reason and "maximum connection limits" not in error_reason and "All MACs busy" not in error_reason:
+                    logger.warning(
+                        f"[{client_id}] Can't retry - error not related to connection limits: {error_reason}"
                     )
                     break
 
-                # Wait before retrying
-                logger.info(
-                    f"[{client_id}] Waiting {retry_interval*1000:.0f}ms for a connection to become available (attempt {attempt}, {remaining_time:.1f}s remaining)"
-                )
-                gevent.sleep(retry_interval)
-                retry_interval += 0.025  # Increase wait time by 25ms for next attempt
-
-            # Make one final attempt if we still don't have a stream, should retry, and haven't exceeded timeout
-            if stream_url is None and should_retry and time.time() - wait_start_time < retry_timeout:
-                attempt += 1
-                logger.info(
-                    f"[{client_id}] Making final attempt {attempt} at timeout boundary"
-                )
-                stream_url, stream_user_agent, transcode, profile_value = (
-                    generate_stream_url(channel_id)
-                )
-                if stream_url is not None:
+                # More retries available?
+                if attempt < max_retries:
                     logger.info(
-                        f"[{client_id}] Successfully obtained stream on final attempt for channel {channel_id}"
+                        f"[{client_id}] Retry {attempt}/{max_retries} failed, waiting {retry_interval*1000:.0f}ms before next attempt"
                     )
+                    gevent.sleep(retry_interval)
 
             if stream_url is None:
-                # Release the channel's stream lock if one was acquired
-                # Note: Only call this if get_stream() actually assigned a stream
-                # In our case, if stream_url is None, no stream was ever assigned, so don't release
+                # Primary stream failed (likely all MACs busy) - try backup streams!
+                logger.info(f"[{client_id}] Primary stream unavailable, trying backup streams for channel {channel_id}")
+                
+                # Get the current stream ID to exclude it
+                current_stream_id, _, _ = channel.get_stream()
+                tried_streams = {current_stream_id} if current_stream_id else set()
+                
+                # Get alternate streams for this channel
+                alternates = get_alternate_streams(channel_id, current_stream_id)
+                
+                backup_found = False
+                for alt in alternates:
+                    if alt["stream_id"] in tried_streams:
+                        continue
+                    tried_streams.add(alt["stream_id"])
+                    
+                    logger.info(f"[{client_id}] Trying backup stream {alt['stream_id']} ({alt.get('name', 'unknown')})")
+                    
+                    # Try to get stream info for this alternate
+                    alt_info = get_stream_info_for_switch(channel_id, alt["stream_id"])
+                    if alt_info and "error" not in alt_info and alt_info.get("url"):
+                        stream_url = alt_info["url"]
+                        stream_user_agent = alt_info.get("user_agent", stream_user_agent)
+                        transcode = alt_info.get("transcode", False)
+                        profile_value = alt_info.get("stream_profile")
+                        
+                        # Successfully got backup stream URL
+                        logger.info(f"[{client_id}] Successfully switched to backup stream {alt['stream_id']}: {stream_url[:80]}...")
+                        backup_found = True
+                        # Store the backup stream info for later use
+                        backup_stream_id = alt["stream_id"]
+                        backup_profile_id = alt_info.get("m3u_profile_id")
+                        break
+                    else:
+                        error_msg = alt_info.get("error", "Unknown error") if isinstance(alt_info, dict) else str(alt_info)
+                        logger.debug(f"[{client_id}] Backup stream {alt['stream_id']} not available: {error_msg}")
+                
+                if not backup_found:
+                    # No backup streams available either
+                    wait_duration = f"{int(time.time() - wait_start_time)}s"
+                    error_msg = (
+                        error_reason
+                        if error_reason
+                        else "No available streams for this channel (all MACs busy, no backup streams)"
+                    )
+                    logger.info(
+                        f"[{client_id}] Failed to obtain stream after {attempt} attempts over {wait_duration}: {error_msg}"
+                    )
+                    return JsonResponse(
+                        {"error": error_msg, "waited": wait_duration}, status=503
+                    )  # 503 Service Unavailable is appropriate here
 
-                # Get the specific error message if available
-                wait_duration = f"{int(time.time() - wait_start_time)}s"
-                error_msg = (
-                    error_reason
-                    if error_reason
-                    else "No available streams for this channel"
-                )
+            # Get the stream ID - use backup stream if we switched to one
+            if backup_stream_id:
+                stream_id = backup_stream_id
+                m3u_profile_id = backup_profile_id
                 logger.info(
-                    f"[{client_id}] Failed to obtain stream after {attempt} attempts over {wait_duration}: {error_msg}"
+                    f"Channel {channel_id} using BACKUP stream ID {stream_id}, m3u account profile ID {m3u_profile_id}"
                 )
-                return JsonResponse(
-                    {"error": error_msg, "waited": wait_duration}, status=503
-                )  # 503 Service Unavailable is appropriate here
-
-            # Get the stream ID from the channel
-            stream_id, m3u_profile_id, _ = channel.get_stream()
-            logger.info(
-                f"Channel {channel_id} using stream ID {stream_id}, m3u account profile ID {m3u_profile_id}"
-            )
+            else:
+                stream_id, m3u_profile_id, _ = channel.get_stream()
+                logger.info(
+                    f"Channel {channel_id} using stream ID {stream_id}, m3u account profile ID {m3u_profile_id}"
+                )
 
             # Generate transcode command if needed
             stream_profile = channel.get_stream_profile()
             if stream_profile.is_redirect():
                 # Validate the stream URL before redirecting
-                from .url_utils import (
-                    validate_stream_url,
-                    get_alternate_streams,
-                    get_stream_info_for_switch,
-                )
+                # Note: get_alternate_streams and get_stream_info_for_switch already imported at top of file
+                from .url_utils import validate_stream_url, get_channel_proxy
 
-                # Get proxy for this channel
-                from .url_utils import get_channel_proxy
                 channel_proxy = get_channel_proxy(channel)
                 
                 # Try initial URL

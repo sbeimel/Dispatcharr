@@ -11,7 +11,6 @@ from apps.m3u.mac_portal_models import (
     MACPortalGlobalSettings,
     FailoverSettings,
     VODResumePoint,
-    MACHealthRecord,
     FailoverEvent,
     VODWatchedStatus,
     MACCooldown,
@@ -231,6 +230,8 @@ class M3UAccount(models.Model):
         raw_macs = re.split(r'[,\s\n\r]+', self.mac_address.strip())
         logger.info(f"Raw MACs after split: {raw_macs}")
         
+        # Use a dict to track unique MACs and keep first occurrence priority
+        seen_macs = {}
         for mac in raw_macs:
             mac = mac.strip()
             if mac:
@@ -239,13 +240,18 @@ class M3UAccount(models.Model):
                 is_valid = M3UAccountMac.is_valid_mac_format(normalized_mac)
                 logger.info(f"MAC '{mac}' -> normalized '{normalized_mac}' -> valid: {is_valid}")
                 if is_valid:
-                    mac_addresses.append(normalized_mac)
+                    # Only add if not already seen (keep first occurrence)
+                    if normalized_mac not in seen_macs:
+                        seen_macs[normalized_mac] = len(mac_addresses)
+                        mac_addresses.append(normalized_mac)
+                    else:
+                        logger.warning(f"Duplicate MAC '{normalized_mac}' found at position {len(mac_addresses)}, keeping first occurrence at position {seen_macs[normalized_mac]}")
         
         if not mac_addresses:
             logger.warning(f"No valid MAC addresses found for account {self.id}")
             return
         
-        logger.info(f"Valid MAC addresses to process: {mac_addresses}")
+        logger.info(f"Valid MAC addresses to process (duplicates removed): {mac_addresses}")
         
         # Get existing MAC objects
         existing_macs = {mac.address: mac for mac in self.macs.all()}
@@ -298,7 +304,11 @@ class M3UAccount(models.Model):
         logger.info(f"Final MAC object count for account {self.id}: {final_count}")
 
     def get_candidate_macs_for_streaming(self):
-        """Return ordered list of M3UAccountMac objects that are usable for streaming."""
+        """Return ordered list of M3UAccountMac objects that are usable for streaming.
+        
+        Note: BUSY/Cooldown filtering is done in url_utils.py using Redis.
+        This method only filters by status and expiry date.
+        """
         if self.account_type != self.Types.MAC:
             return []
         
@@ -319,6 +329,7 @@ class M3UAccount(models.Model):
             # Skip MACs with past expiry dates
             if mac.expires_at and mac.expires_at <= now:
                 continue
+            
             candidates.append(mac)
         
         return candidates
@@ -592,6 +603,14 @@ class M3UAccountMac(models.Model):
         unique_together = [("account", "address")]
         verbose_name = "MAC Address"
         verbose_name_plural = "MAC Addresses"
+        indexes = [
+            # Index for frequent queries: account + status
+            models.Index(fields=['account', 'status'], name='m3u_mac_acc_status_idx'),
+            # Index for priority-based selection: account + status + priority
+            models.Index(fields=['account', 'status', 'priority'], name='m3u_mac_acc_st_prio_idx'),
+            # Index for cleanup queries: account + last_checked
+            models.Index(fields=['account', 'last_checked'], name='m3u_mac_acc_checked_idx'),
+        ]
     
     def __str__(self):
         return f"{self.address} ({self.get_status_display()})"
@@ -636,3 +655,41 @@ class M3UAccountMac(models.Model):
         """Override save to normalize MAC address."""
         self.full_clean()  # This will call clean() method
         super().save(*args, **kwargs)
+    
+    @classmethod
+    def cleanup_duplicates(cls, account):
+        """
+        Remove duplicate MAC addresses within an account.
+        Keeps the first occurrence (lowest priority number).
+        
+        Args:
+            account: M3UAccount instance
+            
+        Returns:
+            Number of duplicates removed
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        seen_macs = {}
+        duplicates_to_delete = []
+        
+        # Get all MACs for this account, ordered by priority
+        for mac in cls.objects.filter(account=account).order_by('priority', 'id'):
+            normalized = cls.normalize_mac_address(mac.address)
+            
+            if normalized in seen_macs:
+                # Duplicate found - mark for deletion
+                duplicates_to_delete.append(mac.id)
+                logger.warning(f"Duplicate MAC {normalized} found (id={mac.id}), will be deleted")
+            else:
+                # First occurrence - keep it
+                seen_macs[normalized] = mac.id
+        
+        # Delete duplicates
+        if duplicates_to_delete:
+            deleted_count = cls.objects.filter(id__in=duplicates_to_delete).delete()[0]
+            logger.info(f"Deleted {deleted_count} duplicate MAC(s) for account {account.id}")
+            return deleted_count
+        
+        return 0

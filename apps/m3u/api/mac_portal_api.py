@@ -34,7 +34,6 @@ from ..models import M3UAccount, M3UAccountMac
 from ..mac_portal_models import (
     MACPortalGlobalSettings,
     FailoverSettings,
-    MACHealthRecord,
     FailoverEvent,
     MACCooldown,
 )
@@ -61,16 +60,6 @@ class FailoverSettingsSerializer(serializers.ModelSerializer):
         exclude = ['id', 'created_at', 'updated_at']
 
 
-class MACHealthRecordSerializer(serializers.ModelSerializer):
-    """Serializer for MACHealthRecord."""
-    mac_address = serializers.CharField(source='mac.address', read_only=True)
-    
-    class Meta:
-        model = MACHealthRecord
-        fields = ['id', 'mac_address', 'timestamp', 'event_type', 'error_message', 
-                  'response_time_ms', 'http_status', 'endpoint_used']
-
-
 class MACCooldownSerializer(serializers.ModelSerializer):
     """Serializer for MACCooldown."""
     mac_address = serializers.CharField(source='mac.address', read_only=True)
@@ -95,7 +84,6 @@ class MACStatusSerializer(serializers.Serializer):
     """Serializer for MAC status."""
     address = serializers.CharField()
     status = serializers.CharField()
-    health_score = serializers.IntegerField()
     in_cooldown = serializers.BooleanField()
     cooldown_remaining = serializers.IntegerField()
     cooldown_reason = serializers.CharField(allow_null=True)
@@ -168,7 +156,7 @@ class FeatureTogglesViewSet(viewsets.ViewSet):
             'short_epg_enabled': settings.short_epg_enabled,
             'picon_download_enabled': settings.picon_download_enabled,
             'tmdb_integration_enabled': settings.tmdb_integration_enabled,
-            'multi_mac_rotation_enabled': settings.multi_mac_rotation_enabled,
+            # multi_mac_rotation_enabled removed - use mac_failover_enabled in FailoverSettings
             'token_auto_refresh_enabled': settings.token_auto_refresh_enabled,
             'debug_logging_enabled': settings.debug_logging_enabled,
             'ob2_2025_engine_enabled': settings.ob2_2025_engine_enabled,
@@ -269,15 +257,6 @@ class MACHealthViewSet(viewsets.ViewSet):
         serializer = MACStatusSerializer(status_data)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['get'])
-    def history(self, request, account_pk=None, pk=None):
-        """GET /api/m3u-accounts/{id}/macs/{mac_id}/health/history/ - Get MAC health history."""
-        mac = get_object_or_404(M3UAccountMac, pk=pk, account_id=account_pk)
-        
-        records = MACHealthRecord.objects.filter(mac=mac).order_by('-timestamp')[:100]
-        serializer = MACHealthRecordSerializer(records, many=True)
-        return Response(serializer.data)
-    
     @action(detail=True, methods=['post'])
     def reset_cooldown(self, request, account_pk=None, pk=None):
         """POST /api/m3u-accounts/{id}/macs/{mac_id}/health/reset_cooldown/ - Reset MAC cooldown."""
@@ -298,6 +277,95 @@ class MACBatchOperationsViewSet(viewsets.ViewSet):
     """
     authentication_classes = [JWTAuthentication]
     permission_classes = [IsAuthenticated]
+    
+    @action(detail=False, methods=['post'])
+    def cleanup_duplicates(self, request, account_pk=None):
+        """POST /api/m3u-accounts/{id}/macs/cleanup-duplicates/ - Remove duplicate MACs."""
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        
+        deleted_count = M3UAccountMac.cleanup_duplicates(account)
+        
+        return Response({
+            'status': 'success',
+            'deleted_count': deleted_count,
+            'message': f'{deleted_count} duplicate MAC(s) removed'
+        })
+    
+    @action(detail=False, methods=['post'])
+    def cleanup_redis_keys(self, request, account_pk=None):
+        """POST /api/m3u-accounts/{id}/macs/cleanup-redis-keys/ - Clean up old Redis keys."""
+        from core.utils import RedisClient
+        
+        account = get_object_or_404(M3UAccount, pk=account_pk)
+        redis_client = RedisClient.get_client()
+        
+        if not redis_client:
+            return Response({
+                'status': 'error',
+                'message': 'Redis not available'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        # Clean up any old-format Redis keys (from previous implementations)
+        # Old format: mac:busy:{portal_id}:{mac_address} or mac:busy:{mac_address}
+        # New format: mac:busy:{mac_id}
+        
+        cleaned_count = 0
+        try:
+            # Get all MAC IDs for this account
+            mac_ids = set(account.macs.values_list('id', flat=True))
+            
+            # Scan for all mac:busy:* keys
+            for key in redis_client.scan_iter(match='mac:busy:*'):
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                # Extract the ID part
+                parts = key_str.split(':')
+                if len(parts) >= 3:
+                    try:
+                        # Check if it's a valid ID format (mac:busy:{id})
+                        if len(parts) == 3:
+                            mac_id = int(parts[2])
+                            # If this ID doesn't exist anymore, delete the key
+                            if mac_id not in mac_ids:
+                                redis_client.delete(key)
+                                cleaned_count += 1
+                        else:
+                            # Old format with more parts - delete it
+                            redis_client.delete(key)
+                            cleaned_count += 1
+                    except ValueError:
+                        # Not a valid ID - old format, delete it
+                        redis_client.delete(key)
+                        cleaned_count += 1
+            
+            # Same for cooldown keys
+            for key in redis_client.scan_iter(match='mac:cooldown:*'):
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                parts = key_str.split(':')
+                if len(parts) >= 3:
+                    try:
+                        if len(parts) == 3:
+                            mac_id = int(parts[2])
+                            if mac_id not in mac_ids:
+                                redis_client.delete(key)
+                                cleaned_count += 1
+                        else:
+                            redis_client.delete(key)
+                            cleaned_count += 1
+                    except ValueError:
+                        redis_client.delete(key)
+                        cleaned_count += 1
+            
+            return Response({
+                'status': 'success',
+                'cleaned_count': cleaned_count,
+                'message': f'{cleaned_count} old Redis key(s) cleaned up'
+            })
+        except Exception as e:
+            logger.error(f"Error cleaning up Redis keys: {e}")
+            return Response({
+                'status': 'error',
+                'message': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=False, methods=['post'])
     def batch_test(self, request, account_pk=None):
@@ -584,33 +652,8 @@ class DebugLogsViewSet(viewsets.ViewSet):
     
     def list(self, request):
         """GET /api/mac-portal/logs/ - Get debug logs."""
-        # Get recent health records as logs
-        limit = int(request.query_params.get('limit', 100))
-        event_type = request.query_params.get('type', None)
-        mac_id = request.query_params.get('mac_id', None)
-        
-        queryset = MACHealthRecord.objects.all().order_by('-timestamp')
-        
-        if event_type:
-            queryset = queryset.filter(event_type=event_type)
-        if mac_id:
-            queryset = queryset.filter(mac_id=mac_id)
-        
-        records = queryset[:limit]
-        serializer = MACHealthRecordSerializer(records, many=True)
-        return Response(serializer.data)
-    
-    @action(detail=False, methods=['delete'])
-    def clear(self, request):
-        """DELETE /api/mac-portal/logs/clear/ - Clear old logs."""
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        days = int(request.query_params.get('days', 7))
-        cutoff = timezone.now() - timedelta(days=days)
-        
-        deleted, _ = MACHealthRecord.objects.filter(timestamp__lt=cutoff).delete()
-        return Response({'deleted': deleted})
+        # Health records removed - this endpoint is deprecated
+        return Response({'message': 'Health records have been removed. Use MAC status and cooldown instead.'})
 
 
 class FailoverStatisticsViewSet(viewsets.ViewSet):
@@ -642,121 +685,8 @@ class FailoverStatisticsViewSet(viewsets.ViewSet):
         serializer = FailoverEventSerializer(events, many=True)
         return Response(serializer.data)
 
-
-class EngineBenchmarkViewSet(viewsets.ViewSet):
-    """
-    API endpoint for engine benchmarking.
-    
-    Allows testing all portal engines and finding the fastest one.
-    
-    URLs:
-    - GET  /api/m3u-accounts/{id}/engine-benchmark/     - Get cached results
-    - POST /api/m3u-accounts/{id}/engine-benchmark/     - Run benchmark (was /run/)
-    - DELETE /api/m3u-accounts/{id}/engine-benchmark/   - Clear all caches (was /clear/)
-    """
-    authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
-    
-    def list(self, request, account_pk=None):
-        """GET /api/m3u-accounts/{id}/engine-benchmark/ - Get cached benchmark results."""
-        account = get_object_or_404(M3UAccount, pk=account_pk)
-        
-        from ..mac_portal_client import UnifiedMacPortalClient
-        
-        fastest_data = UnifiedMacPortalClient.get_fastest_engine(account.server_url)
-        cached_engine = UnifiedMacPortalClient.get_cached_engine(account.server_url)
-        
-        return Response({
-            'account_id': account.id,
-            'portal_url': account.server_url,
-            'fastest_engine': fastest_data,
-            'cached_auto_engine': cached_engine,
-            'has_benchmark': fastest_data is not None,
-        })
-    
-    def create(self, request, account_pk=None):
-        """POST /api/m3u-accounts/{id}/engine-benchmark/ - Run benchmark for all engines."""
-        account = get_object_or_404(M3UAccount, pk=account_pk)
-        
-        # Get first available MAC
-        mac = account.macs.filter(status='valid').first()
-        if not mac:
-            mac = account.macs.first()
-        
-        if not mac:
-            return Response(
-                {'error': 'No MAC addresses available for this account'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        from ..mac_portal_client import UnifiedMacPortalClient
-        
-        try:
-            results = UnifiedMacPortalClient.benchmark_all_engines(
-                portal_url=account.server_url,
-                mac=mac.address,
-                proxy=account.get_proxy()
-            )
-            
-            # Save portal_info to account's custom_properties
-            if results.get('portal_info'):
-                portal_info = results['portal_info']
-                custom_props = account.custom_properties or {}
-                if portal_info.get('portal_type') and portal_info['portal_type'] != 'unknown':
-                    custom_props['portal_type'] = portal_info['portal_type']
-                if portal_info.get('portal_version'):
-                    custom_props['portal_version'] = portal_info['portal_version']
-                if portal_info.get('detected_by'):
-                    custom_props['portal_detected_by'] = portal_info['detected_by']
-                account.custom_properties = custom_props
-                account.save(update_fields=['custom_properties'])
-                logger.info(f"Saved portal_info for account {account_pk}: {portal_info}")
-            
-            return Response({
-                'account_id': account.id,
-                'portal_url': account.server_url,
-                'mac_used': mac.address,
-                **results
-            })
-        except Exception as e:
-            logger.error(f"Benchmark failed for account {account_pk}: {e}")
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-    
-    def destroy(self, request, account_pk=None, pk=None):
-        """DELETE /api/m3u-accounts/{id}/engine-benchmark/{action}/ - Clear caches.
-        
-        pk='all' - Clear all caches
-        pk='auto' - Clear only auto engine cache
-        """
-        account = get_object_or_404(M3UAccount, pk=account_pk)
-        
-        from ..mac_portal_client import UnifiedMacPortalClient
-        from django.core.cache import cache
-        
-        if pk == 'auto':
-            # Only clear auto engine cache - forces re-detection on next request
-            UnifiedMacPortalClient.clear_cached_engine(account.server_url)
-            return Response({
-                'status': 'auto_cleared',
-                'account_id': account.id,
-                'message': 'Auto engine cache cleared. Next request will re-detect the best engine.',
-            })
-        else:
-            # Clear all caches (default)
-            fastest_key = UnifiedMacPortalClient._get_fastest_engine_cache_key(account.server_url)
-            cache.delete(fastest_key)
-            
-            auto_key = UnifiedMacPortalClient._get_engine_cache_key(account.server_url)
-            cache.delete(auto_key)
-            
-            return Response({
-                'status': 'all_cleared',
-                'account_id': account.id,
-                'cleared': ['fastest_engine', 'auto_engine'],
-            })
+# EngineBenchmarkViewSet removed - use AUTO mode with "Calibrate AUTO" button instead
+# AUTO mode automatically tests all engines and selects the fastest
 
 
 class VODSeriesAPIViewSet(viewsets.ViewSet):
