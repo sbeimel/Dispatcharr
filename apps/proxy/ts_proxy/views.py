@@ -164,6 +164,7 @@ def stream_ts(request, channel_id):
             all_macs_busy = False
             backup_stream_id = None  # Track if we switched to a backup stream
             backup_profile_id = None
+            wait_start_time = time.time()  # Track how long we've been trying
 
             # Try to get a stream with limited retries
             while attempt < max_retries:

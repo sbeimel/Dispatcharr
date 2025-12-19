@@ -5,6 +5,8 @@ import requests
 import os
 import gc
 import gzip, zipfile
+from datetime import datetime
+from dateutil import parser as dateutil_parser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery.app.control import Inspect
 from celery.result import AsyncResult
@@ -19,6 +21,71 @@ from channels.layers import get_channel_layer
 from django.utils import timezone
 import time
 import json
+
+
+def parse_expiry_date(expires_text):
+    """
+    Parse expiry date string into datetime object.
+    Handles various formats like:
+    - "January 15, 2026, 9:06 pm"
+    - "2026-01-15"
+    - "15.01.2026"
+    - "01/15/2026"
+    - Unix timestamps
+    Returns timezone-aware datetime or None if parsing fails.
+    """
+    if not expires_text:
+        return None
+    
+    # Handle numeric timestamps
+    if isinstance(expires_text, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(expires_text)
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except (ValueError, OSError):
+            pass
+    
+    # Convert to string if needed
+    expires_str = str(expires_text).strip()
+    if not expires_str:
+        return None
+    
+    # Try numeric string (Unix timestamp)
+    try:
+        ts = float(expires_str)
+        dt = datetime.fromtimestamp(ts)
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+    except (ValueError, OSError):
+        pass
+    
+    # Try dateutil parser (handles most formats)
+    try:
+        dt = dateutil_parser.parse(expires_str, dayfirst=True)
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+    except (ValueError, TypeError):
+        pass
+    
+    # Try common formats manually
+    formats = [
+        "%B %d, %Y, %I:%M %p",  # January 15, 2026, 9:06 pm
+        "%B %d, %Y",            # January 15, 2026
+        "%Y-%m-%d %H:%M:%S",    # 2026-01-15 09:06:00
+        "%Y-%m-%d",             # 2026-01-15
+        "%d.%m.%Y %H:%M:%S",    # 15.01.2026 09:06:00
+        "%d.%m.%Y",             # 15.01.2026
+        "%d/%m/%Y",             # 15/01/2026
+        "%m/%d/%Y",             # 01/15/2026
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(expires_str, fmt)
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except ValueError:
+            continue
+    
+    logger.debug(f"Could not parse expiry date: {expires_text}")
+    return None
 from core.utils import (
     RedisClient,
     acquire_task_lock,
@@ -3294,6 +3361,7 @@ def _refresh_mac_account_with_groups(account_id):
                         expires_text = client.get_expires()
                         if expires_text:
                             prio_0_mac.expires_text = expires_text
+                            prio_0_mac.expires_at = parse_expiry_date(expires_text)
                     except Exception as e:
                         logger.debug(f"Could not get expiry for Prio 0 MAC {prio_0_mac.address}: {e}")
                     
@@ -3331,6 +3399,7 @@ def _refresh_mac_account_with_groups(account_id):
                     expires_text = client.get_expires()
                     if expires_text:
                         mac_obj.expires_text = expires_text
+                        mac_obj.expires_at = parse_expiry_date(expires_text)
                         mac_obj.status = M3UAccountMac.Status.VALID
                         mac_obj.last_checked = timezone.now()
                         mac_obj.last_error = None
@@ -3522,6 +3591,7 @@ def _refresh_mac_account_direct(account_id):
                         expires_text = client.get_expires()
                         if expires_text:
                             mac_obj.expires_text = expires_text
+                            mac_obj.expires_at = parse_expiry_date(expires_text)
                     except Exception as e:
                         logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
                     
@@ -3654,11 +3724,8 @@ def check_mac_expiry(account_id=None):
                     
                     if expires_text:
                         mac_obj.expires_text = expires_text
+                        mac_obj.expires_at = parse_expiry_date(expires_text)
                         mac_obj.status = M3UAccountMac.Status.VALID
-                        
-                        # Try to parse expiry date
-                        # This is portal-specific, so we just store the text for now
-                        
                     else:
                         mac_obj.status = M3UAccountMac.Status.UNKNOWN
                     

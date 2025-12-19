@@ -3,6 +3,7 @@ psycopg2-binary==2.9.10
 celery[redis]==5.5.3
 djangorestframework==3.16.0
 requests==2.32.4
+python-dateutil>=2.8.0
 cloudscraper==1.2.71
 psutil==7.0.0
 pillow

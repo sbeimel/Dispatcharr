@@ -438,7 +438,7 @@ const M3U = ({
   return (
     <>
       <Modal
-        size={1200}
+        size={1400}
         opened={isOpen}
         onClose={close}
         title="M3U Account"
