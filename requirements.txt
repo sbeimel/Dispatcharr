@@ -3,7 +3,12 @@ psycopg2-binary==2.9.10
 celery[redis]==5.5.3
 djangorestframework==3.16.0
 requests==2.32.4
+requests[socks]
+PySocks==1.7.1
 psutil==7.0.0
+
+# Cloudflare bypass and proxy support
+cloudscraper==1.2.71
 pillow
 drf-yasg>=1.20.0
 streamlink

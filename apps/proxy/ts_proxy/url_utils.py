@@ -35,7 +35,7 @@ def _resolve_mac_stream_with_failover(
 
     props = m3u_account.custom_properties or {}
     proxy_value = props.get("proxy")
-    timezone = props.get("timezone", "Europe/Berlin")
+    tz_name = props.get("timezone", "Europe/Berlin")
 
     # Parse proxy list: support comma, whitespace or newline separated values,
     # similar to apps.m3u.tasks MAC refresh logic.
@@ -85,21 +85,27 @@ def _resolve_mac_stream_with_failover(
         logger.error(f"No candidate MACs available for account {m3u_account.id}")
         return None, None, "No candidate MACs available"
 
-    # If Redis is available, prefer MACs that are not currently busy.
+    # If Redis is available, prefer MACs that are not currently busy or on cooldown.
     # Busy MACs werden nur verwendet, wenn der Stream bereits läuft; beim Start
     # sollen sie übersprungen werden. Wenn alle MACs busy sind, geben wir einen
     # Fehler zurück, damit die Profil-/Backupstream-Logik greifen kann.
     if redis_client:
         free_candidates: list[M3UAccountMac] = []
         busy_candidates: list[M3UAccountMac] = []
+        cooldown_candidates: list[M3UAccountMac] = []
         try:
             for m in candidates:
                 try:
                     busy_key = RedisKeys.mac_busy(m.id)
+                    cooldown_key = RedisKeys.mac_cooldown(m.id)
                     is_busy = bool(redis_client.exists(busy_key))
+                    is_cooldown = bool(redis_client.exists(cooldown_key))
                 except Exception:
                     is_busy = False
-                if is_busy:
+                    is_cooldown = False
+                if is_cooldown:
+                    cooldown_candidates.append(m)
+                elif is_busy:
                     busy_candidates.append(m)
                 else:
                     free_candidates.append(m)
@@ -107,14 +113,15 @@ def _resolve_mac_stream_with_failover(
             # Fallback: wenn irgendetwas schief geht, benutzen wir die Original-Liste
             free_candidates = candidates
             busy_candidates = []
+            cooldown_candidates = []
 
         if free_candidates:
             candidates = free_candidates
         elif candidates:
-            # Alle MACs sind busy → nicht erzwingen, sondern direkt Fehler liefern,
+            # Alle MACs sind busy oder auf cooldown → nicht erzwingen, sondern direkt Fehler liefern,
             # damit der Aufrufer auf Backupstreams/andere Profile ausweichen kann.
             logger.warning(
-                "All candidate MACs are currently busy for MAC account %s – skipping MAC usage",
+                "All candidate MACs are currently busy or on cooldown for MAC account %s – skipping MAC usage",
                 m3u_account.id,
             )
             return None, None, "All MACs busy"
@@ -131,7 +138,7 @@ def _resolve_mac_stream_with_failover(
                     base_url=m3u_account.server_url,
                     mac=mac_value,
                     proxy=proxy,
-                    timezone=timezone,
+                    timezone=tz_name,
                 )
                 url = client.create_link(cmd)
                 # Successfully built link → mark valid and return

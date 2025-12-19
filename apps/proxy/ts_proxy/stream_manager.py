@@ -1774,28 +1774,8 @@ class StreamManager:
                     mac_entry = None
 
                 if mac_entry:
-                    try:
-                        mac_entry.status = M3UAccountMac.Status.ERROR
-                        mac_entry.last_error = "runtime_stream_failure"
-                        mac_entry.last_checked = timezone.now()
-                        mac_entry.save(update_fields=["status", "last_error", "last_checked"])
-                        logger.info(
-                            "Marked MAC %s on account %s as ERROR due to runtime failure on channel %s",
-                            current_mac_value,
-                            m3u_account.id,
-                            self.channel_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to mark MAC %s as ERROR for account %s during MAC failover",
-                            current_mac_value,
-                            m3u_account.id,
-                            exc_info=True,
-                        )
-
-                    # Unmark this MAC as busy (its Stream ist abgebrochen, sie steht für neue
-                    # Sessions nicht mehr zur Verfügung, wird aber auch nicht künstlich als
-                    # busy gehalten).
+                    # Set cooldown flag instead of ERROR status for runtime failures
+                    # This allows the MAC to be used again after the cooldown expires
                     try:
                         from core.utils import RedisClient
                         redis_client = RedisClient.get_client()
@@ -1803,6 +1783,25 @@ class StreamManager:
                         redis_client = None
 
                     if redis_client:
+                        try:
+                            # Set cooldown for 60 seconds (MAC temporarily unavailable)
+                            cooldown_key = RedisKeys.mac_cooldown(mac_entry.id)
+                            redis_client.setex(cooldown_key, 60, "runtime_stream_failure")
+                            logger.info(
+                                "Set cooldown for MAC %s on account %s due to runtime failure on channel %s",
+                                current_mac_value,
+                                m3u_account.id,
+                                self.channel_id,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to set cooldown for MAC %s on account %s during MAC failover",
+                                current_mac_value,
+                                m3u_account.id,
+                                exc_info=True,
+                            )
+
+                        # Clear busy marker
                         try:
                             busy_key = RedisKeys.mac_busy(mac_entry.id)
                             redis_client.delete(busy_key)
@@ -1815,7 +1814,7 @@ class StreamManager:
                             )
 
             # Ask url_utils (via get_stream_info_for_profile) for a new URL on the SAME profile.
-            # Because we have just marked the previous MAC as ERROR, the resolver will pick the next MAC.
+            # Because we have set a cooldown on the previous MAC, the resolver will pick the next MAC.
             info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, m3u_profile_id)
             if not info or "error" in info or not info.get("url"):
                 logger.warning(
