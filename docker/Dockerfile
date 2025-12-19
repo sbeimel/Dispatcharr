@@ -5,15 +5,14 @@ ARG BASE_TAG=base
 
 # --- Build frontend ---
 
-FROM node:20 AS frontend-builder
+FROM node:24 AS frontend-builder
 
 WORKDIR /app/frontend
 COPY ./frontend /app/frontend
 # remove any node_modules that may have been copied from the host (x86)
-RUN rm -rf node_modules package-lock.json || true && \
-    npm install --no-audit --progress=false 2>&1 && \
-    npm run build 2>&1 && \
-    ls -la dist/ && \
+RUN rm -rf node_modules || true; \
+    npm install --no-audit --progress=false;
+RUN    npm run build; \
     rm -rf node_modules .cache
 
 # --- Redeclare build arguments for the next stage ---
@@ -29,8 +28,6 @@ WORKDIR /app
 
 # Copy application code
 COPY . /app
-# Install/update Python dependencies (in case base image is outdated)
-RUN pip install --no-cache-dir -r /app/requirements.txt
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder
@@ -51,5 +48,4 @@ RUN if [ -n "$TIMESTAMP" ]; then \
     cat /app/version.py; \
     fi
 
-# Use bash explicitly to avoid "Syntax error: '(' unexpected" with /bin/sh
-ENTRYPOINT ["/bin/bash", "/app/docker/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]

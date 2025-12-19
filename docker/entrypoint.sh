@@ -1,14 +1,6 @@
-#!/usr/bin/env bash
-# IMPORTANT: This script requires bash (not sh) due to array syntax
-# If you see "Syntax error: '(' unexpected", ensure bash is installed and used
+#!/bin/bash
 
 set -e  # Exit immediately if a command exits with a non-zero status
-
-# Verify we're running in bash
-if [ -z "$BASH_VERSION" ]; then
-    echo "ERROR: This script requires bash. Please run with: bash $0"
-    exit 1
-fi
 
 # Function to clean up only running processes
 cleanup() {
@@ -183,11 +175,6 @@ else
 fi
 
 cd /app
-
-# Fix any ghost migration entries before running migrations
-echo "🔧 Checking for migration conflicts..."
-python /app/scripts/fix_migration_conflicts.py
-
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 
