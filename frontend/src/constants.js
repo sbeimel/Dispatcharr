@@ -170,21 +170,21 @@ export const SMART_BUFFER_OPTIONS = {
 export const CHANNEL_LIFECYCLE_OPTIONS = {
   channel_shutdown_delay: {
     label: 'Channel Shutdown Delay (seconds)',
-    description: 'Delay before shutting down channel after last client disconnects. 0 = immediate.',
+    description: 'Delay before shutting down channel after last client disconnects. 0 = immediate shutdown. Higher values keep channel alive for reconnecting clients, but use more resources.',
     min: 0,
     max: 300,
     default: 0,
   },
   channel_init_grace_period: {
     label: 'Channel Init Grace Period (seconds)',
-    description: 'Grace period during channel startup. Prevents premature failover on slow starts.',
+    description: 'Grace period during channel startup before health checks begin. Prevents premature failover when FFmpeg/stream takes time to start. Recommended: 5-10s.',
     min: 0,
     max: 60,
     default: 5,
   },
   redis_chunk_ttl: {
     label: 'Buffer Chunk TTL (seconds)',
-    description: 'How long stream data is cached in Redis. Higher = more rewind possible.',
+    description: 'How long stream data is cached in Redis. Higher = more rewind/pause possible, but more memory usage. 60s = 1min rewind, 3600s = 1h rewind. Recommended: 60-300s.',
     min: 10,
     max: 3600,
     default: 60,

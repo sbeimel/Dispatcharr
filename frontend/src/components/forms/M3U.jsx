@@ -65,7 +65,7 @@ const M3U = ({
       user_agent: '0',
       is_active: true,
       max_streams: 0,
-      refresh_interval: 24,
+      refresh_interval: 0,
       account_type: 'STD',
       create_epg: false,
       username: '',
@@ -81,7 +81,6 @@ const M3U = ({
     validate: {
       name: isNotEmpty('Please select a name'),
       user_agent: isNotEmpty('Please select a user-agent'),
-      refresh_interval: isNotEmpty('Please specify a refresh interval'),
     },
   });
 
@@ -821,11 +820,12 @@ const M3U = ({
                 label="Refresh Interval (hours)"
                 description={
                   <>
-                    How often to automatically refresh M3U data
+                    How often to automatically refresh M3U data (channels, streams, VOD)
                     <br />
-                    (0 to disable automatic refreshes)
+                    0 = disabled (manual refresh only), 1 = every hour, 24 = daily
                   </>
                 }
+                min={0}
                 {...form.getInputProps('refresh_interval')}
                 key={form.key('refresh_interval')}
               />

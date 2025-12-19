@@ -150,7 +150,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 120, label: '120s' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Time to wait for stream connection. After timeout → retry with same stream. Recommended: 15-30s.
             </Text>
           </div>
@@ -175,7 +175,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 300, label: '5m' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Time to wait for data during stream. After timeout → stream is dead → failover. Recommended: 30-60s.
             </Text>
           </div>
@@ -202,7 +202,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 20, label: '20 (Stable)' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Higher = more buffering, better stability. Lower = less latency.
             </Text>
           </div>
@@ -229,7 +229,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 30, label: '30s' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               How long without data before stream is marked unhealthy.
             </Text>
           </div>
@@ -253,7 +253,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 60, label: '60s' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Timeout during stream switch - should be higher to allow FFmpeg startup.
             </Text>
           </div>
@@ -283,7 +283,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 60, label: '60s (tolerant)' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Stream below speed threshold for X seconds → failover. 15s=schnelle Reaktion, 60s=sehr tolerant.
             </Text>
           </div>
@@ -307,7 +307,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 1.0, label: '1.0x (strict)' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Min speed before buffering detected. 1.0=Echtzeit (streng), 0.5=sehr tolerant (50% Speed OK).
             </Text>
           </div>
@@ -385,7 +385,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 300, label: '5m' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Maximum time to search for a working stream before giving up.
             </Text>
           </div>
@@ -410,7 +410,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 50, label: '50' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               Maximum number of stream switch attempts (MAC → Profile → Stream).
             </Text>
           </div>
@@ -427,7 +427,7 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
                 { value: 'loop', label: 'Loop - Keep trying indefinitely' },
               ]}
             />
-            <Text size="xs" c="dimmed" mt="xs">
+            <Text size="xs" c="dimmed" mt="sm">
               What to do when the timeout is reached without finding a working stream.
             </Text>
           </div>
