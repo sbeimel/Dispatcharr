@@ -24,13 +24,22 @@ import { IconInfoCircle } from '@tabler/icons-react';
 
 const StreamPerformanceSettings = ({ settings, onSave }) => {
   const [localSettings, setLocalSettings] = useState({
+    // Connection Settings
+    connection_timeout: 30,
+    read_timeout: 60,
+    // Buffer Settings
     buffer_chunks: 10,
+    // Health & Buffering Detection
     health_check_timeout: 10,
     health_check_timeout_switching: 15,
+    buffering_timeout: 15,
+    buffering_speed: 1.0,
+    // Smart Buffer Clearing
     smart_buffer_clear_enabled: true,
     buffer_clear_on_codec_change: true,
     buffer_clear_on_resolution_change: true,
     legacy_buffer_mode: false,
+    // Failover Settings
     failover_total_timeout: 60,
     failover_timeout_action: 'stop',
     max_failover_attempts: 10,
@@ -40,13 +49,22 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
   useEffect(() => {
     if (settings) {
       setLocalSettings({
+        // Connection Settings
+        connection_timeout: settings.connection_timeout ?? 30,
+        read_timeout: settings.read_timeout ?? 60,
+        // Buffer Settings
         buffer_chunks: settings.buffer_chunks ?? 10,
+        // Health & Buffering Detection
         health_check_timeout: settings.health_check_timeout ?? 10,
         health_check_timeout_switching: settings.health_check_timeout_switching ?? 15,
+        buffering_timeout: settings.buffering_timeout ?? 15,
+        buffering_speed: settings.buffering_speed ?? 1.0,
+        // Smart Buffer Clearing
         smart_buffer_clear_enabled: settings.smart_buffer_clear_enabled ?? true,
         buffer_clear_on_codec_change: settings.buffer_clear_on_codec_change ?? true,
         buffer_clear_on_resolution_change: settings.buffer_clear_on_resolution_change ?? true,
         legacy_buffer_mode: settings.legacy_buffer_mode ?? false,
+        // Failover Settings
         failover_total_timeout: settings.failover_total_timeout ?? 60,
         failover_timeout_action: settings.failover_timeout_action ?? 'stop',
         max_failover_attempts: settings.max_failover_attempts ?? 10,
@@ -71,12 +89,17 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
   const handleReset = () => {
     if (settings) {
       setLocalSettings({
+        connection_timeout: settings.connection_timeout ?? 30,
+        read_timeout: settings.read_timeout ?? 60,
         buffer_chunks: settings.buffer_chunks ?? 10,
         health_check_timeout: settings.health_check_timeout ?? 10,
         health_check_timeout_switching: settings.health_check_timeout_switching ?? 15,
+        buffering_timeout: settings.buffering_timeout ?? 15,
+        buffering_speed: settings.buffering_speed ?? 1.0,
         smart_buffer_clear_enabled: settings.smart_buffer_clear_enabled ?? true,
         buffer_clear_on_codec_change: settings.buffer_clear_on_codec_change ?? true,
         buffer_clear_on_resolution_change: settings.buffer_clear_on_resolution_change ?? true,
+        legacy_buffer_mode: settings.legacy_buffer_mode ?? false,
         failover_total_timeout: settings.failover_total_timeout ?? 60,
         failover_timeout_action: settings.failover_timeout_action ?? 'stop',
         max_failover_attempts: settings.max_failover_attempts ?? 10,
@@ -105,6 +128,59 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
         Adjust these settings based on your network conditions and hardware capabilities.
         Changes take effect immediately for new streams.
       </Alert>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Connection Settings</Title>
+        <Stack gap="md">
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Connection Timeout</Text>
+              <Text size="sm" c="dimmed">{localSettings.connection_timeout}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.connection_timeout}
+              onChange={(value) => handleChange('connection_timeout', value)}
+              min={5}
+              max={120}
+              step={5}
+              marks={[
+                { value: 15, label: '15s' },
+                { value: 30, label: '30s' },
+                { value: 60, label: '60s' },
+                { value: 120, label: '120s' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Time to wait for stream connection. After timeout → retry with same stream. Recommended: 15-30s.
+            </Text>
+          </div>
+
+          <Divider />
+
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Read Timeout</Text>
+              <Text size="sm" c="dimmed">{localSettings.read_timeout}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.read_timeout}
+              onChange={(value) => handleChange('read_timeout', value)}
+              min={10}
+              max={300}
+              step={10}
+              marks={[
+                { value: 30, label: '30s' },
+                { value: 60, label: '60s' },
+                { value: 120, label: '2m' },
+                { value: 300, label: '5m' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Time to wait for data during stream. After timeout → stream is dead → failover. Recommended: 30-60s.
+            </Text>
+          </div>
+        </Stack>
+      </Paper>
 
       <Paper withBorder p="md">
         <Title order={4} mb="md">Buffer Settings</Title>
@@ -179,6 +255,60 @@ const StreamPerformanceSettings = ({ settings, onSave }) => {
             />
             <Text size="xs" c="dimmed" mt="xs">
               Timeout during stream switch - should be higher to allow FFmpeg startup.
+            </Text>
+          </div>
+        </Stack>
+      </Paper>
+
+      <Paper withBorder p="md">
+        <Title order={4} mb="md">Buffering Detection (Slow Streams)</Title>
+        <Alert icon={<IconInfoCircle size={16} />} color="gray" mb="md">
+          Detects SLOW streams (not dead). If stream speed stays below threshold for X seconds → failover.
+        </Alert>
+        <Stack gap="md">
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Buffering Timeout</Text>
+              <Text size="sm" c="dimmed">{localSettings.buffering_timeout}s</Text>
+            </Group>
+            <Slider
+              value={localSettings.buffering_timeout}
+              onChange={(value) => handleChange('buffering_timeout', value)}
+              min={5}
+              max={120}
+              step={5}
+              marks={[
+                { value: 15, label: '15s (fast)' },
+                { value: 30, label: '30s' },
+                { value: 60, label: '60s (tolerant)' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Stream below speed threshold for X seconds → failover. 15s=schnelle Reaktion, 60s=sehr tolerant.
+            </Text>
+          </div>
+
+          <Divider />
+
+          <div>
+            <Group justify="space-between" mb="xs">
+              <Text size="sm" fw={500}>Buffering Speed Threshold</Text>
+              <Text size="sm" c="dimmed">{localSettings.buffering_speed.toFixed(1)}x</Text>
+            </Group>
+            <Slider
+              value={localSettings.buffering_speed}
+              onChange={(value) => handleChange('buffering_speed', value)}
+              min={0.3}
+              max={1.5}
+              step={0.1}
+              marks={[
+                { value: 0.5, label: '0.5x (tolerant)' },
+                { value: 0.8, label: '0.8x' },
+                { value: 1.0, label: '1.0x (strict)' },
+              ]}
+            />
+            <Text size="xs" c="dimmed" mt="xs">
+              Min speed before buffering detected. 1.0=Echtzeit (streng), 0.5=sehr tolerant (50% Speed OK).
             </Text>
           </div>
         </Stack>

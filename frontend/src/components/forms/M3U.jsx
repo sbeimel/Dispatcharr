@@ -647,19 +647,20 @@ const M3U = ({
                             if (mac.status === 'expired') color = 'red';
                             if (mac.status === 'error') color = 'orange';
 
-                            // Format date as DD.MM.YYYY
-                            let formattedDate = 'unknown';
+                            // Format date as DD.MM.YYYY and calculate days left
+                            let formattedDate = '-';
                             let daysLeft = null;
                             
-                            if (mac.expires_at) {
+                            // Helper function to parse and format date
+                            const parseAndFormatDate = (dateStr) => {
+                              if (!dateStr) return null;
                               try {
-                                const expiryDate = new Date(mac.expires_at);
+                                const expiryDate = new Date(dateStr);
                                 if (!isNaN(expiryDate.getTime())) {
                                   // Format: DD.MM.YYYY
                                   const day = String(expiryDate.getDate()).padStart(2, '0');
                                   const month = String(expiryDate.getMonth() + 1).padStart(2, '0');
                                   const year = expiryDate.getFullYear();
-                                  formattedDate = `${day}.${month}.${year}`;
                                   
                                   // Calculate days left
                                   const today = new Date();
@@ -667,14 +668,28 @@ const M3U = ({
                                   const expiry = new Date(expiryDate);
                                   expiry.setHours(0, 0, 0, 0);
                                   const diffTime = expiry - today;
-                                  daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                  const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                                  
+                                  return {
+                                    formatted: `${day}.${month}.${year}`,
+                                    daysLeft: days
+                                  };
                                 }
                               } catch (e) {
-                                // Fallback to expires_text if date parsing fails
-                                formattedDate = mac.expires_text || 'unknown';
+                                // Parsing failed
                               }
-                            } else if (mac.expires_text) {
-                              formattedDate = mac.expires_text;
+                              return null;
+                            };
+                            
+                            // Try expires_at first, then expires_text
+                            let parsed = parseAndFormatDate(mac.expires_at);
+                            if (!parsed && mac.expires_text) {
+                              parsed = parseAndFormatDate(mac.expires_text);
+                            }
+                            
+                            if (parsed) {
+                              formattedDate = parsed.formatted;
+                              daysLeft = parsed.daysLeft;
                             }
 
                             return (
