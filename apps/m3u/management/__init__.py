@@ -1,1 +1,0 @@
-# Management commands for M3U app
