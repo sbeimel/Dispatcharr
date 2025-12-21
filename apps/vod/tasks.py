@@ -127,6 +127,37 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
     """Refresh movie content using single API call for all movies"""
     logger.info(f"Refreshing movies for account {account.name}")
 
+    # Ensure "Uncategorized" category exists for movies without a category
+    uncategorized_category, created = VODCategory.objects.get_or_create(
+        name="Uncategorized",
+        category_type="movie",
+        defaults={}
+    )
+
+    # Ensure there's a relation for the Uncategorized category
+    account_custom_props = account.custom_properties or {}
+    auto_enable_new = account_custom_props.get("auto_enable_new_groups_vod", True)
+
+    uncategorized_relation, rel_created = M3UVODCategoryRelation.objects.get_or_create(
+        category=uncategorized_category,
+        m3u_account=account,
+        defaults={
+            'enabled': auto_enable_new,
+            'custom_properties': {}
+        }
+    )
+
+    if created:
+        logger.info(f"Created 'Uncategorized' category for movies")
+    if rel_created:
+        logger.info(f"Created relation for 'Uncategorized' category (enabled={auto_enable_new})")
+
+    # Add uncategorized category to relations dict for easy access
+    relations[uncategorized_category.id] = uncategorized_relation
+
+    # Add to categories_by_provider with a special key for items without category
+    categories_by_provider['__uncategorized__'] = uncategorized_category
+
     # Get all movies in a single API call
     logger.info("Fetching all movies from provider...")
     all_movies_data = client.get_vod_streams()  # No category_id = get all movies
@@ -149,6 +180,37 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
 def refresh_series(client, account, categories_by_provider, relations, scan_start_time=None):
     """Refresh series content using single API call for all series"""
     logger.info(f"Refreshing series for account {account.name}")
+
+    # Ensure "Uncategorized" category exists for series without a category
+    uncategorized_category, created = VODCategory.objects.get_or_create(
+        name="Uncategorized",
+        category_type="series",
+        defaults={}
+    )
+
+    # Ensure there's a relation for the Uncategorized category
+    account_custom_props = account.custom_properties or {}
+    auto_enable_new = account_custom_props.get("auto_enable_new_groups_series", True)
+
+    uncategorized_relation, rel_created = M3UVODCategoryRelation.objects.get_or_create(
+        category=uncategorized_category,
+        m3u_account=account,
+        defaults={
+            'enabled': auto_enable_new,
+            'custom_properties': {}
+        }
+    )
+
+    if created:
+        logger.info(f"Created 'Uncategorized' category for series")
+    if rel_created:
+        logger.info(f"Created relation for 'Uncategorized' category (enabled={auto_enable_new})")
+
+    # Add uncategorized category to relations dict for easy access
+    relations[uncategorized_category.id] = uncategorized_relation
+
+    # Add to categories_by_provider with a special key for items without category
+    categories_by_provider['__uncategorized__'] = uncategorized_category
 
     # Get all series in a single API call
     logger.info("Fetching all series from provider...")
@@ -240,6 +302,7 @@ def batch_create_categories(categories_data, category_type, account):
     M3UVODCategoryRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
 
     # Delete orphaned category relationships (categories no longer in the M3U source)
+    # Exclude "Uncategorized" from cleanup as it's a special category we manage
     current_category_ids = set(existing_categories[name].id for name in category_names)
     existing_relations = M3UVODCategoryRelation.objects.filter(
         m3u_account=account,
@@ -248,7 +311,7 @@ def batch_create_categories(categories_data, category_type, account):
 
     relations_to_delete = [
         rel for rel in existing_relations
-        if rel.category_id not in current_category_ids
+        if rel.category_id not in current_category_ids and rel.category.name != "Uncategorized"
     ]
 
     if relations_to_delete:
@@ -331,7 +394,16 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                     logger.debug("Skipping disabled category")
                     continue
             else:
-                logger.warning(f"No category ID provided for movie {name}")
+                # Assign to Uncategorized category if no category_id provided
+                logger.debug(f"No category ID provided for movie {name}, assigning to 'Uncategorized'")
+                category = categories.get('__uncategorized__')
+                if category:
+                    movie_data['_category_id'] = category.id
+                    # Check if uncategorized is disabled
+                    relation = relations.get(category.id, None)
+                    if relation and not relation.enabled:
+                        logger.debug("Skipping disabled 'Uncategorized' category")
+                        continue
 
             # Extract metadata
             year = extract_year_from_data(movie_data, 'name')
@@ -633,7 +705,16 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                     logger.debug("Skipping disabled category")
                     continue
             else:
-                logger.warning(f"No category ID provided for series {name}")
+                # Assign to Uncategorized category if no category_id provided
+                logger.debug(f"No category ID provided for series {name}, assigning to 'Uncategorized'")
+                category = categories.get('__uncategorized__')
+                if category:
+                    series_data['_category_id'] = category.id
+                    # Check if uncategorized is disabled
+                    relation = relations.get(category.id, None)
+                    if relation and not relation.enabled:
+                        logger.debug("Skipping disabled 'Uncategorized' category")
+                        continue
 
             # Extract metadata
             year = extract_year(series_data.get('releaseDate', ''))
@@ -1151,7 +1232,13 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
 
 
 def batch_process_episodes(account, series, episodes_data, scan_start_time=None):
-    """Process episodes in batches for better performance"""
+    """Process episodes in batches for better performance.
+
+    Note: Multiple streams can represent the same episode (e.g., different languages
+    or qualities). Each stream has a unique stream_id, but they share the same
+    season/episode number. We create one Episode record per (series, season, episode)
+    and multiple M3UEpisodeRelation records pointing to it.
+    """
     if not episodes_data:
         return
 
@@ -1168,12 +1255,13 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     logger.info(f"Batch processing {len(all_episodes_data)} episodes for series {series.name}")
 
     # Extract episode identifiers
-    episode_keys = []
+    # Note: episode_keys may have duplicates when multiple streams represent same episode
+    episode_keys = set()  # Use set to track unique episode keys
     episode_ids = []
     for episode_data in all_episodes_data:
         season_num = episode_data['_season_number']
         episode_num = episode_data.get('episode_num', 0)
-        episode_keys.append((series.id, season_num, episode_num))
+        episode_keys.add((series.id, season_num, episode_num))
         episode_ids.append(str(episode_data.get('id')))
 
     # Pre-fetch existing episodes
@@ -1195,6 +1283,10 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     episodes_to_update = []
     relations_to_create = []
     relations_to_update = []
+
+    # Track episodes we're creating in this batch to avoid duplicates
+    # Key: (series_id, season_number, episode_number) -> Episode object
+    episodes_pending_creation = {}
 
     for episode_data in all_episodes_data:
         try:
@@ -1225,9 +1317,14 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 if backdrop:
                     custom_props['backdrop_path'] = [backdrop]
 
-            # Find existing episode
+            # Find existing episode - check DB first, then pending creations
             episode_key = (series.id, season_number, episode_number)
             episode = existing_episodes.get(episode_key)
+
+            # Check if we already have this episode pending creation (multiple streams for same episode)
+            if not episode and episode_key in episodes_pending_creation:
+                episode = episodes_pending_creation[episode_key]
+                logger.debug(f"Reusing pending episode for S{season_number:02d}E{episode_number:02d} (stream_id: {episode_id})")
 
             if episode:
                 # Update existing episode
@@ -1257,7 +1354,9 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                     episode.custom_properties = custom_props if custom_props else None
                     updated = True
 
-                if updated:
+                # Only add to update list if episode has a PK (exists in DB) and isn't already in list
+                # Episodes pending creation don't have PKs yet and will be created via bulk_create
+                if updated and episode.pk and episode not in episodes_to_update:
                     episodes_to_update.append(episode)
             else:
                 # Create new episode
@@ -1275,6 +1374,8 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                     custom_properties=custom_props if custom_props else None
                 )
                 episodes_to_create.append(episode)
+                # Track this episode so subsequent streams with same season/episode can reuse it
+                episodes_pending_creation[episode_key] = episode
 
             # Handle episode relation
             if episode_id in existing_relations:
@@ -1308,9 +1409,28 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
 
     # Execute batch operations
     with transaction.atomic():
-        # Create new episodes
+        # Create new episodes - use ignore_conflicts in case of race conditions
         if episodes_to_create:
-            Episode.objects.bulk_create(episodes_to_create)
+            Episode.objects.bulk_create(episodes_to_create, ignore_conflicts=True)
+
+            # Re-fetch the created episodes to get their PKs
+            # We need to do this because bulk_create with ignore_conflicts doesn't set PKs
+            created_episode_keys = [
+                (ep.series_id, ep.season_number, ep.episode_number)
+                for ep in episodes_to_create
+            ]
+            db_episodes = Episode.objects.filter(series=series)
+            episode_pk_map = {
+                (ep.series_id, ep.season_number, ep.episode_number): ep
+                for ep in db_episodes
+            }
+
+            # Update relations to point to the actual DB episodes with PKs
+            for relation in relations_to_create:
+                ep = relation.episode
+                key = (ep.series_id, ep.season_number, ep.episode_number)
+                if key in episode_pk_map:
+                    relation.episode = episode_pk_map[key]
 
         # Update existing episodes
         if episodes_to_update:
@@ -1319,9 +1439,9 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 'tmdb_id', 'imdb_id', 'custom_properties'
             ])
 
-        # Create new episode relations
+        # Create new episode relations - use ignore_conflicts for stream_id duplicates
         if relations_to_create:
-            M3UEpisodeRelation.objects.bulk_create(relations_to_create)
+            M3UEpisodeRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
 
         # Update existing episode relations
         if relations_to_update:

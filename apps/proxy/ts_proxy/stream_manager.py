@@ -11,19 +11,47 @@ import re
 from typing import Optional, List
 from django.db import connection
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
-from urllib.parse import urlparse, parse_qs
 from urllib3.exceptions import ReadTimeoutError
 from apps.proxy.config import TSConfig as Config
 from apps.channels.models import Channel, Stream
-from apps.m3u.models import M3UAccount, M3UAccountProfile, M3UAccountMac
+from apps.m3u.models import M3UAccount, M3UAccountProfile
 from core.models import UserAgent, CoreSettings
+from core.utils import log_system_event
 from .stream_buffer import StreamBuffer
 from .utils import detect_stream_type, get_logger
 from .redis_keys import RedisKeys
 from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, TS_PACKET_SIZE
 from .config_helper import ConfigHelper
-from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object, get_next_profiles_for_stream, get_stream_info_for_profile
+from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
+from .mac_state_manager import MACStateManager
+
+# Helper function to broadcast failover events to WebSocket clients
+def _broadcast_failover_event(channel_id: str, event_type: str, message: str, **extra_data):
+    """Send failover event to WebSocket clients for live log display."""
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+        import datetime
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            event_data = {
+                'id': f'{event_type}_{channel_id}_{int(time.time() * 1000)}',
+                'timestamp': datetime.datetime.now().isoformat(),
+                'event_type': event_type,
+                'channel_id': channel_id,
+                'message': message,
+                **extra_data
+            }
+            async_to_sync(channel_layer.group_send)(
+                'failover_test',
+                {
+                    'type': 'failover_event',
+                    'data': event_data
+                }
+            )
+    except Exception as e:
+        logger.debug(f"Could not broadcast failover event: {e}")
 
 logger = get_logger()
 
@@ -51,6 +79,12 @@ class StreamManager:
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
+        # MAC tracking properties for failover and busy tracking
+        self.mac_address = None
+        self.mac_entry_id = None
+
+
+
         # Sockets used for transcode jobs
         self.socket = None
         self.transcode = transcode
@@ -71,12 +105,9 @@ class StreamManager:
 
         # Add tracking for tried streams and current stream
         self.current_stream_id = stream_id
+        self.current_profile_id = None  # Track current profile for buffer clearing decisions
         self.tried_stream_ids = set()
-        self.tried_profile_ids = set()
-
-        # MAC tracking properties for failover (KORRIGIERT: Explizite Initialisierung)
-        self.mac_address: Optional[str] = None
-        self.mac_entry_id: Optional[int] = None
+        self.tried_profile_ids = set()  # Track tried profiles for profile failover
 
         # IMPROVED LOGGING: Better handle and track stream ID
         if stream_id:
@@ -101,12 +132,12 @@ class StreamManager:
                         logger.info(f"Loaded stream ID {self.current_stream_id} from Redis for channel {buffer.channel_id}")
                     else:
                         logger.warning(f"No stream_id found in Redis for channel {channel_id}. "
-                                       f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
+                                     f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
                 except Exception as e:
                     logger.warning(f"Error loading stream ID from Redis: {e}")
             else:
                 logger.warning(f"Unable to get stream ID for channel {channel_id}. "
-                               f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
+                             f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
 
         logger.info(f"Initialized stream manager for channel {buffer.channel_id}")
 
@@ -125,16 +156,6 @@ class StreamManager:
         # Add HTTP reader thread property
         self.http_reader = None
 
-    # HILFSMETHODE: Zum Setzen von Metadaten in Redis (NEU)
-    def _set_channel_metadata(self, field, value):
-        """Helper to set a single metadata field in Redis."""
-        if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-            try:
-                metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                self.buffer.redis_client.hset(metadata_key, field, str(value))
-            except Exception as e:
-                logger.error(f"Failed to set metadata field {field} in Redis: {e}", exc_info=True)
-
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
         session = requests.Session()
@@ -147,10 +168,10 @@ class StreamManager:
 
         # Set up connection pooling for better performance
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=1,      # Single connection for this stream
-            pool_maxsize=1,          # Max size of connection pool
-            max_retries=3,           # Auto-retry for failed requests
-            pool_block=False         # Don't block when pool is full
+            pool_connections=1,     # Single connection for this stream
+            pool_maxsize=1,         # Max size of connection pool
+            max_retries=3,          # Auto-retry for failed requests
+            pool_block=False        # Don't block when pool is full
         )
 
         # Apply adapter to both HTTP and HTTPS
@@ -196,10 +217,15 @@ class StreamManager:
         self.stop_requested = False
         # Add tracking for stream switching attempts
         stream_switch_attempts = 0
-        # Get max stream switches from config using the helper method
-        max_stream_switches = ConfigHelper.max_stream_switches()  # Prevent infinite switching loops
+        # Get failover settings from MAC Portal settings
+        max_failover_attempts = ConfigHelper.max_failover_attempts()  # Prevent infinite switching loops
+        failover_total_timeout = ConfigHelper.failover_total_timeout()  # Total time allowed for failover
+        failover_timeout_action = ConfigHelper.failover_timeout_action()  # 'stop' or 'loop'
+        failover_start_time = None  # Track when failover started
 
         try:
+
+
             # Start health monitor thread
             health_thread = threading.Thread(target=self._monitor_health, daemon=True)
             health_thread.start()
@@ -207,39 +233,25 @@ class StreamManager:
             logger.info(f"Starting stream for URL: {self.url} for channel {self.channel_id}")
 
             # Main stream switching loop - we'll try different streams if needed
-            while self.running and stream_switch_attempts <= max_stream_switches:
+            while self.running and stream_switch_attempts <= max_failover_attempts:
                 # Check for stuck switching state
                 if self.url_switching and time.time() - self.url_switch_start_time > self.url_switch_timeout:
                     logger.warning(f"URL switching state appears stuck for channel {self.channel_id} "
-                                   f"({time.time() - self.url_switch_start_time:.1f}s > {self.url_switch_timeout}s timeout). "
-                                   f"Resetting switching state.")
+                                 f"({time.time() - self.url_switch_start_time:.1f}s > {self.url_switch_timeout}s timeout). "
+                                 f"Resetting switching state.")
                     self._reset_url_switching_state()
 
-                # NEW: Check for health monitor recovery requests
+                # Check for health monitor recovery requests
                 if hasattr(self, 'needs_reconnect') and self.needs_reconnect and not self.url_switching:
-                    logger.info(f"Health monitor requested reconnect for channel {self.channel_id}")
+                    logger.info(f"Health monitor detected unhealthy stream for channel {self.channel_id}")
                     self.needs_reconnect = False
-
-                    # Attempt reconnect without changing streams
-                    if self._attempt_reconnect():
-                        logger.info(f"Health-requested reconnect successful for channel {self.channel_id}")
-                        continue  # Go back to main loop
-                    else:
-                        logger.warning(f"Health-requested reconnect failed, will try stream switch for channel {self.channel_id}")
-                        self.needs_stream_switch = True
-
-                if hasattr(self, 'needs_stream_switch') and self.needs_stream_switch and not self.url_switching:
-                    logger.info(f"Health monitor requested stream switch for channel {self.channel_id}")
-                    self.needs_stream_switch = False
-
-                    if self._try_next_stream():
-                        logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
-                        stream_switch_attempts += 1
-                        self.retry_count = 0  # Reset retries for new stream
-                        continue  # Go back to main loop with new stream
-                    else:
-                        logger.error(f"Health-requested stream switch failed for channel {self.channel_id}")
-                        # Continue with normal flow
+                    # Force the connection to fail so normal retry logic kicks in
+                    if self.connected:
+                        logger.info(f"Forcing connection close to trigger retry logic for channel {self.channel_id}")
+                        self._close_all_connections()
+                        self.connected = False
+                        # Don't reset retry_count here - let normal retry logic handle it
+                        # This ensures we go through the proper retry sequence before failover
 
                 # Check stream type before connecting
                 self.stream_type = detect_stream_type(self.url)
@@ -274,40 +286,28 @@ class StreamManager:
                         if connection_result:
                             # Store connection start time to measure success duration
                             connection_start_time = time.time()
-                            # Mark MAC as busy in Redis once the stream is actually running
-                            try:
-                                if hasattr(self, 'buffer') and hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                                    parsed = urlparse(self.url or '')
-                                    qs = parse_qs(parsed.query or '')
-                                    mac_vals = qs.get('mac') or qs.get('MAC') or []
-                                    if mac_vals:
-                                        mac_value = mac_vals[0]
-                                        try:
-                                            # Verwenden Sie M3UAccountMac aus den Imports
-                                            mac_entry = M3UAccountMac.objects.filter(address__iexact=mac_value).first()
-                                        except Exception:
-                                            mac_entry = None
-                                        if mac_entry:
-                                            busy_key = RedisKeys.mac_busy(mac_entry.id)
-                                            self.buffer.redis_client.set(busy_key, '1')
-                                            
-                                            # Speichern der MAC-Informationen im Manager für Failover-Zwecke
-                                            self.mac_address = mac_value
-                                            self.mac_entry_id = mac_entry.id
-                                            
-                                            logger.debug(
-                                                'Marked MAC %s (id=%s) as busy for channel %s',
-                                                mac_value,
-                                                mac_entry.id,
-                                                self.channel_id,
-                                            )
-                            except Exception:
-                                logger.debug(
-                                    'Failed to set busy marker for current MAC on channel %s',
-                                    self.channel_id,
-                                    exc_info=True,
-                                )
 
+                            # Mark MAC as busy in Redis once the stream is actually running
+                            self._mark_mac_as_busy()
+
+                            # Register stream-profile mapping for better tracking
+                            current_profile_id = self._get_current_profile_id()
+                            if current_profile_id:
+                                self._register_stream_profile_mapping(current_profile_id)
+
+                            # Log reconnection event if this is a retry (not first attempt)
+                            if self.retry_count > 0:
+                                try:
+                                    channel_obj = Channel.objects.get(uuid=self.channel_id)
+                                    log_system_event(
+                                        'channel_reconnect',
+                                        channel_id=self.channel_id,
+                                        channel_name=channel_obj.name,
+                                        attempt=self.retry_count + 1,
+                                        max_attempts=self.max_retries
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Could not log reconnection event: {e}")
 
                             # Successfully connected - read stream data until disconnect/error
                             self._process_stream_data()
@@ -324,6 +324,7 @@ class StreamManager:
                             if connection_duration > stable_connection_threshold:
                                 logger.info(f"Stream was stable for {connection_duration:.1f} seconds, resetting switch attempts counter for channel: {self.channel_id}")
                                 stream_switch_attempts = 0
+                                failover_start_time = None  # Reset failover timer on stable connection
 
                         # Connection failed or ended - decide what to do next
                         if self.stop_requested or not self.running:
@@ -338,11 +339,32 @@ class StreamManager:
                         if self.retry_count >= self.max_retries:
                             url_failed = True
                             logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
+
+                            # Log connection error event
+                            try:
+                                channel_obj = Channel.objects.get(uuid=self.channel_id)
+                                log_system_event(
+                                    'channel_error',
+                                    channel_id=self.channel_id,
+                                    channel_name=channel_obj.name,
+                                    error_type='connection_failed',
+                                    url=self.url[:100] if self.url else None,
+                                    attempts=self.max_retries
+                                )
+                            except Exception as e:
+                                logger.error(f"Could not log connection error event: {e}")
                         else:
-                            # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
-                            logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            gevent.sleep(timeout)  # REPLACE time.sleep(timeout)
+                            # Optimized: No delay during stream switch for faster failover
+                            if hasattr(self, 'url_switching') and self.url_switching:
+                                timeout = 0  # Immediate reconnect during stream switch
+                                logger.info(f"Immediate reconnect during stream switch (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            else:
+                                # Wait with exponential backoff before retrying
+                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                                logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            
+                            if timeout > 0:
+                                gevent.sleep(timeout)
 
                     except Exception as e:
                         logger.error(f"Connection error on channel: {self.channel_id}: {e}", exc_info=True)
@@ -351,43 +373,94 @@ class StreamManager:
 
                         if self.retry_count >= self.max_retries:
                             url_failed = True
+
+                            # Log connection error event with exception details
+                            try:
+                                channel_obj = Channel.objects.get(uuid=self.channel_id)
+                                log_system_event(
+                                    'channel_error',
+                                    channel_id=self.channel_id,
+                                    channel_name=channel_obj.name,
+                                    error_type='connection_exception',
+                                    error_message=str(e)[:200],
+                                    url=self.url[:100] if self.url else None,
+                                    attempts=self.max_retries
+                                )
+                            except Exception as log_error:
+                                logger.error(f"Could not log connection error event: {log_error}")
                         else:
-                            # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            # Optimized: No delay during stream switch for faster failover
+                            if hasattr(self, 'url_switching') and self.url_switching:
+                                timeout = 0  # Immediate reconnect during stream switch
+                                logger.info(f"Immediate reconnect during stream switch after error (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
+                            else:
+                                # Wait with exponential backoff before retrying
+                                timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
                             logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                
-                # If URL failed and we're still running, try MAC failover first (for MAC accounts), then profile/stream failover
+                            gevent.sleep(timeout)
+
+                # If URL failed and we're still running, try failover (0.12.0-04 style: MAC → Profile → Stream)
                 if url_failed and self.running:
+                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying failover for channel: {self.channel_id}")
+
+                    # Start failover timer if not already started
+                    if failover_start_time is None:
+                        failover_start_time = time.time()
+                        logger.info(f"Failover started for channel {self.channel_id}, timeout: {failover_total_timeout}s, action: {failover_timeout_action}")
+
+                    # Check failover timeout
+                    failover_elapsed = time.time() - failover_start_time
+                    if failover_elapsed >= failover_total_timeout:
+                        if failover_timeout_action == 'loop':
+                            # Reset and keep trying
+                            logger.warning(f"Failover timeout ({failover_total_timeout}s) reached for channel {self.channel_id}, but action is 'loop' - resetting and continuing")
+                            failover_start_time = time.time()
+                            stream_switch_attempts = 0
+                        else:
+                            # Stop - give up
+                            logger.error(f"Failover timeout ({failover_total_timeout}s) reached for channel {self.channel_id} after {stream_switch_attempts} attempts - giving up")
+                            break
+
                     # First, try to recover by switching to another MAC on the same account/profile (if applicable)
                     mac_switched = False
+                    all_macs_busy = False
                     try:
-                        mac_switched = self._try_next_mac() 
+                        # Reset flag before trying
+                        self._all_macs_busy = False
+                        mac_switched = self._try_next_mac()
+                        # Check if all MACs are busy
+                        all_macs_busy = getattr(self, '_all_macs_busy', False)
                     except Exception:
                         logger.error("Error while attempting MAC-level failover on channel %s", self.channel_id, exc_info=True)
                         mac_switched = False
+                    
                     if mac_switched:
-                        # Reset retry counter and continue outer loop with the new URL/MAC
+                        # Successfully switched MAC, reset retry count and continue
                         self.retry_count = 0
-                        url_failed = False
                         stream_switch_attempts += 1
                         logger.info(f"Successfully switched MAC for channel {self.channel_id}; continuing streaming")
                         continue
-                    # MAC failover did not succeed or is not applicable -> fall back to profile/stream failover
-                    self._set_profile_cooldown()
-                    logger.info(f"URL {self.url} failed after {self.retry_count} attempts, trying next stream for channel: {self.channel_id}")
+                    
+                    # Check if all MACs are busy - if so, skip directly to backup stream
+                    if all_macs_busy:
+                        logger.warning(f"All MACs are BUSY for channel {self.channel_id} - skipping to backup stream/profile failover")
+                        # Don't retry MAC failover, go directly to stream/profile failover
+                    else:
+                        # MAC failover did not succeed or is not applicable
+                        logger.info(f"MAC failover not applicable or failed, trying stream/profile failover for channel: {self.channel_id}")
 
-                    # Try to switch to next stream/profile
+                    # Try to switch to next stream (which will try profiles first)
                     switch_result = self._try_next_stream()
                     if switch_result:
-                        # Successfully switched to a new stream/profile, continue with the new URL
+                        # Successfully switched (either profile or stream), continue with the new URL
                         stream_switch_attempts += 1
-                        logger.info(f"Successfully switched to new stream/profile (attempt {stream_switch_attempts}/{max_stream_switches}) for channel: {self.channel_id}")
+                        logger.info(f"Successfully switched to new URL: {self.url} (switch attempt {stream_switch_attempts}/{max_failover_attempts}) for channel: {self.channel_id}")
                         # Reset retry count for the new stream - important for the loop to work correctly
                         self.retry_count = 0
                         # Continue outer loop with new URL - DON'T add a break statement here
                     else:
-                        # No more streams to try
-                        logger.error(f"Failed to find alternative stream/profile after {stream_switch_attempts} attempts for channel: {self.channel_id}")
+                        # No more streams/profiles to try
+                        logger.error(f"Failed to find alternative streams/profiles after {stream_switch_attempts} attempts for channel: {self.channel_id}")
                         break
                 elif not self.running:
                     # Normal shutdown was requested
@@ -417,7 +490,17 @@ class StreamManager:
             # Close all connections
             self._close_all_connections()
 
-            # Update channel state in Redis to prevent clients from waiting indefinitely
+            # Clear MAC busy status
+            # Note: If stream ended due to failure (not normal stop), COOLDOWN was already set
+            # by _mark_current_mac_cooldown_after_failure() during failover attempts.
+            # This just clears any remaining BUSY flag for cleanup.
+            self._clear_mac_busy_status()
+
+            # Unregister stream-profile mapping
+            self._unregister_stream_profile_mapping()
+
+            # Update channel state in Redis - but ONLY set ERROR if this was NOT a normal stop
+            # Normal stop (client disconnect) should NOT set ERROR state or COOLDOWN
             if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                 try:
                     metadata_key = RedisKeys.channel_metadata(self.channel_id)
@@ -428,27 +511,99 @@ class StreamManager:
 
                     # Use the worker_id that was passed in during initialization
                     if current_owner and self.worker_id and current_owner.decode('utf-8') == self.worker_id:
-                        # Determine the appropriate error message based on retry failures
-                        if self.tried_stream_ids and len(self.tried_stream_ids) > 0:
-                            error_message = f"All {len(self.tried_stream_ids)} stream options failed"
+                        # CRITICAL FIX: Only set ERROR state if this was NOT a normal stop
+                        # Normal stop conditions:
+                        # 1. self.stopping is True (set by stop() method)
+                        # 2. self.stop_requested is True
+                        # 3. Channel has no clients (client disconnected = normal stop)
+                        # 4. Channel stopping key is set in Redis
+                        is_normal_stop = getattr(self, 'stopping', False) or getattr(self, 'stop_requested', False)
+                        
+                        # Check if channel has no clients - this means client disconnected normally
+                        if not is_normal_stop:
+                            try:
+                                client_set_key = RedisKeys.clients(self.channel_id)
+                                client_count = self.buffer.redis_client.scard(client_set_key) or 0
+                                if client_count == 0:
+                                    logger.info(f"No clients connected - treating as normal stop (client disconnect)")
+                                    is_normal_stop = True
+                            except Exception as e:
+                                logger.debug(f"Could not check client count: {e}")
+                        
+                        # Also check if stopping key is already set (another indicator of normal stop)
+                        if not is_normal_stop:
+                            try:
+                                stop_key = RedisKeys.channel_stopping(self.channel_id)
+                                if self.buffer.redis_client.exists(stop_key):
+                                    logger.info(f"Channel stopping key exists - treating as normal stop")
+                                    is_normal_stop = True
+                            except Exception as e:
+                                logger.debug(f"Could not check stopping key: {e}")
+                        
+                        if is_normal_stop:
+                            # Normal stop - just update state to STOPPED, don't set ERROR
+                            logger.info(f"Normal stop for channel {self.channel_id} - clearing state without ERROR")
+                            update_data = {
+                                ChannelMetadataField.STATE: ChannelState.STOPPED,
+                                ChannelMetadataField.STATE_CHANGED_AT: str(time.time()),
+                            }
+                            self.buffer.redis_client.hset(metadata_key, mapping=update_data)
+                            # Set stopping key to ensure clients disconnect cleanly
+                            stop_key = RedisKeys.channel_stopping(self.channel_id)
+                            self.buffer.redis_client.setex(stop_key, 60, "true")
                         else:
-                            error_message = f"Connection failed after {self.max_retries} attempts"
+                            # Actual error - set ERROR state
+                            # Determine the appropriate error message based on retry failures
+                            if self.tried_stream_ids and len(self.tried_stream_ids) > 0:
+                                error_message = f"All {len(self.tried_stream_ids)} stream options failed"
+                            else:
+                                error_message = f"Connection failed after {self.max_retries} attempts"
 
-                        # Update metadata to indicate error state
-                        update_data = {
-                            ChannelMetadataField.STATE: ChannelState.ERROR,
-                            ChannelMetadataField.STATE_CHANGED_AT: str(time.time()),
-                            ChannelMetadataField.ERROR_MESSAGE: error_message,
-                            ChannelMetadataField.ERROR_TIME: str(time.time())
-                        }
-                        self.buffer.redis_client.hset(metadata_key, mapping=update_data)
-                        logger.info(f"Updated channel {self.channel_id} state to ERROR in Redis after stream failure")
+                            # Update metadata to indicate error state
+                            update_data = {
+                                ChannelMetadataField.STATE: ChannelState.ERROR,
+                                ChannelMetadataField.STATE_CHANGED_AT: str(time.time()),
+                                ChannelMetadataField.ERROR_MESSAGE: error_message,
+                                ChannelMetadataField.ERROR_TIME: str(time.time())
+                            }
+                            self.buffer.redis_client.hset(metadata_key, mapping=update_data)
+                            logger.info(f"Updated channel {self.channel_id} state to ERROR in Redis after stream failure")
 
-                        # Also set stopping key to ensure clients disconnect
-                        stop_key = RedisKeys.channel_stopping(self.channel_id)
-                        self.buffer.redis_client.setex(stop_key, 60, "true")
+                            # Also set stopping key to ensure clients disconnect
+                            stop_key = RedisKeys.channel_stopping(self.channel_id)
+                            self.buffer.redis_client.setex(stop_key, 60, "true")
                 except Exception as e:
                     logger.error(f"Failed to update channel state in Redis: {e} for channel {self.channel_id}", exc_info=True)
+
+            # Release failover resources
+            try:
+                from .failover_utils import release_failover_resources
+                
+                # Try to get profile and MAC IDs from metadata for cleanup
+                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                    metadata = self.buffer.redis_client.hgetall(metadata_key)
+                    
+                    profile_id = None
+                    mac_id = None
+                    
+                    if metadata:
+                        profile_str = metadata.get(ChannelMetadataField.M3U_PROFILE.encode())
+                        if profile_str:
+                            try:
+                                profile_id = int(profile_str.decode())
+                            except (ValueError, AttributeError):
+                                pass
+                        
+                        # MAC ID would need to be stored in metadata during failover
+                        # For now, we'll just release profile resources
+                    
+                    if profile_id or mac_id:
+                        release_failover_resources(self.channel_id, profile_id, mac_id)
+                        logger.debug(f"Released failover resources for channel {self.channel_id}")
+                        
+            except Exception as e:
+                logger.error(f"Error releasing failover resources for channel {self.channel_id}: {e}")
 
             # Close database connection for this thread
             try:
@@ -458,209 +613,238 @@ class StreamManager:
 
             logger.info(f"Stream manager stopped for channel {self.channel_id}")
 
-    # VOLLSTÄNDIG ÜBERARBEITETE METHODE: _try_next_mac
-    def _try_next_mac(self) -> bool:
-        """
-        Attempt to switch to another MAC address on the same account/profile.
-        Integrates MAC cooldown logic (6h in Redis) and respects mac_busy status.
-
-        Returns:
-            bool: True on successful MAC switch, False otherwise
-        """
-        # 1. MAC-Wert ermitteln: Zuerst von der Instanz-Eigenschaft, dann von der URL.
-        current_mac_value = getattr(self, 'mac_address', None)
+    def _mark_mac_as_busy(self):
+        """Mark MAC address as BUSY in Redis after connection is established.
         
-        if not current_mac_value:
-             # Fallback: Extrahiere MAC aus der URL (falls noch nicht in der Eigenschaft gespeichert)
-             parsed = urlparse(self.url or '')
-             qs = parse_qs(parsed.query or '')
-             mac_vals = qs.get('mac') or qs.get('MAC') or []
-             if mac_vals:
-                 current_mac_value = mac_vals[0]
-                 
-        if not current_mac_value:
-            logger.debug("No MAC address found in current stream URL for channel %s. Cannot perform MAC failover.", self.channel_id)
-            return False
-
+        This upgrades the temporary BUSY flag (30s TTL) set during URL resolution
+        to a permanent BUSY flag (no TTL). This ensures:
+        1. Race condition prevention: temporary flag blocks other streams during connection
+        2. No stuck MACs: if connection fails, temporary flag auto-expires after 30s
+        3. Proper tracking: permanent flag stays until stream ends
+        """
         try:
-            # Holen Sie sich das M3U-Konto, das diesen Kanal verwendet.
-            # Wichtig: Wir müssen nur nach Kanälen suchen, die diesem Kanal (über eine Stream-Tabelle) zugeordnet sind.
-            channel = get_object_or_404(Channel, pk=self.channel_id)
-            m3u_account = M3UAccount.objects.select_related("profile").filter(
-                channels=channel
-            ).first()
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+
+            # Extract MAC address from current URL
+            mac_address = self._extract_mac_from_url(self.url)
+            if not mac_address:
+                return
+
+            # Get MAC entry from database
+            mac_entry = self._get_mac_entry_from_address(mac_address)
+            if not mac_entry:
+                return
+
+            mac_state = MACStateManager(self.buffer.redis_client)
+            
+            # Clear old MAC BUSY flag if we're switching to a new MAC
+            if hasattr(self, 'mac_entry_id') and self.mac_entry_id and self.mac_entry_id != mac_entry.id:
+                logger.info(f"Switching MAC: clearing BUSY for old MAC id={self.mac_entry_id}, setting BUSY for new MAC {mac_address} (id={mac_entry.id})")
+                mac_state.clear_busy(self.mac_entry_id)
+            
+            # Upgrade temporary BUSY (30s TTL) to permanent BUSY (no TTL)
+            # This is safe because the temporary flag was set during URL resolution
+            mac_state.mark_busy(mac_entry.id)
+            
+            # Store MAC info for cleanup later
+            self.mac_address = mac_address
+            self.mac_entry_id = mac_entry.id
+            
+            logger.info(f"MAC {mac_address} (id={mac_entry.id}) marked as BUSY (permanent) after connection established for channel {self.channel_id}")
+            
         except Exception as e:
-            logger.error(
-                "Failed to get M3U account for channel %s during MAC failover: %s",
-                self.channel_id,
-                e,
-                exc_info=True,
-            )
-            return False
+            logger.error(f"Failed to mark MAC as BUSY for channel {self.channel_id}: {e}")
 
-        if not m3u_account or not m3u_account.profile:
-            return False
-
-        mac_entry = None
+    def _clear_mac_busy_status(self):
+        """Clear the busy status for the current MAC address."""
         try:
-            # Finde den Datenbank-Eintrag für die fehlerhafte MAC-Adresse
-            mac_entry = m3u_account.macs.filter(address__iexact=current_mac_value).first()
-        except Exception:
-            pass 
-
-        # Redis Client aus dem Buffer holen
-        redis_client = getattr(self.buffer, 'redis_client', None)
-
-        # ----------------------------------------------------------------------
-        # MAC Cooldown setzen und Busy-Flag löschen (für die fehlerhafte MAC)
-        # ----------------------------------------------------------------------
-        
-        if mac_entry and redis_client:
-            COOLDOWN_DURATION = 10 * 60  # 10x 60 Sekunden also 6 Minuten Cooldown
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
             
-            # 1. MAC temporär in Cooldown setzen (in Redis)
-            try:
-                mac_cooldown_key = RedisKeys.mac_cooldown(mac_entry.id)
-                redis_client.setex(mac_cooldown_key, COOLDOWN_DURATION, "1")
+            mac_id_to_clear = None
+            mac_address_for_log = "unknown"
+            
+            # First try to use stored mac_entry_id
+            if hasattr(self, 'mac_entry_id') and self.mac_entry_id:
+                mac_id_to_clear = self.mac_entry_id
+                mac_address_for_log = getattr(self, 'mac_address', 'unknown')
+            else:
+                # Fallback: Try to extract MAC from URL and look up in database
+                # This handles cases where mac_entry_id wasn't set (e.g., connection failed early)
+                mac_address = self._extract_mac_from_url(self.url)
+                if mac_address:
+                    mac_entry = self._get_mac_entry_from_address(mac_address)
+                    if mac_entry:
+                        mac_id_to_clear = mac_entry.id
+                        mac_address_for_log = mac_address
+                        logger.debug(f"Found MAC from URL for cleanup: {mac_address} (id={mac_entry.id})")
+            
+            if not mac_id_to_clear:
+                logger.debug(f"No MAC to clear for channel {self.channel_id}")
+                return
 
-                logger.warning(
-                    "Put failed MAC %s (ID: %s) on %dm cooldown due to runtime failure on channel %s.",
-                    current_mac_value,
-                    mac_entry.id,
-                    COOLDOWN_DURATION // 60,
-                    self.channel_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to set MAC Cooldown in Redis for MAC %s",
-                    current_mac_value,
-                    exc_info=True,
-                )
+            # Use MACStateManager to clear BUSY
+            mac_state = MACStateManager(self.buffer.redis_client)
+            mac_state.clear_busy(mac_id_to_clear)
+            
+            logger.info(f"Cleared BUSY status for MAC {mac_address_for_log} (id={mac_id_to_clear}) on channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to clear MAC busy status for channel {self.channel_id}: {e}")
 
-            # 2. Busy-Markierung löschen (Aufräumschritt)
-            try:
-                busy_key = RedisKeys.mac_busy(mac_entry.id)
-                redis_client.delete(busy_key)
-                logger.debug(
-                    "Cleared busy marker for failed MAC %s (id=%s) on account %s",
-                    current_mac_value,
-                    mac_entry.id,
-                    m3u_account.id,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to clear busy marker for MAC %s",
-                    current_mac_value,
-                    exc_info=True,
-                )
-        elif not mac_entry:
-            logger.debug(
-                "Could not find M3UAccountMac entry for MAC %s to apply cooldown.",
-                current_mac_value,
-            )
-        elif not redis_client:
-            logger.warning(
-                "No Redis client available. Could not set cooldown or clear busy key for MAC %s.",
-                current_mac_value,
-            )
-        
-        # ----------------------------------------------------------------------
-        # Auswahl der nächsten MAC (mit Cooldown- und Busy-Prüfung)
-        # ----------------------------------------------------------------------
-
+    def _extract_mac_from_url(self, url):
+        """Extract MAC address from URL query parameters."""
+        if not url:
+            return None
+            
         try:
-            # 1. Alle aktiven MACs abrufen (aus der Datenbank)
-            macs = m3u_account.macs.filter(
-                status=M3UAccountMac.Status.ACTIVE
-            ).order_by("last_checked")
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(url)
+            qs = parse_qs(parsed.query or "")
+            mac_vals = qs.get("mac") or qs.get("MAC") or []
+            return mac_vals[0] if mac_vals else None
         except Exception:
-            logger.error("Failed to query next MACs for account %s", m3u_account.id)
-            return False
+            return None
 
-        if not macs:
-            logger.warning(
-                "No ACTIVE MACs found for account %s to switch to.",
-                m3u_account.id,
-            )
-            return False
-
-        next_mac_entry = None
-        for mac in macs:
-            # Überspringen Sie die gerade fehlerhafte MAC
-            if str(mac.address).upper() == current_mac_value.upper():
-                continue
-            
-            if redis_client:
-                # Cooldown-Prüfung
-                cooldown_key = RedisKeys.mac_cooldown(mac.id)
-                if redis_client.exists(cooldown_key):
-                    logger.debug(
-                        "MAC %s (ID: %s) is currently in cooldown in Redis. Skipping.",
-                        mac.address,
-                        mac.id,
-                    )
-                    continue
-            
-                # Busy-Prüfung (Wird von einem anderen StreamManager verwendet?)
-                busy_key = RedisKeys.mac_busy(mac.id)
-                if redis_client.exists(busy_key):
-                    logger.debug(
-                        "MAC %s (ID: %s) is currently busy in Redis. Skipping.",
-                        mac.address,
-                        mac.id,
-                    )
-                    continue
-
-            # Diese MAC ist verfügbar
-            next_mac_entry = mac
-            break
+    def _get_mac_entry_from_address(self, mac_address):
+        """Get MAC entry from database by address.
         
-        if not next_mac_entry:
-            logger.warning(
-                "All remaining ACTIVE MACs for account %s are either busy or in COOLDOWN. Trying Stream/Profile failover.",
-                m3u_account.id,
-            )
-            # Setzen Sie hier keinen Cooldown für das Profil, da das Problem auf MAC-Ebene liegt
-            # und wir im Haupt-Loop zum Profil-Failover wechseln werden.
-            return False
+        Note: Since MAC addresses can exist in multiple accounts (unique per account),
+        this method tries to find the correct one by:
+        1. Using stored m3u_profile_id if available
+        2. Falling back to first match (may be wrong if same MAC in multiple accounts)
+        
+        For reliable cleanup, always use stored mac_entry_id when available.
+        """
+        if not mac_address:
+            return None
             
-        # Nächste MAC gefunden, URL und Metadaten aktualisieren
-        self.mac_address = next_mac_entry.address
-        self.mac_entry_id = next_mac_entry.id
-        
-        # 3. Ersetzen Sie die alte MAC in der URL durch die neue MAC
-        # Wir müssen den Wert escapen, da er Sonderzeichen enthalten könnte
-        escaped_old_mac = re.escape(current_mac_value)
-        # Regex: Finde '?mac=OLD_MAC' oder '&mac=OLD_MAC' (case-insensitive)
-        self.url = re.sub(
-            r"([?&](mac|MAC)=)" + escaped_old_mac,
-            r"\1" + self.mac_address,
-            self.url,
-            flags=re.IGNORECASE,
-        )
-        
-        # Setzen der neuen MAC in den Metadaten
         try:
-            self._set_channel_metadata(ChannelMetadataField.M3U_MAC, self.mac_address)
-            self._set_channel_metadata(ChannelMetadataField.M3U_MAC_ID, self.mac_entry_id)
+            from apps.m3u.models import M3UAccountMac
+            
+            # Try to narrow down by profile if we have it stored
+            profile_id = getattr(self, 'current_profile_id', None)
+            if profile_id:
+                # Get account from profile and filter by that
+                from apps.m3u.models import M3UAccountProfile
+                try:
+                    profile = M3UAccountProfile.objects.select_related('m3u_account').get(id=profile_id)
+                    mac_entry = M3UAccountMac.objects.filter(
+                        account=profile.m3u_account,
+                        address__iexact=mac_address
+                    ).first()
+                    if mac_entry:
+                        return mac_entry
+                except Exception:
+                    pass
+            
+            # Fallback: return first match (may be wrong if same MAC in multiple accounts)
+            # This is only used as last resort - normally mac_entry_id should be used
+            return M3UAccountMac.objects.filter(address__iexact=mac_address).first()
         except Exception:
-            logger.error("Failed to set new MAC metadata.")
+            return None
 
-        logger.warning(
-            "Successfully switched from MAC %s to MAC %s for account %s on channel %s",
-            current_mac_value,
-            self.mac_address,
-            m3u_account.id,
-            self.channel_id,
-        )
-        return True
+    def _register_stream_profile_mapping(self, profile_id):
+        """Register the current stream-profile mapping in Redis."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+                
+            if not self.current_stream_id or not profile_id:
+                return
 
-    # Methoden, die nicht geändert wurden, müssen in der Implementierung enthalten sein,
-    # um die Struktur zu vervollständigen.
-    
+            # Map stream to profile (1 hour TTL like original)
+            mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+            self.buffer.redis_client.setex(mapping_key, 3600, str(profile_id))
+            
+            # Add stream to profile's active streams set
+            active_streams_key = RedisKeys.profile_active_streams(profile_id)
+            self.buffer.redis_client.sadd(active_streams_key, str(self.current_stream_id))
+            self.buffer.redis_client.expire(active_streams_key, 3600)
+            
+            logger.debug(f"Registered stream {self.current_stream_id} -> profile {profile_id} mapping for channel {self.channel_id}")
+            
+        except Exception as e:
+            logger.debug(f"Failed to register stream-profile mapping for channel {self.channel_id}: {e}")
+
+    def _unregister_stream_profile_mapping(self):
+        """Unregister the current stream-profile mapping from Redis."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return
+                
+            if not self.current_stream_id:
+                return
+
+            # Get current profile mapping
+            mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+            profile_id_bytes = self.buffer.redis_client.get(mapping_key)
+            
+            if profile_id_bytes:
+                try:
+                    profile_id = int(profile_id_bytes.decode())
+                    
+                    # Remove stream from profile's active streams set
+                    active_streams_key = RedisKeys.profile_active_streams(profile_id)
+                    self.buffer.redis_client.srem(active_streams_key, str(self.current_stream_id))
+                    
+                    logger.debug(f"Unregistered stream {self.current_stream_id} from profile {profile_id} for channel {self.channel_id}")
+                    
+                except (ValueError, AttributeError):
+                    pass
+            
+            # Remove stream-profile mapping
+            self.buffer.redis_client.delete(mapping_key)
+            
+        except Exception as e:
+            logger.debug(f"Failed to unregister stream-profile mapping for channel {self.channel_id}: {e}")
+
+    def _get_profile_active_stream_count(self, profile_id):
+        """Get the number of active streams for a profile."""
+        try:
+            if not hasattr(self.buffer, 'redis_client') or not self.buffer.redis_client:
+                return 0
+                
+            active_streams_key = RedisKeys.profile_active_streams(profile_id)
+            return self.buffer.redis_client.scard(active_streams_key)
+            
+        except Exception:
+            return 0
+
+    def _get_current_profile_id(self):
+        """Get the current profile ID for this stream from Redis or metadata."""
+        try:
+            # First try stream-profile mapping
+            if self.current_stream_id and hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                mapping_key = RedisKeys.stream_profile_mapping(self.current_stream_id)
+                profile_id_bytes = self.buffer.redis_client.get(mapping_key)
+                if profile_id_bytes:
+                    try:
+                        return int(profile_id_bytes.decode())
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # Fallback to channel metadata
+            if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                metadata = self.buffer.redis_client.hgetall(metadata_key)
+                if metadata:
+                    profile_str = metadata.get(ChannelMetadataField.M3U_PROFILE.encode())
+                    if profile_str:
+                        try:
+                            return int(profile_str.decode())
+                        except (ValueError, AttributeError):
+                            pass
+            
+            return None
+            
+        except Exception:
+            return None
+
+
     def _establish_transcode_connection(self):
         """Establish a connection using transcoding"""
-        # [IHR VORHANDENER CODE FÜR _establish_transcode_connection]
         try:
             logger.debug(f"Building transcode command for channel {self.channel_id}")
 
@@ -694,8 +878,63 @@ class StreamManager:
             else:
                 stream_profile = channel.get_stream_profile()
 
+            # Get proxy from associated M3U account if available
+            proxy = self._get_account_proxy(channel)
+            
+            if proxy:
+                logger.info(f"Using account-specific proxy for channel {self.channel_id}: {proxy}")
+            else:
+                logger.info(f"No proxy configured for channel {self.channel_id}")
+            
+            # Resolve mac:// URLs before passing to FFmpeg
+            stream_url = self.url
+            if stream_url and stream_url.startswith("mac://"):
+                logger.info(f"Resolving mac:// URL for FFmpeg...")
+                try:
+                    # Get stream and M3U account objects for proper MAC resolution
+                    from apps.channels.models import Stream
+                    from apps.m3u.models import M3UAccount
+                    
+                    stream_obj = None
+                    m3u_account_obj = None
+                    
+                    if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                        try:
+                            stream_obj = Stream.objects.get(id=self.current_stream_id)
+                            m3u_account_obj = stream_obj.m3u_account
+                        except Stream.DoesNotExist:
+                            logger.warning(f"Stream {self.current_stream_id} not found for MAC resolution")
+                    
+                    # Use transform_url for proper MAC resolution with BUSY flag
+                    if stream_obj and m3u_account_obj:
+                        from .url_utils import transform_url
+                        # For MAC URLs, transform_url will use _resolve_mac_stream_with_failover
+                        # which sets BUSY flag and extracts correct stream ID
+                        resolved_url = transform_url(stream_url, r'(.*)', r'\1', stream_obj, m3u_account_obj)
+                        
+                        # Check if URL was actually resolved (not still mac://)
+                        if resolved_url and not resolved_url.startswith("mac://"):
+                            stream_url = resolved_url
+                            logger.info(f"Resolved mac:// URL via transform_url to: {stream_url[:80]}...")
+                        else:
+                            # transform_url failed (all MACs busy/cooldown)
+                            # DO NOT use fallback that bypasses BUSY check!
+                            logger.error("transform_url failed to resolve MAC URL - all MACs busy/cooldown. Cannot stream.")
+                            raise Exception("All MACs are busy or in cooldown - cannot resolve MAC URL")
+                    else:
+                        # Stream/Account objects not available - this is a bug
+                        # DO NOT use fallback that bypasses BUSY check!
+                        logger.error("Stream/Account objects not available for MAC resolution - cannot ensure BUSY flag is checked")
+                        raise Exception("Cannot resolve MAC URL without stream/account objects")
+                except Exception as e:
+                    logger.error(f"Failed to resolve mac:// URL: {e}")
+                    raise
+            
             # Build and start transcode command
-            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+            self.transcode_cmd = stream_profile.build_command(stream_url, self.user_agent, proxy)
+            
+            # Log the final command for debugging
+            logger.info(f"ffmpeg command for channel {self.channel_id}: {' '.join(self.transcode_cmd)}")
 
             # For UDP streams, remove any user_agent parameters from the command
             if hasattr(self, 'stream_type') and self.stream_type == StreamType.UDP:
@@ -710,7 +949,7 @@ class StreamManager:
                 self.transcode_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,  # Capture stderr instead of discarding it
-                bufsize=188 * 64         # Buffer optimized for TS packets
+                bufsize=188 * 64            # Buffer optimized for TS packets
             )
 
             # Start a thread to read stderr
@@ -746,7 +985,6 @@ class StreamManager:
 
     def _read_stderr(self):
         """Read and log ffmpeg stderr output with real-time stats parsing"""
-        # [IHR VORHANDENER CODE FÜR _read_stderr, wie im letzten Schritt korrigiert]
         try:
             buffer = b""
             last_stats_line = b""
@@ -762,13 +1000,9 @@ class StreamManager:
                     buffer += byte
 
                     # Check for frame= at the start of buffer (new stats line)
-                    if buffer.endswith(b"frame="):
+                    if buffer == b"frame=":
                         # We detected the start of a stats line, read until we get a complete line
                         # or hit a carriage return (which overwrites the previous stats)
-                        
-                        # Remove the "frame=" we just found to start clean
-                        buffer = buffer[:-6]
-                        
                         while True:
                             next_byte = self.transcode_process.stderr.read(1)
                             if not next_byte:
@@ -788,14 +1022,9 @@ class StreamManager:
                         if buffer.strip():
                             try:
                                 stats_text = buffer.decode('utf-8', errors='ignore').strip()
-                                # Prepend "frame=" back for proper parsing, if it was indeed stats
-                                if "frame=" not in stats_text:
-                                    stats_text = "frame=" + stats_text
-                                    
                                 if stats_text and "frame=" in stats_text:
                                     self._parse_ffmpeg_stats(stats_text)
-                                    # Log stats content at debug level
-                                    self._log_stderr_content(stats_text) 
+                                    self._log_stderr_content(stats_text)
                             except Exception as e:
                                 logger.debug(f"Error parsing immediate stats line: {e}")
 
@@ -808,7 +1037,7 @@ class StreamManager:
                         if buffer.strip():
                             line_text = buffer.decode('utf-8', errors='ignore').strip()
                             if line_text and not line_text.startswith("frame="):
-                                logger.info(f"FFmpeg STDOUT/STDERR: {line_text}")
+                                self._log_stderr_content(line_text)
                         buffer = b""
 
                     # Handle carriage returns (potential stats overwrite)
@@ -826,7 +1055,7 @@ class StreamManager:
                             # Regular content with carriage return
                             line_text = buffer.decode('utf-8', errors='ignore').strip()
                             if line_text:
-                                logger.info(f"FFmpeg STDOUT/STDERR: {line_text}")
+                                self._log_stderr_content(line_text)
                         buffer = b""
 
                     # Prevent buffer from growing too large for non-stats content
@@ -835,19 +1064,79 @@ class StreamManager:
                         if buffer.strip():
                             line_text = buffer.decode('utf-8', errors='ignore').strip()
                             if line_text:
-                                logger.info(f"FFmpeg STDOUT/STDERR: {line_text}")
+                                self._log_stderr_content(line_text)
                         buffer = b""
 
-                except socket.timeout:
-                    # Ignore timeout when reading pipe (should not happen with blocking read, but for safety)
-                    continue
                 except Exception as e:
-                    logger.error(f"Error reading FFmpeg stderr for channel {self.channel_id}: {e}", exc_info=True)
+                    logger.error(f"Error reading stderr byte: {e}")
                     break
+
+            # Process any remaining buffer content
+            if buffer.strip():
+                try:
+                    remaining_text = buffer.decode('utf-8', errors='ignore').strip()
+                    if remaining_text:
+                        if "frame=" in remaining_text:
+                            self._parse_ffmpeg_stats(remaining_text)
+                        self._log_stderr_content(remaining_text)
+                except Exception as e:
+                    logger.debug(f"Error processing remaining buffer: {e}")
+
         except Exception as e:
-            logger.error(f"Critical error in stderr reader thread for channel {self.channel_id}: {e}", exc_info=True)
-        finally:
-            logger.debug(f"FFmpeg stderr reader thread stopped for channel {self.channel_id}")
+            # Catch any other exceptions in the thread to prevent crashes
+            try:
+                logger.error(f"Error in stderr reader thread for channel {self.channel_id}: {e}")
+            except Exception:
+                pass
+
+    def _log_stderr_content(self, content):
+        """Log stderr content from FFmpeg with appropriate log levels"""
+        try:
+            content = content.strip()
+            if not content:
+                return
+
+            # Convert to lowercase for easier matching
+            content_lower = content.lower()
+            # Check if we are still in the input phase
+            if content_lower.startswith('input #') or 'decoder' in content_lower:
+                self.ffmpeg_input_phase = True
+            # Track FFmpeg phases - once we see output info, we're past input phase
+            if content_lower.startswith('output #') or 'encoder' in content_lower:
+                self.ffmpeg_input_phase = False
+
+            # Only parse stream info if we're still in the input phase
+            if ("stream #" in content_lower and
+                ("video:" in content_lower or "audio:" in content_lower) and
+                self.ffmpeg_input_phase):
+
+                from .services.channel_service import ChannelService
+                if "video:" in content_lower:
+                    ChannelService.parse_and_store_stream_info(self.channel_id, content, "video", self.current_stream_id)
+                elif "audio:" in content_lower:
+                    ChannelService.parse_and_store_stream_info(self.channel_id, content, "audio", self.current_stream_id)
+
+            # Determine log level based on content
+            if any(keyword in content_lower for keyword in ['error', 'failed', 'cannot', 'invalid', 'corrupt']):
+                logger.error(f"FFmpeg stderr for channel {self.channel_id}: {content}")
+            elif any(keyword in content_lower for keyword in ['warning', 'deprecated', 'ignoring']):
+                logger.warning(f"FFmpeg stderr for channel {self.channel_id}: {content}")
+            elif content.startswith('frame=') or 'fps=' in content or 'speed=' in content:
+                # Stats lines - log at trace level to avoid spam
+                logger.trace(f"FFmpeg stats for channel {self.channel_id}: {content}")
+            elif any(keyword in content_lower for keyword in ['input', 'output', 'stream', 'video', 'audio']):
+                # Stream info - log at info level
+                logger.info(f"FFmpeg info for channel {self.channel_id}: {content}")
+                if content.startswith('Input #0'):
+                    # If it's input 0, parse stream info
+                    from .services.channel_service import ChannelService
+                    ChannelService.parse_and_store_stream_info(self.channel_id, content, "input", self.current_stream_id)
+            else:
+                # Everything else at debug level
+                logger.debug(f"FFmpeg stderr for channel {self.channel_id}: {content}")
+
+        except Exception as e:
+            logger.error(f"Error logging stderr content for channel {self.channel_id}: {e}")
 
     def _parse_ffmpeg_stats(self, stats_line):
         """Parse FFmpeg stats line and extract speed, fps, and bitrate"""
@@ -917,6 +1206,19 @@ class StreamManager:
                                 # Reset buffering state
                                 self.buffering = False
                                 self.buffering_start_time = None
+
+                                # Log failover event
+                                try:
+                                    channel_obj = Channel.objects.get(uuid=self.channel_id)
+                                    log_system_event(
+                                        'channel_failover',
+                                        channel_id=self.channel_id,
+                                        channel_name=channel_obj.name,
+                                        reason='buffering_timeout',
+                                        duration=buffering_duration
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Could not log failover event: {e}")
                             else:
                                 logger.error(f"Failed to switch to next stream for channel {self.channel_id} after buffering timeout")
                 else:
@@ -924,6 +1226,19 @@ class StreamManager:
                     self.buffering = True
                     self.buffering_start_time = time.time()
                     logger.warning(f"Buffering started for channel {self.channel_id} - speed: {ffmpeg_speed}x")
+
+                    # Log system event for buffering
+                    try:
+                        channel_obj = Channel.objects.get(uuid=self.channel_id)
+                        log_system_event(
+                            'channel_buffering',
+                            channel_id=self.channel_id,
+                            channel_name=channel_obj.name,
+                            speed=ffmpeg_speed
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not log buffering event: {e}")
+
                 # Log buffering warning
                 logger.debug(f"FFmpeg speed on channel {self.channel_id} is below {self.buffering_speed} ({ffmpeg_speed}x) - buffering detected")
                 # Set channel state to buffering
@@ -1104,49 +1419,14 @@ class StreamManager:
         # Add at the beginning of your stop method
         self.stopping = True
 
+        # Clear MAC busy status when stopping
+        self._clear_mac_busy_status()
+
         # Release stream resources if we're the owner
         if self.current_stream_id and hasattr(self, 'worker_id') and self.worker_id:
             if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                 owner_key = RedisKeys.channel_owner(self.channel_id)
                 current_owner = self.buffer.redis_client.get(owner_key)
-
-                # Beim Stoppen eines Streams die ggf. gesetzte MAC-Busy-Markierung
-                # wieder aufheben. Dazu versuchen wir, die aktuell verwendete MAC
-                # aus der URL zu ermitteln und den passenden M3UAccountMac-Eintrag
-                # zu finden.
-                try:
-                    parsed = urlparse(self.url or "")
-                    qs = parse_qs(parsed.query or "")
-                    mac_vals = qs.get("mac") or qs.get("MAC") or []
-                    if mac_vals:
-                        mac_value = mac_vals[0]
-                        try:
-                            mac_entry = M3UAccountMac.objects.filter(address__iexact=mac_value).first()
-                        except Exception:
-                            mac_entry = None
-                        if mac_entry:
-                            try:
-                                busy_key = RedisKeys.mac_busy(mac_entry.id)
-                                self.buffer.redis_client.delete(busy_key)
-                                logger.debug(
-                                    "Cleared busy marker for MAC %s (id=%s) on channel %s during stop()",
-                                    mac_value,
-                                    mac_entry.id,
-                                    self.channel_id,
-                                )
-                            except Exception:
-                                logger.debug(
-                                    "Failed to clear busy marker for MAC %s during stop() on channel %s",
-                                    mac_value,
-                                    self.channel_id,
-                                    exc_info=True,
-                                )
-                except Exception:
-                    logger.debug(
-                        "Failed to inspect current MAC when stopping stream for channel %s",
-                        self.channel_id,
-                        exc_info=True,
-                    )
 
         # Cancel all buffer check timers
         for timer in list(self._buffer_check_timers):
@@ -1196,14 +1476,14 @@ class StreamManager:
         # Update stream profile if we're switching streams
         if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
             try:
-                # Get the channel by UUID
-                channel = Channel.objects.get(uuid=self.channel_id)
-
-                # Get stream to find its profile
-                #new_stream = Stream.objects.get(pk=stream_id)
-
+                # Get the channel by UUID or stream_hash
+                from .utils import get_channel_by_id
+                channel = get_channel_by_id(self.channel_id)
+                if not channel:
+                    logger.warning(f"Could not find channel for ID {self.channel_id} during stream switch")
+                
                 # Use the new method to update the profile and manage connection counts
-                if m3u_profile_id:
+                if channel and m3u_profile_id:
                     success = channel.update_stream_profile(m3u_profile_id)
                     if success:
                         logger.debug(f"Updated m3u profile for channel {self.channel_id} to use profile from stream {stream_id}")
@@ -1225,9 +1505,26 @@ class StreamManager:
         self.url_switch_start_time = time.time()
 
         try:
+            # Clear MAC busy status before switching (normal channel change, not failover)
+            # This ensures the MAC is available for other channels immediately
+            self._clear_mac_busy_status()
+            
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:
                 logger.debug(f"Closing transcode process before URL change for channel {self.channel_id}")
+                # Give FFmpeg time to flush its buffers before closing
+                if self.transcode_process and self.transcode_process.poll() is None:
+                    try:
+                        # Send SIGTERM first for graceful shutdown
+                        self.transcode_process.terminate()
+                        # Wait briefly for graceful termination
+                        gevent.sleep(0.1)
+                        # Force kill if still running
+                        if self.transcode_process.poll() is None:
+                            self.transcode_process.kill()
+                            gevent.sleep(0.05)
+                    except Exception as e:
+                        logger.debug(f"Error during graceful FFmpeg shutdown: {e}")
                 self._close_socket()
             else:
                 logger.debug(f"Closing HTTP connection before URL change for channel {self.channel_id}")
@@ -1238,24 +1535,102 @@ class StreamManager:
             self.url = new_url
             self.connected = False
 
+            # Track old values for comparison
+            old_stream_id = self.current_stream_id
+            old_profile_id = getattr(self, 'current_profile_id', None)
+            
             # Update stream ID if provided
             if stream_id:
-                old_stream_id = self.current_stream_id
                 self.current_stream_id = stream_id
                 # Add stream ID to tried streams for proper tracking
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
 
-            # Reset retry counter to allow immediate reconnect
-            self.retry_count = 0
+            # Update profile ID if provided
+            if m3u_profile_id:
+                self.current_profile_id = m3u_profile_id
+                logger.info(f"Updated profile ID from {old_profile_id} to {m3u_profile_id} for channel {self.channel_id}")
 
-            # Also reset buffer position to prevent stale data after URL change
-            if hasattr(self.buffer, 'reset_buffer_position'):
-                try:
-                    self.buffer.reset_buffer_position()
-                    logger.debug("Reset buffer position for clean URL switch")
-                except Exception as e:
-                    logger.warning(f"Failed to reset buffer position: {e}")
+            # Small delay to ensure clean state after closing old connection
+            # This prevents "Broken pipe" errors when switching streams
+            gevent.sleep(0.25)
+  
+
+            # Intelligent buffer clearing decision
+            # Clear buffer if:
+            # 1. Stream ID changed (different stream)
+            # 2. Profile ID changed (MAC → M3U or different account, likely different codec)
+            stream_id_changed = old_stream_id and stream_id and old_stream_id != stream_id
+            profile_id_changed = old_profile_id and m3u_profile_id and old_profile_id != m3u_profile_id
+            
+            if stream_id_changed or profile_id_changed:
+                # Something changed - check if buffer clearing is needed
+                should_clear = False
+                
+                # Check if legacy buffer mode is enabled (0.12.0-04 style)
+                if ConfigHelper.legacy_buffer_mode():
+                    should_clear = True
+                    logger.info(f"Stream/Profile changed, will clear buffer (legacy mode 0.12.0-04 enabled)")
+                elif ConfigHelper.smart_buffer_clear_enabled():
+                    # Smart mode: Check codec/resolution for both stream and profile changes
+                    if stream_id_changed:
+                        # Stream changed - check if codec/resolution differs
+                        should_clear = self._should_clear_buffer_for_stream_switch(old_stream_id, stream_id)
+                        if should_clear:
+                            logger.info(f"Stream ID changed with different codec/resolution, will clear buffer")
+                        else:
+                            logger.info(f"Stream ID changed but codec/resolution compatible, keeping buffer")
+                    elif profile_id_changed:
+                        # Profile changed but same stream - check if we can compare codecs
+                        # Since it's the same stream ID, codec should be the same
+                        # But different profiles might use different sources/encodings
+                        # For now, keep buffer (seamless) since stream ID is same
+                        should_clear = False
+                        logger.info(f"Profile ID changed from {old_profile_id} to {m3u_profile_id} but same stream, keeping buffer for seamless transition")
+                else:
+                    # Smart mode disabled - always clear on stream/profile change
+                    should_clear = True
+                    logger.info(f"Stream/Profile changed, will clear buffer (smart mode disabled)")
+                
+                if should_clear:
+                    logger.info(f"Stream/Profile changed, clearing buffer immediately to prevent codec mismatch")
+                    # Clear buffer IMMEDIATELY, not on next data
+                    try:
+                        if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                            # Clear all buffer chunks
+                            buffer_index_key = RedisKeys.buffer_index(self.channel_id)
+                            current_index = int(self.buffer.redis_client.get(buffer_index_key) or 0)
+                            
+                            # Delete last 100 chunks to ensure clean slate
+                            for i in range(current_index - 100, current_index + 1):
+                                chunk_key = RedisKeys.buffer_chunk(self.channel_id, i)
+                                self.buffer.redis_client.delete(chunk_key)
+                            
+                            # Reset buffer index to 0
+                            self.buffer.redis_client.set(buffer_index_key, 0)
+                            self.buffer.index = 0
+                            
+                            logger.info(f"Buffer cleared immediately for channel {self.channel_id} - ready for new stream data")
+                    except Exception as e:
+                        logger.error(f"Error clearing buffer immediately: {e}")
+                else:
+                    logger.info(f"Stream changed but codec/resolution compatible, keeping buffer for seamless transition")
+            else:
+                # Same stream and profile (MAC failover within same account) - keep buffer for seamless transition
+                logger.debug(f"Same stream and profile, keeping buffer for seamless MAC failover")
+
+            # Log stream switch event
+            try:
+                channel_obj = Channel.objects.get(uuid=self.channel_id)
+                log_system_event(
+                    'stream_switch',
+                    channel_id=self.channel_id,
+                    channel_name=channel_obj.name,
+                    new_url=new_url[:100] if new_url else None,
+                    stream_id=stream_id
+                )
+            except Exception as e:
+                logger.error(f"Could not log stream switch event: {e}")
 
             return True
         except Exception as e:
@@ -1285,7 +1660,12 @@ class StreamManager:
             try:
                 now = time.time()
                 inactivity_duration = now - self.last_data_time
-                timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
+                
+                # Optimized: Longer timeout during stream switching to allow FFmpeg to start
+                if hasattr(self, 'url_switching') and self.url_switching:
+                    timeout_threshold = ConfigHelper.health_check_timeout_switching()  # Configurable timeout during stream switch
+                else:
+                    timeout_threshold = ConfigHelper.health_check_timeout()  # Configurable normal timeout
 
                 if inactivity_duration > timeout_threshold and self.connected:
                     if self.healthy:
@@ -1293,6 +1673,10 @@ class StreamManager:
                         self.healthy = False
 
                     consecutive_unhealthy_checks += 1
+                    
+                    # Log subsequent unhealthy checks less frequently
+                    if consecutive_unhealthy_checks > 1 and consecutive_unhealthy_checks % 3 == 0:
+                        logger.debug(f"Stream still unhealthy for channel {self.channel_id} - no data for {inactivity_duration:.1f}s (check {consecutive_unhealthy_checks})")
 
                     # Only set flags if enough time has passed since last action
                     if (consecutive_unhealthy_checks >= max_unhealthy_checks and
@@ -1302,17 +1686,14 @@ class StreamManager:
                         connection_start_time = getattr(self, 'connection_start_time', 0)
                         stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
 
-                        if stable_time >= 30:  # Stream was stable, try reconnect first
-                            if not self.needs_reconnect:
-                                logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_reconnect = True
-                                self.last_health_action_time = now
-                        else:
-                            # Stream wasn't stable, suggest stream switch
-                            if not self.needs_stream_switch:
-                                logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_stream_switch = True
-                                self.last_health_action_time = now
+                        # Only trigger health monitor recovery if we're not already in a retry cycle
+                        # This prevents health monitor from bypassing normal retry attempts
+                        if not self.needs_reconnect and self.retry_count == 0:
+                            logger.info(f"Setting reconnect flag for unhealthy stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
+                            self.needs_reconnect = True
+                            self.last_health_action_time = now
+                        elif self.retry_count > 0:
+                            logger.debug(f"Health monitor detected unhealthy stream but retry cycle already active (retry {self.retry_count}/{self.max_retries}) for channel {self.channel_id}")
 
                         consecutive_unhealthy_checks = 0 # Reset after setting flag
 
@@ -1375,6 +1756,19 @@ class StreamManager:
                 if connection_result:
                     self.connection_start_time = time.time()
                     logger.info(f"Reconnect successful for channel {self.channel_id}")
+
+                    # Log reconnection event
+                    try:
+                        channel_obj = Channel.objects.get(uuid=self.channel_id)
+                        log_system_event(
+                            'channel_reconnect',
+                            channel_id=self.channel_id,
+                            channel_name=channel_obj.name,
+                            reason='health_monitor'
+                        )
+                    except Exception as e:
+                        logger.error(f"Could not log reconnection event: {e}")
+
                     return True
                 else:
                     logger.warning(f"Reconnect failed for channel {self.channel_id}")
@@ -1452,25 +1846,17 @@ class StreamManager:
                 logger.debug(f"Error closing socket for channel {self.channel_id}: {e}")
                 pass
 
-        # Enhanced transcode process cleanup with more aggressive termination
+        # Enhanced transcode process cleanup with immediate termination
         if self.transcode_process:
             try:
-                # First try polite termination
-                logger.debug(f"Terminating transcode process for channel {self.channel_id}")
-                self.transcode_process.terminate()
+                logger.debug(f"Killing transcode process for channel {self.channel_id}")
+                self.transcode_process.kill()
 
-                # Give it a short time to terminate gracefully
+                # Give it a very short time to die
                 try:
-                    self.transcode_process.wait(timeout=1.0)
+                    self.transcode_process.wait(timeout=0.5)
                 except subprocess.TimeoutExpired:
-                    # If it doesn't terminate quickly, kill it
-                    logger.warning(f"Transcode process didn't terminate within timeout, killing forcefully for channel {self.channel_id}")
-                    self.transcode_process.kill()
-
-                    try:
-                        self.transcode_process.wait(timeout=1.0)
-                    except subprocess.TimeoutExpired:
-                        logger.error(f"Failed to kill transcode process even with force for channel {self.channel_id}")
+                    logger.error(f"Failed to kill transcode process even with force for channel {self.channel_id}")
             except Exception as e:
                 logger.debug(f"Error terminating transcode process for channel {self.channel_id}: {e}")
 
@@ -1572,6 +1958,9 @@ class StreamManager:
             # Track chunk size before adding to buffer
             chunk_size = len(chunk)
             self._update_bytes_processed(chunk_size)
+
+            # Buffer is now cleared immediately in update_url() when stream/profile changes
+            # No need to clear on first chunk anymore
 
             # Add directly to buffer without TS-specific processing
             success = self.buffer.add_chunk(chunk)
@@ -1712,18 +2101,32 @@ class StreamManager:
             logger.error(f"Error in buffer check for channel {self.channel_id}: {e}")
             return False
 
-
-
     def _try_next_mac(self) -> bool:
         """
         Attempt to switch to another MAC for the SAME stream and M3U profile.
-        This is only applicable for MAC-type M3U accounts. It is used as a
-        lower-level failover before we give up on the current profile/stream.
+        This is only applicable for MAC-type M3U accounts.
+        
+        The actual MAC selection logic is in FailoverManager._try_mac_account_failover().
+        This method is a wrapper that:
+        1. Checks if MAC failover is enabled
+        2. Marks the current MAC in cooldown (it failed)
+        3. Delegates to get_stream_info_for_profile() which uses FailoverManager
+        4. Updates the StreamManager with the new URL
 
         Returns:
             bool: True on successful switch to a different MAC (and URL), False otherwise.
         """
         try:
+            # Check if MAC failover is enabled in settings
+            try:
+                from apps.m3u.mac_portal_models import FailoverSettings
+                settings = FailoverSettings.get_settings()
+                if not settings.mac_failover_enabled:
+                    logger.info(f"MAC failover is disabled in settings, skipping for channel {self.channel_id}")
+                    return False
+            except Exception as e:
+                logger.debug(f"Could not check MAC failover settings: {e}")
+
             # We need a current stream_id to work with
             if not getattr(self, "current_stream_id", None):
                 return False
@@ -1733,6 +2136,9 @@ class StreamManager:
                 return False
 
             # Figure out which M3U profile is currently in use from metadata
+            from .redis_keys import RedisKeys
+            from .constants import ChannelMetadataField
+            
             metadata_key = RedisKeys.channel_metadata(self.channel_id)
             md = redis_client.hgetall(metadata_key)
             if not md:
@@ -1747,77 +2153,29 @@ class StreamManager:
             except Exception:
                 return False
 
-            # Load stream, profile and account
-            stream = get_object_or_404(Stream, pk=self.current_stream_id)
-            m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
-            m3u_account = m3u_profile.m3u_account
+            # Mark current MAC in COOLDOWN after failure (clears BUSY, sets COOLDOWN)
+            # This prevents immediate retry of the failed MAC
+            self._mark_current_mac_cooldown_after_failure()
 
-            # Only applicable for MAC-type accounts
-            if m3u_account.account_type != M3UAccount.Types.MAC:
-                return False
-
-            # Try to infer the currently used MAC from the URL (mac=... query parameter)
-            current_mac_value = None
-            try:
-                parsed = urlparse(self.url or "")
-                qs = parse_qs(parsed.query or "")
-                mac_vals = qs.get("mac") or qs.get("MAC") or []
-                if mac_vals:
-                    current_mac_value = mac_vals[0]
-            except Exception:
-                current_mac_value = None
-
-            if current_mac_value:
-                try:
-                    mac_entry = m3u_account.macs.filter(address__iexact=current_mac_value).first()
-                except Exception:
-                    mac_entry = None
-
-                if mac_entry:
-                    try:
-                        mac_entry.status = M3UAccountMac.Status.ERROR
-                        mac_entry.last_error = "runtime_stream_failure"
-                        mac_entry.last_checked = timezone.now()
-                        mac_entry.save(update_fields=["status", "last_error", "last_checked"])
-                        logger.info(
-                            "Marked MAC %s on account %s as ERROR due to runtime failure on channel %s",
-                            current_mac_value,
-                            m3u_account.id,
-                            self.channel_id,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to mark MAC %s as ERROR for account %s during MAC failover",
-                            current_mac_value,
-                            m3u_account.id,
-                            exc_info=True,
-                        )
-
-                    # Unmark this MAC as busy (its Stream ist abgebrochen, sie steht für neue
-                    # Sessions nicht mehr zur Verfügung, wird aber auch nicht künstlich als
-                    # busy gehalten).
-                    try:
-                        from core.utils import RedisClient
-                        redis_client = RedisClient.get_client()
-                    except Exception:
-                        redis_client = None
-
-                    if redis_client:
-                        try:
-                            busy_key = RedisKeys.mac_busy(mac_entry.id)
-                            redis_client.delete(busy_key)
-                        except Exception:
-                            logger.debug(
-                                "Failed to clear busy marker for MAC %s on account %s during MAC failover",
-                                current_mac_value,
-                                m3u_account.id,
-                                exc_info=True,
-                            )
-
-            # Ask url_utils (via get_stream_info_for_profile) for a new URL on the SAME profile.
-            # Because we have just marked the previous MAC as ERROR, the resolver will pick the next MAC.
+            # Delegate to get_stream_info_for_profile which uses FailoverManager._try_mac_account_failover()
+            from .url_utils import get_stream_info_for_profile
+            
             info = get_stream_info_for_profile(self.channel_id, self.current_stream_id, m3u_profile_id)
             if not info or "error" in info or not info.get("url"):
+                error_msg = info.get("error", "Unknown error") if isinstance(info, dict) else str(info)
+                
+                # Check if all MACs are busy - this means we should try backup stream instead of retrying
+                if "All MACs busy" in error_msg or "all.*busy" in error_msg.lower():
+                    logger.warning(
+                        "All MACs are currently BUSY for stream %s / profile %s on channel %s - will try backup stream",
+                        self.current_stream_id,
+                        m3u_profile_id,
+                        self.channel_id,
+                    )
+                    # Set a flag so the caller knows to try backup stream
+                    self._all_macs_busy = True
+                    return False
+                
                 logger.warning(
                     "MAC failover could not obtain a new URL for stream %s / profile %s on channel %s: %s",
                     self.current_stream_id,
@@ -1836,7 +2194,7 @@ class StreamManager:
             self.user_agent = new_user_agent
             self.transcode = new_transcode
 
-            # Update Redis metadata similarly to _try_next_profile
+            # Update Redis metadata
             try:
                 redis_client.hset(
                     metadata_key,
@@ -1850,14 +2208,11 @@ class StreamManager:
                         ChannelMetadataField.STREAM_SWITCH_REASON: "mac_failover_on_runtime_error",
                     },
                 )
-                try:
-                    redis_client.set(f"stream_profile:{stream_id}", str(info["m3u_profile_id"]), ex=3600)
-                except Exception:
-                    logger.debug("Failed to update stream_profile mapping in Redis during MAC failover", exc_info=True)
+                redis_client.set(f"stream_profile:{stream_id}", str(info["m3u_profile_id"]), ex=3600)
             except Exception:
-                logger.debug("Failed to update channel metadata in Redis during MAC failover", exc_info=True)
+                logger.debug("Failed to update Redis metadata during MAC failover", exc_info=True)
 
-            # Finally, update URL in StreamManager
+            # Update URL in StreamManager
             if hasattr(self, "update_url"):
                 ok = self.update_url(new_url, stream_id, info["m3u_profile_id"])
                 if not ok:
@@ -1869,25 +2224,72 @@ class StreamManager:
                     )
                     return False
 
-            logger.info(
-                "Successfully switched to new MAC for account %s on channel %s (stream %s, profile %s)",
-                m3u_account.id,
-                self.channel_id,
-                stream_id,
-                info["m3u_profile_id"],
-            )
+            logger.info(f"MAC failover successful for channel {self.channel_id} (stream {stream_id})")
             return True
+            
         except Exception as e:
-            logger.error(
-                "Unexpected error during MAC failover for channel %s: %s",
-                self.channel_id,
-                e,
-                exc_info=True,
-            )
+            logger.error(f"Unexpected error during MAC failover for channel {self.channel_id}: {e}", exc_info=True)
             return False
+
+    def _mark_current_mac_cooldown_after_failure(self):
+        """Mark the current MAC in COOLDOWN after failure.
+        
+        This function does TWO things atomically:
+        1. Clears BUSY flag (stream is stopping/failed)
+        2. Sets COOLDOWN flag (with TTL) to prevent immediate retry
+        """
+        try:
+            # Extract MAC from current URL
+            from urllib.parse import urlparse, parse_qs
+            
+            mac_address = None
+            try:
+                parsed = urlparse(self.url or "")
+                qs = parse_qs(parsed.query or "")
+                mac_vals = qs.get("mac") or qs.get("MAC") or []
+                if mac_vals:
+                    mac_address = mac_vals[0]
+            except Exception:
+                pass
+            
+            if not mac_address:
+                return
+            
+            # Get MAC entry from database
+            if not hasattr(self, 'current_stream_id') or not self.current_stream_id:
+                return
+                
+            stream = Stream.objects.get(id=self.current_stream_id)
+            m3u_account = stream.m3u_account
+            
+            if not m3u_account or m3u_account.account_type != M3UAccount.Types.MAC:
+                return
+            
+            try:
+                mac_entry = m3u_account.macs.filter(address__iexact=mac_address).first()
+            except Exception:
+                mac_entry = None
+            
+            if not mac_entry:
+                return
+            
+            redis_client = getattr(self.buffer, "redis_client", None)
+            if not redis_client:
+                return
+            
+            # Use MACStateManager for atomic operation
+            mac_state = MACStateManager(redis_client)
+            mac_state.clear_busy_and_set_cooldown(mac_entry.id, is_block=False)
+            
+            logger.info(f"MAC {mac_address} (id={mac_entry.id}) BUSY cleared and COOLDOWN set after failover")
+            
+        except Exception as e:
+            logger.debug(f"Failed to set MAC cooldown: {e}")
+
     def _try_next_profile(self) -> bool:
         """
         Attempt to switch to another M3U profile of the SAME stream before trying alternate streams.
+        This is the 0.12.0-04 style profile failover logic.
 
         Returns:
             bool: True on successful switch, False otherwise
@@ -1913,6 +2315,8 @@ class StreamManager:
             if current_profile_id is not None:
                 self.tried_profile_ids.add(int(current_profile_id))
 
+            from .url_utils import get_next_profiles_for_stream, get_stream_info_for_profile
+            
             candidates = get_next_profiles_for_stream(
                 self.channel_id,
                 self.current_stream_id,
@@ -1923,8 +2327,6 @@ class StreamManager:
                     f"No additional M3U profiles available for stream {self.current_stream_id} on channel {self.channel_id}"
                 )
                 return False
-
-            import time as _time
 
             for cand in candidates:
                 pid = int(cand.get("profile_id"))
@@ -1973,7 +2375,7 @@ class StreamManager:
                             ChannelMetadataField.STREAM_PROFILE: info["stream_profile"],
                             ChannelMetadataField.M3U_PROFILE: str(m3u_profile_id),
                             ChannelMetadataField.STREAM_ID: str(stream_id),
-                            ChannelMetadataField.STREAM_SWITCH_TIME: str(_time.time()),
+                            ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
                             ChannelMetadataField.STREAM_SWITCH_REASON: "profile_switch_on_start_failure",
                         },
                     )
@@ -1995,13 +2397,22 @@ class StreamManager:
 
                 self.current_stream_id = stream_id
                 self.url_switching = True
-                self.url_switch_start_time = _time.time()
+                self.url_switch_start_time = time.time()
 
                 # Mark this profile as tried
                 self.tried_profile_ids.add(m3u_profile_id)
 
                 logger.info(
                     f"Switched to profile {m3u_profile_id} for stream {stream_id} on channel {self.channel_id} (URL: {new_url})"
+                )
+                
+                # Broadcast profile switch success
+                _broadcast_failover_event(
+                    self.channel_id, 'profile_switch_success',
+                    f'Profil gewechselt zu {m3u_profile_id} (Stream {stream_id})',
+                    new_profile_id=m3u_profile_id,
+                    new_stream_id=stream_id,
+                    success=True
                 )
                 return True
 
@@ -2010,15 +2421,16 @@ class StreamManager:
         except Exception as e:
             logger.error(f"Error in _try_next_profile: {e}", exc_info=True)
             return False
+
     def _try_next_stream(self):
         """
         Try to switch to the next available stream for this channel.
-        Will iterate through multiple alternate streams if needed to find one with a different URL.
+        Uses the 0.12.0-04 style failover logic: profile-first, then stream switching.
 
         Returns:
             bool: True if successfully switched to a new stream, False otherwise
         """
-        # profile-first: try another M3U profile for the same stream before alternate/backup streams
+        # Profile-first: try another M3U profile for the same stream before alternate/backup streams
         if self._try_next_profile():
             return True
 
@@ -2043,7 +2455,7 @@ class StreamManager:
                     logger.warning(f"All {len(alternate_streams)} alternate streams have been tried for channel {self.channel_id}")
                 return False
 
-            # IMPROVED: Try multiple streams until we find one with a different URL
+            # Try multiple streams until we find one with a different URL
             for next_stream in untried_streams:
                 stream_id = next_stream['stream_id']
                 profile_id = next_stream['profile_id']  # This is the M3U profile ID we need
@@ -2064,8 +2476,7 @@ class StreamManager:
                 new_user_agent = stream_info['user_agent']
                 new_transcode = stream_info['transcode']
 
-                # CRITICAL FIX: Check if the new URL is the same as current URL
-                # This can happen when current_stream_id is None and we accidentally select the same stream
+                # Check if the new URL is the same as current URL
                 if new_url == self.url:
                     logger.warning(f"Stream ID {stream_id} generates the same URL as current stream ({new_url}). "
                                  f"Skipping this stream and trying next alternative.")
@@ -2073,7 +2484,7 @@ class StreamManager:
 
                 logger.info(f"Switching from URL {self.url} to {new_url} for channel {self.channel_id}")
 
-                # IMPORTANT: Just update the URL, don't stop the channel or release resources
+                # Just update the URL, don't stop the channel or release resources
                 switch_result = self.update_url(new_url, stream_id, profile_id)
                 if not switch_result:
                     logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
@@ -2103,10 +2514,25 @@ class StreamManager:
                     logger.info(f"Stream metadata updated for channel {self.channel_id} to stream ID {stream_id} with M3U profile {profile_id}")
 
                 logger.info(f"Successfully switched to stream ID {stream_id} with URL {new_url} for channel {self.channel_id}")
+                
+                # Broadcast stream switch success
+                _broadcast_failover_event(
+                    self.channel_id, 'stream_switch_success',
+                    f'Stream gewechselt zu ID {stream_id} (Profil {profile_id})',
+                    new_stream_id=stream_id,
+                    new_profile_id=profile_id,
+                    success=True
+                )
                 return True
 
             # If we get here, we tried all streams but none worked
             logger.error(f"Tried {len(untried_streams)} alternate streams but none were suitable for channel {self.channel_id}")
+            _broadcast_failover_event(
+                self.channel_id, 'failover_exhausted',
+                f'Alle {len(untried_streams)} Streams versucht - keine Alternative verfügbar',
+                tried_count=len(untried_streams),
+                success=False
+            )
             return False
 
         except Exception as e:
@@ -2114,65 +2540,118 @@ class StreamManager:
             return False
 
     # Add a new helper method to safely reset the URL switching state
-
-    def _set_profile_cooldown(self):
-        """
-        Put the current M3U profile (and optionally account) on a 12h cooldown in Redis.
-
-        This prevents repeatedly trying clearly failing profiles over and over again.
-        Account cooldown code is prepared but commented out so you can enable it later if desired.
-        """
-        try:
-            if not hasattr(self, "buffer") or not getattr(self.buffer, "redis_client", None):
-                return
-
-            redis_client = self.buffer.redis_client
-            metadata_key = RedisKeys.channel_metadata(self.channel_id)
-            md = redis_client.hgetall(metadata_key)
-            if not md:
-                return
-
-            # Current profile
-            key_profile = ChannelMetadataField.M3U_PROFILE.encode("utf-8")
-            profile_id = md.get(key_profile)
-            if profile_id:
-                try:
-                    profile_id_int = int(profile_id.decode("utf-8"))
-                    cooldown_key = RedisKeys.m3u_profile_cooldown(profile_id_int)
-                    redis_client.setex(cooldown_key, 10 * 60, "1")
-                    logger.warning(
-                        "Put M3U profile %s on 10Min cooldown after failures for channel %s",
-                        profile_id_int,
-                        self.channel_id,
-                    )
-                except Exception:
-                    logger.exception("Failed to set profile cooldown in Redis")
-
-            # Optional: account cooldown (prepared, disabled by default)
-            # key_account = ChannelMetadataField.M3U_ACCOUNT.encode("utf-8")
-            # m3u_account_id = md.get(key_account)
-            # if m3u_account_id:
-            #     try:
-            #         m3u_account_id_int = int(m3u_account_id.decode("utf-8"))
-            #         account_cooldown_key = RedisKeys.m3u_account_cooldown(m3u_account_id_int)
-            #         redis_client.setex(account_cooldown_key, 12 * 3600, "1")
-            #         logger.warning(
-            #             "Put M3U account %s on 12h cooldown after failures for channel %s "
-            #             "(ACCOUNT COOLDOWN IS INACTIVE BY DEFAULT - you enabled it manually).",
-            #             m3u_account_id_int,
-            #             self.channel_id,
-            #         )
-            #     except Exception:
-            #         logger.exception("Failed to set account cooldown in Redis")
-
-        except Exception as e:
-            logger.error(
-                "Failed to set profile/account cooldown after URL failure on channel %s: %s",
-                self.channel_id,
-                e,
-            )
     def _reset_url_switching_state(self):
         """Safely reset the URL switching state if it gets stuck"""
         self.url_switching = False
+
+    def _should_clear_buffer_for_stream_switch(self, old_stream_id, new_stream_id):
+        """
+        Determine if buffer should be cleared based on codec/resolution changes.
+        
+        Returns True if:
+        - Codec changes (h264 → hevc) AND buffer_clear_on_codec_change enabled
+        - Resolution changes (720p → 1080p) AND buffer_clear_on_resolution_change enabled
+        - Stream info cannot be determined (safe default)
+        
+        Returns False if:
+        - Codec and resolution are the same
+        - Smart clearing is disabled for the detected change type
+        """
+        try:
+            # Get stream objects
+            old_stream = Stream.objects.filter(id=old_stream_id).first()
+            new_stream = Stream.objects.filter(id=new_stream_id).first()
+            
+            if not old_stream or not new_stream:
+                logger.warning(f"Could not load stream objects for comparison, defaulting to clear buffer")
+                return True  # Safe default
+            
+            # Get stream properties (codec, resolution)
+            old_props = old_stream.custom_properties or {}
+            new_props = new_stream.custom_properties or {}
+            
+            old_codec = old_props.get('codec', '').lower()
+            new_codec = new_props.get('codec', '').lower()
+            old_resolution = old_props.get('resolution', '')
+            new_resolution = new_props.get('resolution', '')
+            
+            # Check codec change
+            codec_changed = False
+            if old_codec and new_codec and old_codec != new_codec:
+                codec_changed = True
+                if ConfigHelper.buffer_clear_on_codec_change():
+                    logger.info(f"Codec changed: {old_codec} → {new_codec}, buffer will be cleared")
+                    return True
+                else:
+                    logger.info(f"Codec changed: {old_codec} → {new_codec}, but clearing disabled")
+            
+            # Check resolution change
+            resolution_changed = False
+            if old_resolution and new_resolution and old_resolution != new_resolution:
+                resolution_changed = True
+                if ConfigHelper.buffer_clear_on_resolution_change():
+                    logger.info(f"Resolution changed: {old_resolution} → {new_resolution}, buffer will be cleared")
+                    return True
+                else:
+                    logger.info(f"Resolution changed: {old_resolution} → {new_resolution}, but clearing disabled")
+            
+            # If we have codec/resolution info and nothing changed, keep buffer
+            if (old_codec or old_resolution) and not codec_changed and not resolution_changed:
+                logger.info(f"Codec/resolution unchanged ({old_codec or 'unknown'}/{old_resolution or 'unknown'}), keeping buffer")
+                return False
+            
+            # If we don't have codec/resolution info, default to clearing (safe)
+            logger.warning(f"Stream codec/resolution info not available, defaulting to clear buffer")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error comparing streams for buffer clearing decision: {e}")
+            return True  # Safe default
+
+    def _get_account_proxy(self, channel):
+        """
+        Get the proxy setting from the M3U account of the CURRENT stream.
+        
+        This is important for channels with multiple backup streams that may use
+        different M3U accounts with different proxy settings.
+        
+        Args:
+            channel: Channel object
+            
+        Returns:
+            str or None: Proxy URL if configured, None otherwise
+        """
+        try:
+            # First, try to get proxy from the current stream's M3U account
+            if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                try:
+                    stream = Stream.objects.get(id=self.current_stream_id)
+                    if stream.m3u_account:
+                        proxy = stream.m3u_account.get_proxy()
+                        if proxy:
+                            logger.debug(f"Using proxy {proxy} from current stream's M3U account {stream.m3u_account.name} (type: {stream.m3u_account.account_type}) for channel {self.channel_id}")
+                            return proxy
+                except Stream.DoesNotExist:
+                    logger.debug(f"Stream {self.current_stream_id} not found for proxy lookup")
+            
+            # Fallback: Check if channel has a channel_group
+            if not channel.channel_group:
+                return None
+                
+            # Get M3U accounts associated with this channel group
+            channel_group_accounts = channel.channel_group.m3u_accounts.filter(enabled=True)
+            
+            for cga in channel_group_accounts:
+                m3u_account = cga.m3u_account
+                proxy = m3u_account.get_proxy()
+                if proxy:
+                    logger.debug(f"Using proxy {proxy} from channel group M3U account {m3u_account.name} (type: {m3u_account.account_type}) for channel {self.channel_id}")
+                    return proxy
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting account proxy for channel {self.channel_id}: {e}")
+            return None
         self.url_switch_start_time = 0
         logger.info(f"Reset URL switching state for channel {self.channel_id}")

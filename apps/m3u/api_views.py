@@ -1,3 +1,4 @@
+import logging
 from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -17,11 +18,12 @@ from django.conf import settings
 from .tasks import refresh_m3u_groups
 import json
 
-from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile, M3UAccountMac
+logger = logging.getLogger(__name__)
+
+from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
 from core.models import UserAgent
 from apps.channels.models import ChannelGroupM3UAccount
 from core.serializers import UserAgentSerializer
-from apps.vod.models import M3UVODCategoryRelation
 
 from .serializers import (
     M3UAccountSerializer,
@@ -147,14 +149,56 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
         # Check if VOD setting changed and trigger refresh if needed
         new_vod_enabled = request.data.get("enable_vod", old_vod_enabled)
 
-        if (
-            instance.account_type == M3UAccount.Types.XC
-            and not old_vod_enabled
-            and new_vod_enabled
-        ):
-            from apps.vod.tasks import refresh_vod_content
+        if not old_vod_enabled and new_vod_enabled:
+            # VOD was just enabled
+            if instance.account_type == M3UAccount.Types.XC:
+                # Xtream Codes: Create Uncategorized categories and trigger full refresh
+                from apps.vod.models import VODCategory, M3UVODCategoryRelation
 
-            refresh_vod_content.delay(instance.id)
+                # Create movie Uncategorized category
+                movie_category, _ = VODCategory.objects.get_or_create(
+                    name="Uncategorized",
+                    category_type="movie",
+                    defaults={}
+                )
+
+                # Create series Uncategorized category
+                series_category, _ = VODCategory.objects.get_or_create(
+                    name="Uncategorized",
+                    category_type="series",
+                    defaults={}
+                )
+
+                # Create relations for both categories (disabled by default until first refresh)
+                account_custom_props = instance.custom_properties or {}
+                auto_enable_new = account_custom_props.get("auto_enable_new_groups_vod", True)
+
+                M3UVODCategoryRelation.objects.get_or_create(
+                    category=movie_category,
+                    m3u_account=instance,
+                    defaults={
+                        'enabled': auto_enable_new,
+                        'custom_properties': {}
+                    }
+                )
+
+                M3UVODCategoryRelation.objects.get_or_create(
+                    category=series_category,
+                    m3u_account=instance,
+                    defaults={
+                        'enabled': auto_enable_new,
+                        'custom_properties': {}
+                    }
+                )
+
+                # Trigger full VOD refresh for Xtream Codes
+                from apps.vod.tasks import refresh_vod_content
+                refresh_vod_content.delay(instance.id)
+                
+            elif instance.account_type == M3UAccount.Types.MAC:
+                # MAC Portal: Phase 1 - Load only categories first
+                from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                refresh_mac_portal_categories.delay(instance.id)
 
         # After the instance is updated, return the response
         return response
@@ -179,20 +223,19 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="refresh-vod")
     def refresh_vod(self, request, pk=None):
-        """Trigger VOD content refresh for XtreamCodes accounts"""
+        """Trigger VOD content refresh for XtreamCodes and MAC/STB accounts"""
         account = self.get_object()
 
-        if account.account_type != M3UAccount.Types.XC:
+        # Support both XC and MAC accounts for VOD
+        if account.account_type not in (M3UAccount.Types.XC, M3UAccount.Types.MAC):
             return Response(
-                {"error": "VOD refresh is only available for XtreamCodes accounts"},
+                {"error": "VOD refresh is only available for XtreamCodes and MAC/STB accounts"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check if VOD is enabled
-        vod_enabled = False
-        if account.custom_properties:
-            custom_props = account.custom_properties or {}
-            vod_enabled = custom_props.get("enable_vod", False)
+        # Check if VOD is enabled (from custom_properties)
+        custom_props = account.custom_properties or {}
+        vod_enabled = custom_props.get("enable_vod", False)
 
         if not vod_enabled:
             return Response(
@@ -201,8 +244,41 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             )
 
         try:
+            if account.account_type == M3UAccount.Types.MAC:
+                # Check if this is first-time VOD enable or refresh
+                refresh_type = request.data.get("refresh_type", "full")
+                
+                if refresh_type == "categories_only":
+                    # Phase 1: Load only categories
+                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                    refresh_mac_portal_categories.delay(account.id)
+                    return Response(
+                        {"message": f"VOD categories loading initiated for account {account.name}"},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+                elif refresh_type == "selected_content":
+                    # Phase 2: Import selected categories
+                    from apps.m3u.mac_vod_tasks import refresh_mac_portal_selected_vod
+                    refresh_mac_portal_selected_vod.delay(account.id)
+                    return Response(
+                        {"message": f"VOD content import initiated for selected categories"},
+                        status=status.HTTP_202_ACCEPTED,
+                    )
+                else:
+                    # Legacy: Full import (for backward compatibility)
+                    from apps.vod.tasks import refresh_mac_vod_content
+                    refresh_mac_vod_content.delay(account.id)
+            else:
+                from apps.vod.tasks import refresh_vod_content
+                refresh_vod_content.delay(account.id)
+            
+            return Response(
+                {"message": f"VOD refresh initiated for account {account.name}"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except ImportError:
+            # Fallback if MAC VOD task doesn't exist yet
             from apps.vod.tasks import refresh_vod_content
-
             refresh_vod_content.delay(account.id)
             return Response(
                 {"message": f"VOD refresh initiated for account {account.name}"},
@@ -241,20 +317,11 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                         },
                     )
 
-            for setting in category_settings:
-                category_id = setting.get("id")
-                enabled = setting.get("enabled", True)
-                custom_properties = setting.get("custom_properties", {})
-
-                if category_id:
-                    M3UVODCategoryRelation.objects.update_or_create(
-                        category_id=category_id,
-                        m3u_account=account,
-                        defaults={
-                            "enabled": enabled,
-                            "custom_properties": custom_properties,
-                        },
-                    )
+            # VOD categories are now stored as ChannelGroups with group_type='vod_movie' or 'vod_series'
+            # They are handled in group_settings above, so category_settings is deprecated
+            # Keep this for backward compatibility but don't create old VOD relations
+            if category_settings:
+                logger.warning(f"Received deprecated category_settings for account {account.id}. VOD categories should be in group_settings.")
 
             return Response({"message": "Group settings updated successfully"})
 
@@ -263,12 +330,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 {"error": f"Failed to update group settings: {str(e)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
     def _delete_expired_macs_impl(self, account):
         """
-        Interne Logik zum Löschen abgelaufener/unklarer MACs.
-        Löscht EXPIRED und UNKNOWN, sortiert Prioritäten neu und
-        aktualisiert das mac_address-Feld auf Basis der verbleibenden MACs.
-        Gibt (deleted_count, remaining_addresses) zurück.
+        Internal logic for deleting expired/unknown MACs.
+        Deletes EXPIRED and UNKNOWN, reorders priorities and
+        updates the mac_address field based on remaining MACs.
+        Returns (deleted_count, remaining_addresses).
         """
         from .models import M3UAccountMac
         from django.db import transaction
@@ -290,13 +358,13 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
             qs.delete()
 
             remaining = list(account.macs.order_by("priority", "id"))
-            # Prioritäten neu setzen
+            # Reorder priorities
             for idx, m in enumerate(remaining):
                 if m.priority != idx:
                     m.priority = idx
                     m.save(update_fields=["priority"])
 
-            # mac_address-Feld aus verbleibenden MACs aufbauen
+            # Update mac_address field from remaining MACs
             mac_list = [m.address for m in remaining]
             account.mac_address = " ".join(mac_list)
             account.save(update_fields=["mac_address"])
@@ -312,14 +380,14 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="delete-expired-macs")
     def delete_expired_macs(self, request, pk=None):
         """
-        Löscht alle EXPIRED- und UNKNOWN-MAC-Einträge für diesen Account.
-        Wird vom Button im M3U-Manager verwendet (Pfad: delete-expired-macs/).
+        Delete all EXPIRED and UNKNOWN MAC entries for this account.
+        Used by the button in the M3U manager (path: delete-expired-macs/).
         """
         account = self.get_object()
 
         deleted_count, mac_list = self._delete_expired_macs_impl(account)
 
-        # Aktualisierte Account-Daten zurückgeben (inkl. frischer MAC-Liste)
+        # Return updated account data (including fresh MAC list)
         serializer = self.get_serializer(account)
         return Response(
             {
@@ -332,8 +400,8 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="delete_expired_macs")
     def delete_expired_macs_underscore(self, request, pk=None):
         """
-        Alias-Endpoint mit Unterstrich im Pfad, falls das Frontend
-        /delete_expired_macs/ verwendet. Verwendet die gleiche Logik.
+        Alias endpoint with underscore in path, in case the frontend
+        uses /delete_expired_macs/. Uses the same logic.
         """
         account = self.get_object()
         deleted_count, mac_list = self._delete_expired_macs_impl(account)
@@ -349,7 +417,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["delete"], url_path=r"macs/(?P<mac_id>[^/.]+)")
     def delete_single_mac(self, request, pk=None, mac_id=None):
         """
-        Löscht eine einzelne MAC anhand ihrer ID (für das rote X im UI).
+        Delete a single MAC by its ID (for the red X in the UI).
         """
         from .models import M3UAccountMac
 
@@ -364,7 +432,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
 
         mac_obj.delete()
 
-        # Prioritäten neu setzen und mac_address aktualisieren
+        # Reorder priorities and update mac_address
         remaining = list(account.macs.order_by("priority", "id"))
         for idx, m in enumerate(remaining):
             if m.priority != idx:
@@ -384,25 +452,26 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="reorder-macs")
     def reorder_macs(self, request, pk=None):
         """
-        Passt die Reihenfolge (Priorität) der MACs an.
-        Erwartet im Body: {"order": [mac_id1, mac_id2, ...]} in gewünschter Reihenfolge.
+        Adjust the order (priority) of MACs.
+        Expects in body: {"mac_ids": [mac_id1, mac_id2, ...]} or {"order": [mac_id1, mac_id2, ...]} in desired order.
         """
         from .models import M3UAccountMac
 
         account = self.get_object()
-        order = request.data.get("order", [])
+        # Support both 'mac_ids' (from frontend) and 'order' (legacy)
+        order = request.data.get("mac_ids") or request.data.get("order", [])
         if not isinstance(order, list):
             return Response(
                 {"error": "Field 'order' must be a list of MAC IDs."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Map bestehende MACs nach ID
+        # Map existing MACs by ID
         mac_qs = account.macs.all()
         mac_map = {str(m.id): m for m in mac_qs}
 
         next_idx = 0
-        # Zuerst die IDs aus 'order' in genau dieser Reihenfolge
+        # First the IDs from 'order' in exactly this order
         for mac_id in order:
             m = mac_map.pop(str(mac_id), None)
             if m is None:
@@ -412,7 +481,7 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 m.save(update_fields=["priority"])
             next_idx += 1
 
-        # Alle übrigen MACs hinten anhängen
+        # All remaining MACs append at the end
         for m in mac_map.values():
             if m.priority != next_idx:
                 m.priority = next_idx
@@ -429,6 +498,112 @@ class M3UAccountViewSet(viewsets.ModelViewSet):
                 "account": serializer.data,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="refresh-mac-status")
+    def refresh_mac_status(self, request, pk=None):
+        """
+        Trigger MAC status check for all MACs in this account.
+        """
+        account = self.get_object()
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            return Response(
+                {"error": "Not a MAC account"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        try:
+            # Trigger MAC status check task
+            from .tasks import check_mac_expiry
+            check_mac_expiry.delay(account.id)
+            
+            return Response(
+                {"message": "MAC status check initiated"},
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to initiate MAC status check: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(detail=True, methods=["post"], url_path="clear-channels")
+    def clear_channels(self, request, pk=None):
+        """
+        Clear all channels and streams imported from this M3U account.
+        This removes duplicate imports and allows for a clean re-import.
+        Memory cleanup is performed after bulk deletion to free resources.
+        """
+        account = self.get_object()
+        logger.info(f"Clear channels request started for account {account.id} ({account.name})")
+        
+        try:
+            from django.db import transaction
+            from apps.channels.models import Stream, Channel, ChannelStream
+            
+            with transaction.atomic():
+                # Count items before deletion for reporting
+                streams_count = account.streams.count()
+                
+                # Get channels that are linked to streams from this account
+                channels_with_account_streams = Channel.objects.filter(
+                    streams__m3u_account=account
+                ).distinct()
+                channels_count = channels_with_account_streams.count()
+                
+                logger.info(f"Clearing channels for M3U account {account.id} ({account.name})")
+                logger.info(f"Found {streams_count} streams and {channels_count} channels to clear")
+                
+                # Delete all streams from this account
+                # This will also remove ChannelStream relationships automatically
+                account.streams.all().delete()
+                
+                # Delete channels that no longer have any streams
+                # (channels that were only connected to streams from this account)
+                orphaned_channels = Channel.objects.filter(streams__isnull=True)
+                orphaned_count = orphaned_channels.count()
+                orphaned_channels.delete()
+                
+                logger.info(f"Deleted {streams_count} streams and {orphaned_count} orphaned channels")
+                
+                # Update account status
+                account.status = M3UAccount.Status.IDLE
+                account.last_message = f"Channels cleared successfully. Removed {streams_count} streams and {orphaned_count} channels."
+                account.save(update_fields=['status', 'last_message'])
+            
+            # Memory cleanup after bulk deletion (especially important for large accounts 20k+ streams)
+            # This is safe to call here because:
+            # 1. The transaction is already committed
+            # 2. We only clear Django ORM query cache and run garbage collection
+            # 3. No active sessions or import data are affected
+            # Memory cleanup after bulk deletion (higher threshold for better performance)
+            if streams_count > 2500:
+                logger.info(f"Running memory cleanup after clearing {streams_count} streams")
+                from core.utils import cleanup_memory
+                cleanup_memory(log_usage=True, force_collection=True)
+                logger.info(f"Memory cleanup completed after clearing {streams_count} streams")
+            else:
+                logger.info(f"Memory cleanup skipped (streams_count: {streams_count}, threshold: 2500)")
+            
+            logger.info(f"Clear channels completed successfully for account {account.id}")
+            return Response(
+                {
+                    "message": "Channels cleared successfully",
+                    "streams_deleted": streams_count,
+                    "channels_deleted": orphaned_count,
+                },
+                status=status.HTTP_200_OK,
+            )
+            
+        except Exception as e:
+            logger.error(f"Error clearing channels for account {account.id}: {e}")
+            return Response(
+                {"error": f"Failed to clear channels: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    # NOTE: engine_benchmark action removed - use /api/m3u/benchmark/<id>/run/ instead
+    # See apps/m3u/api/simple_benchmark_api.py for the new implementation
 
 
 class M3UFilterViewSet(viewsets.ModelViewSet):

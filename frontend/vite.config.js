@@ -9,22 +9,48 @@ export default defineConfig({
   // publicDir: '/data',
 
   server: {
+    host: '0.0.0.0', // Allow external connections (Docker)
     port: 9191,
+    watch: {
+      usePolling: true, // Better for Docker on Windows
+      interval: 1000,
+    },
 
-    // proxy: {
-    //   "/api": {
-    //     target: "http://localhost:5656", // Backend server
-    //     changeOrigin: true,
-    //     secure: false, // Set to true if backend uses HTTPS
-    //     // rewrite: (path) => path.replace(/^\/api/, ""), // Optional path rewrite
-    //   },
-    //   "/ws": {
-    //     target: "http://localhost:8001", // Backend server
-    //     changeOrigin: true,
-    //     secure: false, // Set to true if backend uses HTTPS
-    //     // rewrite: (path) => path.replace(/^\/api/, ""), // Optional path rewrite
-    //   },
-    // },
+    proxy: {
+      "/api": {
+        target: "http://localhost:5656", // Backend server
+        changeOrigin: true,
+        secure: false, // Set to true if backend uses HTTPS
+        // rewrite: (path) => path.replace(/^\/api/, ""), // Optional path rewrite
+      },
+      "/ws": {
+        target: "http://localhost:8001", // Backend server
+        changeOrigin: true,
+        secure: false, // Set to true if backend uses HTTPS
+        // rewrite: (path) => path.replace(/^\/api/, ""), // Optional path rewrite
+      },
+    },
+  },
+
+  // Optimize for Windows Docker and Production builds
+  optimizeDeps: {
+    include: ['react', 'react-dom'],
+  },
+
+  // Build optimization for faster builds
+  build: {
+    target: 'es2015',
+    minify: 'esbuild',
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+        },
+      },
+    },
+    // Increase chunk size warning limit
+    chunkSizeWarningLimit: 1000,
   },
 
   test: {

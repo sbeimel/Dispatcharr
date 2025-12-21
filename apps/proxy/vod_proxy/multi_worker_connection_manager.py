@@ -24,6 +24,11 @@ from apps.m3u.models import M3UAccountProfile
 logger = logging.getLogger("vod_proxy")
 
 
+def get_vod_client_stop_key(client_id):
+    """Get the Redis key for signaling a VOD client to stop"""
+    return f"vod_proxy:client:{client_id}:stop"
+
+
 def infer_content_type_from_url(url: str) -> Optional[str]:
     """
     Infer MIME type from file extension in URL
@@ -832,6 +837,7 @@ class MultiWorkerVODConnectionManager:
             # Create streaming generator
             def stream_generator():
                 decremented = False
+                stop_signal_detected = False
                 try:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Starting Redis-backed stream")
 
@@ -846,14 +852,25 @@ class MultiWorkerVODConnectionManager:
                     bytes_sent = 0
                     chunk_count = 0
 
+                    # Get the stop signal key for this client
+                    stop_key = get_vod_client_stop_key(client_id)
+
                     for chunk in upstream_response.iter_content(chunk_size=8192):
                         if chunk:
                             yield chunk
                             bytes_sent += len(chunk)
                             chunk_count += 1
 
-                            # Update activity every 100 chunks in consolidated connection state
+                            # Check for stop signal every 100 chunks
                             if chunk_count % 100 == 0:
+                                # Check if stop signal has been set
+                                if self.redis_client and self.redis_client.exists(stop_key):
+                                    logger.info(f"[{client_id}] Worker {self.worker_id} - Stop signal detected, terminating stream")
+                                    # Delete the stop key
+                                    self.redis_client.delete(stop_key)
+                                    stop_signal_detected = True
+                                    break
+
                                 # Update the connection state
                                 logger.debug(f"Client: [{client_id}] Worker: {self.worker_id} sent {chunk_count} chunks for VOD: {content_name}")
                                 if redis_connection._acquire_lock():
@@ -867,7 +884,10 @@ class MultiWorkerVODConnectionManager:
                                     finally:
                                         redis_connection._release_lock()
 
-                    logger.info(f"[{client_id}] Worker {self.worker_id} - Redis-backed stream completed: {bytes_sent} bytes sent")
+                    if stop_signal_detected:
+                        logger.info(f"[{client_id}] Worker {self.worker_id} - Stream stopped by signal: {bytes_sent} bytes sent")
+                    else:
+                        logger.info(f"[{client_id}] Worker {self.worker_id} - Redis-backed stream completed: {bytes_sent} bytes sent")
                     redis_connection.decrement_active_streams()
                     decremented = True
 

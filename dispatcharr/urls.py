@@ -28,6 +28,7 @@ schema_view = get_schema_view(
 urlpatterns = [
     # API Routes
     path("api/", include(("apps.api.urls", "api"), namespace="api")),
+    path("api/mac-portal/", include(("apps.mac_portal.urls", "mac_portal"), namespace="mac_portal")),
     path("api", RedirectView.as_view(url="/api/", permanent=True)),
     # Admin
     path("admin", RedirectView.as_view(url="/admin/", permanent=True)),

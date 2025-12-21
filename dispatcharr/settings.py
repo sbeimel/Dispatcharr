@@ -4,7 +4,7 @@ from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "REPLACE_ME_WITH_A_REAL_SECRET"
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_DB = os.environ.get("REDIS_DB", "0")
 
@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "apps.proxy.apps.ProxyConfig",
     "apps.proxy.ts_proxy",
     "apps.vod.apps.VODConfig",
+    "apps.mac_portal",  # MAC Portal Management
     "core",
     "daphne",
     "drf_yasg",
@@ -83,14 +84,26 @@ REQUESTS_TIMEOUT = 30  # Seconds for external API requests
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",  # CORS must be before CommonMiddleware
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
+    "dispatcharr.middleware.CsrfExemptAPIMiddleware",  # Custom CSRF that exempts /api/
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
 ]
+
+# CSRF exemption for API endpoints (they use JWT authentication)
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+    "http://localhost:9191",
+    "http://localhost:5656",
+]
+
+# Exempt API paths from CSRF (REST API uses JWT, not session auth)
+CSRF_COOKIE_HTTPONLY = False
+CSRF_USE_SESSIONS = False
 
 
 ROOT_URLCONF = "dispatcharr.urls"
@@ -220,6 +233,11 @@ CELERY_BEAT_SCHEDULE = {
     "maintain-recurring-recordings": {
         "task": "apps.channels.tasks.maintain_recurring_recordings",
         "schedule": 3600.0,  # Once an hour ensure recurring schedules stay ahead
+    },
+    # MAC-specific tasks
+    "cleanup-expired-macs": {
+        "task": "apps.m3u.tasks.cleanup_expired_macs",
+        "schedule": 86400.0,  # Once a day cleanup expired MACs
     },
 }
 

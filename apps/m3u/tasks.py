@@ -5,6 +5,8 @@ import requests
 import os
 import gc
 import gzip, zipfile
+from datetime import datetime
+from dateutil import parser as dateutil_parser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from celery.app.control import Inspect
 from celery.result import AsyncResult
@@ -12,92 +14,94 @@ from celery import shared_task, current_app, group
 from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
-from .models import M3UAccount, M3UAccountMac
+from .models import M3UAccount
 from apps.channels.models import Stream, ChannelGroup, ChannelGroupM3UAccount
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.utils import timezone
-
-from datetime import datetime
-
-def _parse_mac_portal_expiry(expiry_info):
-    """
-    Versucht, eine vom Portal gelieferte Ablaufinfo (z.B. "February 28, 2026, 1:13 pm")
-    in ein (expires_at, expires_text)-Tuple zu übersetzen.
-    expires_at ist, falls ermittelbar, ein timezone-aware datetime, ansonsten None.
-    expires_text ist immer ein String (zur Anzeige im UI).
-    """
-    from django.utils import timezone as dj_timezone
-
-    if expiry_info is None:
-        return None, None
-
-    if isinstance(expiry_info, datetime):
-        # Bereits ein Datum
-        dt = expiry_info
-        if dj_timezone.is_naive(dt):
-            dt = dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
-        return dt, dt.strftime("%Y-%m-%d %H:%M:%S")
-
-    expires_text = str(expiry_info).strip()
-    if not expires_text:
-        return None, None
-
-    # Typische Portal-Formate (eng. Monatsnamen)
-    formats = [
-        "%B %d, %Y, %I:%M %p",  # February 28, 2026, 1:13 pm
-        "%B %d, %Y %I:%M %p",
-        "%B %d, %Y",            # February 28, 2026
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-        "%d.%m.%Y %H:%M:%S",
-        "%d.%m.%Y %H:%M",
-        "%d.%m.%Y",
-    ]
-
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(expires_text, fmt)
-            if dj_timezone.is_naive(dt):
-                dt = dj_timezone.make_aware(dt, dj_timezone.get_current_timezone())
-            return dt, expires_text
-        except Exception:
-            continue
-
-    # Unix-Timestamp (10-stelliger Sekundenwert) versuchen
-    import re as _re
-    m = _re.search(r"\b(1\d{9})\b", expires_text)
-    if m:
-        try:
-            ts = int(m.group(1))
-            dt = datetime.fromtimestamp(ts, tz=dj_timezone.utc)
-            return dt, expires_text
-        except Exception:
-            pass
-
-    # Nichts erkannt → nur Text zurückgeben
-    return None, expires_text
-
-
-
 import time
 import json
+
+
+def parse_expiry_date(expires_text):
+    """
+    Parse expiry date string into datetime object.
+    Handles various formats like:
+    - "January 15, 2026, 9:06 pm"
+    - "2026-01-15"
+    - "15.01.2026"
+    - "01/15/2026"
+    - Unix timestamps
+    Returns timezone-aware datetime or None if parsing fails.
+    """
+    if not expires_text:
+        return None
+    
+    # Handle numeric timestamps
+    if isinstance(expires_text, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(expires_text)
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except (ValueError, OSError):
+            pass
+    
+    # Convert to string if needed
+    expires_str = str(expires_text).strip()
+    if not expires_str:
+        return None
+    
+    # Try numeric string (Unix timestamp)
+    try:
+        ts = float(expires_str)
+        dt = datetime.fromtimestamp(ts)
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+    except (ValueError, OSError):
+        pass
+    
+    # Try dateutil parser (handles most formats)
+    try:
+        dt = dateutil_parser.parse(expires_str, dayfirst=True)
+        return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+    except (ValueError, TypeError):
+        pass
+    
+    # Try common formats manually
+    formats = [
+        "%B %d, %Y, %I:%M %p",  # January 15, 2026, 9:06 pm
+        "%B %d, %Y",            # January 15, 2026
+        "%Y-%m-%d %H:%M:%S",    # 2026-01-15 09:06:00
+        "%Y-%m-%d",             # 2026-01-15
+        "%d.%m.%Y %H:%M:%S",    # 15.01.2026 09:06:00
+        "%d.%m.%Y",             # 15.01.2026
+        "%d/%m/%Y",             # 15/01/2026
+        "%m/%d/%Y",             # 01/15/2026
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(expires_str, fmt)
+            return timezone.make_aware(dt) if timezone.is_naive(dt) else dt
+        except ValueError:
+            continue
+    
+    logger.debug(f"Could not parse expiry date: {expires_text}")
+    return None
 from core.utils import (
     RedisClient,
     acquire_task_lock,
     release_task_lock,
     natural_sort_key,
+    log_system_event,
 )
 from core.models import CoreSettings, UserAgent
-from .mac_portal_client import MacPortalClient, MacPortalError
 from asgiref.sync import async_to_sync
 from core.xtream_codes import Client as XCClient
 from core.utils import send_websocket_update
+from .utils import normalize_stream_url
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = 1500  # Optimized batch size for threading
+BATCH_SIZE = 2500  # Increased for better performance with more memory
 m3u_dir = os.path.join(settings.MEDIA_ROOT, "cached_m3u")
 
 
@@ -284,6 +288,10 @@ def fetch_m3u_lines(account, use_cache=False):
                         # Has HTTP URLs, might be a simple M3U without headers
                         is_valid_m3u = True
                         logger.info("Content validated as M3U: contains HTTP URLs")
+                    elif any(line.strip().startswith(('rtsp', 'rtp', 'udp')) for line in content_lines):
+                        # Has RTSP/RTP/UDP URLs, might be a simple M3U without headers
+                        is_valid_m3u = True
+                        logger.info("Content validated as M3U: contains RTSP/RTP/UDP URLs")
 
                     if not is_valid_m3u:
                         # Log what we actually received for debugging
@@ -383,9 +391,14 @@ def fetch_m3u_lines(account, use_cache=False):
                     error_msg = f"Network error while fetching M3U file from URL: {account.server_url} - {str(e)}"
 
                 logger.error(error_msg)
-                account.status = M3UAccount.Status.ERROR
-                account.last_message = error_msg
-                account.save(update_fields=["status", "last_message"])
+                # Safe save - account may have been deleted during fetch
+                try:
+                    account.refresh_from_db()
+                    account.status = M3UAccount.Status.ERROR
+                    account.last_message = error_msg
+                    account.save(update_fields=["status", "last_message"])
+                except (M3UAccount.DoesNotExist, Exception) as save_error:
+                    logger.warning(f"Could not update account status: {save_error}")
                 send_m3u_update(
                     account.id,
                     "downloading",
@@ -398,9 +411,14 @@ def fetch_m3u_lines(account, use_cache=False):
                 # Handle any other unexpected errors
                 error_msg = f"Unexpected error while fetching M3U file from URL: {account.server_url} - {str(e)}"
                 logger.error(error_msg)
-                account.status = M3UAccount.Status.ERROR
-                account.last_message = error_msg
-                account.save(update_fields=["status", "last_message"])
+                # Safe save - account may have been deleted during fetch
+                try:
+                    account.refresh_from_db()
+                    account.status = M3UAccount.Status.ERROR
+                    account.last_message = error_msg
+                    account.save(update_fields=["status", "last_message"])
+                except (M3UAccount.DoesNotExist, Exception) as save_error:
+                    logger.warning(f"Could not update account status: {save_error}")
                 send_m3u_update(
                     account.id,
                     "downloading",
@@ -499,32 +517,59 @@ def get_case_insensitive_attr(attributes, key, default=""):
 def parse_extinf_line(line: str) -> dict:
     """
     Parse an EXTINF line from an M3U file.
-    This function removes the "#EXTINF:" prefix, then splits the remaining
-    string on the first comma that is not enclosed in quotes.
+    This function removes the "#EXTINF:" prefix, then extracts all key="value" attributes,
+    and treats everything after the last attribute as the display name.
 
     Returns a dictionary with:
       - 'attributes': a dict of attribute key/value pairs (e.g. tvg-id, tvg-logo, group-title)
-      - 'display_name': the text after the comma (the fallback display name)
+      - 'display_name': the text after the attributes (the fallback display name)
       - 'name': the value from tvg-name (if present) or the display name otherwise.
     """
     if not line.startswith("#EXTINF:"):
         return None
     content = line[len("#EXTINF:") :].strip()
-    # Split on the first comma that is not inside quotes.
-    parts = re.split(r',(?=(?:[^"]*"[^"]*")*[^"]*$)', content, maxsplit=1)
-    if len(parts) != 2:
-        return None
-    attributes_part, display_name = parts[0], parts[1].strip()
-    attrs = dict(re.findall(r'([^\s]+)="([^"]+)"', attributes_part) + re.findall(r"([^\s]+)='([^']+)'", attributes_part))
-    # Use tvg-name attribute if available; otherwise, use the display name.
-    name = get_case_insensitive_attr(attrs, "tvg-name", display_name)
+
+    # Single pass: extract all attributes AND track the last attribute position
+    # This regex matches both key="value" and key='value' patterns
+    attrs = {}
+    last_attr_end = 0
+
+    # Use a single regex that handles both quote types
+    for match in re.finditer(r'([^\s]+)=(["\'])([^\2]*?)\2', content):
+        key = match.group(1)
+        value = match.group(3)
+        attrs[key] = value
+        last_attr_end = match.end()
+
+    # Everything after the last attribute (skipping leading comma and whitespace) is the display name
+    if last_attr_end > 0:
+        remaining = content[last_attr_end:].strip()
+        # Remove leading comma if present
+        if remaining.startswith(','):
+            remaining = remaining[1:].strip()
+        display_name = remaining
+    else:
+        # No attributes found, try the old comma-split method as fallback
+        parts = content.split(',', 1)
+        if len(parts) == 2:
+            display_name = parts[1].strip()
+        else:
+            display_name = content.strip()
+
+    # Use tvg-name attribute if available; otherwise try tvc-guide-title, then fall back to display name.
+    name = get_case_insensitive_attr(attrs, "tvg-name", None)
+    if not name:
+        name = get_case_insensitive_attr(attrs, "tvc-guide-title", None)
+    if not name:
+        name = display_name
     return {"attributes": attrs, "display_name": display_name, "name": name}
 
 
 @shared_task
 def refresh_m3u_accounts():
     """Queue background parse for all active M3UAccounts."""
-    active_accounts = M3UAccount.objects.filter(is_active=True)
+    # OPTIMIZED: Only fetch id field since we only need account.id
+    active_accounts = M3UAccount.objects.filter(is_active=True).only('id')
     count = 0
     for account in active_accounts:
         refresh_single_m3u_account.delay(account.id)
@@ -552,6 +597,24 @@ def process_groups(account, groups):
         for group in ChannelGroup.objects.filter(name__in=groups.keys())
     }
     logger.info(f"Currently {len(existing_groups)} existing groups")
+    
+    # Get count of ALL existing relationships for this account (for safety check)
+    total_existing_relationships = ChannelGroupM3UAccount.objects.filter(
+        m3u_account=account
+    ).count()
+    
+    # SAFETY CHECK: If we have many existing groups but very few new groups,
+    # this likely indicates a problem with group extraction (e.g., all channels
+    # got assigned to a single fallback group like "MAC" or "Default Group")
+    # In this case, skip the orphan deletion to prevent data loss
+    skip_orphan_deletion = False
+    if total_existing_relationships > 10 and len(groups) <= 3:
+        logger.warning(
+            f"SAFETY CHECK: Account {account.id} has {total_existing_relationships} existing group relationships "
+            f"but only {len(groups)} groups were returned. This may indicate a group extraction problem. "
+            f"Skipping orphan deletion to prevent data loss. Groups returned: {list(groups.keys())}"
+        )
+        skip_orphan_deletion = True
 
     # Check if we should auto-enable new groups based on account settings
     account_custom_props = account.custom_properties or {}
@@ -565,14 +628,15 @@ def process_groups(account, groups):
         if group_name in existing_groups:
             existing_group_objs.append(existing_groups[group_name])
         else:
-            groups_to_create.append(ChannelGroup(name=group_name))
+            # Create new Live TV group with group_type='live'
+            groups_to_create.append(ChannelGroup(name=group_name, group_type='live'))
 
     # Create new groups and fetch them back with IDs
     newly_created_group_objs = []
     if groups_to_create:
-        logger.info(f"Creating {len(groups_to_create)} new groups for account {account.id}")
+        logger.info(f"Creating {len(groups_to_create)} new Live TV groups for account {account.id}")
         newly_created_group_objs = list(ChannelGroup.bulk_create_and_fetch(groups_to_create))
-        logger.debug(f"Successfully created {len(newly_created_group_objs)} new groups")
+        logger.debug(f"Successfully created {len(newly_created_group_objs)} new Live TV groups")
 
     # Combine all groups
     all_group_objs = existing_group_objs + newly_created_group_objs
@@ -599,9 +663,26 @@ def process_groups(account, groups):
     relations_to_delete = []
 
     # Find orphaned relationships (groups that no longer exist in the source)
+    # IMPORTANT: Only delete Live TV groups, NOT VOD categories
     current_group_names = set(groups.keys())
     for group_name, rel in all_existing_relationships.items():
         if group_name not in current_group_names:
+            # Check if this is a VOD category - don't delete those during Live TV refresh
+            is_vod_category = False
+            rel_props = rel.custom_properties or {}
+            if rel_props.get('is_vod_category') or rel_props.get('vod_type'):
+                is_vod_category = True
+            # Also check group_type on the ChannelGroup itself
+            if hasattr(rel.channel_group, 'group_type') and rel.channel_group.group_type in ['vod_movie', 'vod_series']:
+                is_vod_category = True
+            # Also check by name pattern for backward compatibility
+            if group_name.startswith('VOD - '):
+                is_vod_category = True
+            
+            if is_vod_category:
+                logger.debug(f"Skipping deletion of VOD category group '{group_name}' during Live TV refresh for account {account.id}")
+                continue
+            
             relations_to_delete.append(rel)
             logger.debug(f"Marking relationship for deletion: group '{group_name}' no longer exists in source for account {account.id}")
 
@@ -659,8 +740,8 @@ def process_groups(account, groups):
         ChannelGroupM3UAccount.objects.bulk_update(relations_to_update, ['custom_properties'])
         logger.info(f"Updated {len(relations_to_update)} existing group relationships with new xc_id values for account {account.id}")
 
-    # Delete orphaned relationships
-    if relations_to_delete:
+    # Delete orphaned relationships (unless safety check triggered)
+    if relations_to_delete and not skip_orphan_deletion:
         ChannelGroupM3UAccount.objects.filter(
             id__in=[rel.id for rel in relations_to_delete]
         ).delete()
@@ -689,6 +770,8 @@ def process_groups(account, groups):
             deleted_groups = list(ChannelGroup.objects.filter(id__in=orphaned_group_ids).values_list('name', flat=True))
             ChannelGroup.objects.filter(id__in=orphaned_group_ids).delete()
             logger.info(f"Deleted {len(orphaned_group_ids)} orphaned groups that had no remaining associations: {deleted_groups}")
+    elif relations_to_delete and skip_orphan_deletion:
+        logger.warning(f"SKIPPED deletion of {len(relations_to_delete)} group relationships due to safety check")
 
 
 def collect_xc_streams(account_id, enabled_groups):
@@ -1073,9 +1156,9 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     retval = f"M3U account: {account_id}, Batch processed: {len(streams_to_create)} created, {len(streams_to_update)} updated."
 
     # Aggressive garbage collection
-    # del streams_to_create, streams_to_update, stream_hashes, existing_streams
-    # from core.utils import cleanup_memory
-    # cleanup_memory(log_usage=True, force_collection=True)
+    del streams_to_create, streams_to_update, stream_hashes, existing_streams
+    from core.utils import cleanup_memory
+    cleanup_memory(log_usage=True, force_collection=True)
 
     # Clean up database connections for threading
     connections.close_all()
@@ -1126,6 +1209,13 @@ def cleanup_streams(account_id, scan_start_time=timezone.now):
 
 @shared_task
 def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
+    # Import required models at the beginning
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalError  # UnifiedMacPortalClient used in sub-functions
+    from apps.channels.models import Channel, ChannelGroup
+    from django.utils import timezone
+    import re
+    
     if not acquire_task_lock("refresh_m3u_account_groups", account_id):
         return f"Task already running for account_id={account_id}.", None
 
@@ -1138,7 +1228,58 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
     extinf_data = []
     groups = {"Default Group": {}}
 
-    if account.account_type == M3UAccount.Types.XC:
+    if account.account_type == M3UAccount.Types.MAC:
+        # Handle MAC/STB Portal accounts
+        logger.info(f"Processing MAC account {account_id} with URL: {account.server_url}")
+        
+        try:
+            # Call MAC refresh function directly (avoid Celery anti-pattern)
+            
+            # Execute MAC refresh logic directly and get groups
+            mac_result = _refresh_mac_account_with_groups(account_id)
+            
+            if mac_result and not mac_result.get('error'):
+                logger.info(f"MAC account {account_id} refreshed successfully")
+                
+                # Process groups from MAC result
+                groups = mac_result.get('groups', {})
+                extinf_data = mac_result.get('extinf_data', [])
+                
+                if groups:
+                    logger.info(f"Processing {len(groups)} groups for MAC account {account_id}")
+                    process_groups(account, groups)
+                
+                account.status = M3UAccount.Status.SUCCESS
+                account.last_message = f"MAC refresh completed: {mac_result.get('channels', 0)} channels, {len(groups)} groups"
+                account.updated_at = timezone.now()
+                account.save(update_fields=["status", "last_message", "updated_at"])
+                
+                send_m3u_update(account_id, "processing_groups", 100, status="success")
+                release_task_lock("refresh_m3u_account_groups", account_id)
+                return extinf_data, groups
+            else:
+                error_msg = mac_result.get('error', 'Unknown MAC refresh error')
+                logger.error(f"MAC account {account_id} refresh failed: {error_msg}")
+                account.status = M3UAccount.Status.ERROR
+                account.last_message = error_msg
+                account.save(update_fields=["status", "last_message"])
+                
+                send_m3u_update(account_id, "processing_groups", 100, status="error", error=error_msg)
+                release_task_lock("refresh_m3u_account_groups", account_id)
+                return error_msg, None
+                
+        except Exception as e:
+            error_msg = f"MAC account refresh failed: {str(e)}"
+            logger.error(error_msg)
+            account.status = M3UAccount.Status.ERROR
+            account.last_message = error_msg
+            account.save(update_fields=["status", "last_message"])
+            
+            send_m3u_update(account_id, "processing_groups", 100, status="error", error=error_msg)
+            release_task_lock("refresh_m3u_account_groups", account_id)
+            return error_msg, None
+
+    elif account.account_type == M3UAccount.Types.XC:
         # Log detailed information about the account
         logger.info(
             f"Processing XC account {account_id} with URL: {account.server_url}"
@@ -1251,52 +1392,14 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                         auth_result = xc_client.authenticate()
                         logger.debug(f"Authentication response: {auth_result}")
 
-                        # Save account information to all active profiles
+                        # Queue async profile refresh task to run in background
+                        # This prevents any delay in the main refresh process
                         try:
-                            from apps.m3u.models import M3UAccountProfile
-
-                            profiles = M3UAccountProfile.objects.filter(
-                                m3u_account=account,
-                                is_active=True
-                            )
-
-                            # Update each profile with account information using its own transformed credentials
-                            for profile in profiles:
-                                try:
-                                    # Get transformed credentials for this specific profile
-                                    profile_url, profile_username, profile_password = get_transformed_credentials(account, profile)
-
-                                    # Create a separate XC client for this profile's credentials
-                                    with XCClient(
-                                        profile_url,
-                                        profile_username,
-                                        profile_password,
-                                        user_agent_string
-                                    ) as profile_client:
-                                        # Authenticate with this profile's credentials
-                                        if profile_client.authenticate():
-                                            # Get account information specific to this profile's credentials
-                                            profile_account_info = profile_client.get_account_info()
-
-                                            # Merge with existing custom_properties if they exist
-                                            existing_props = profile.custom_properties or {}
-                                            existing_props.update(profile_account_info)
-                                            profile.custom_properties = existing_props
-                                            profile.save(update_fields=['custom_properties'])
-
-                                            logger.info(f"Updated account information for profile '{profile.name}' with transformed credentials")
-                                        else:
-                                            logger.warning(f"Failed to authenticate profile '{profile.name}' with transformed credentials")
-
-                                except Exception as profile_error:
-                                    logger.error(f"Failed to update account information for profile '{profile.name}': {str(profile_error)}")
-                                    # Continue with other profiles even if one fails
-
-                            logger.info(f"Processed account information for {profiles.count()} profiles for account {account.name}")
-
-                        except Exception as save_error:
-                            logger.warning(f"Failed to process profile account information: {str(save_error)}")
-                            # Don't fail the whole process if saving account info fails
+                            logger.info(f"Queueing background profile refresh for account {account.name}")
+                            refresh_account_profiles.delay(account.id)
+                        except Exception as e:
+                            logger.warning(f"Failed to queue profile refresh task: {str(e)}")
+                            # Don't fail the main refresh if profile refresh can't be queued
 
                     except Exception as e:
                         error_msg = f"Failed to authenticate with XC server: {str(e)}"
@@ -1393,364 +1496,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             )
             release_task_lock("refresh_m3u_account_groups", account_id)
             return error_msg, None
-    elif account.account_type == M3UAccount.Types.MAC:
-        logger.info(
-            f"Processing MAC account {account_id} with portal URL: {account.server_url}"
-        )
-
-        # Basic validation for MAC accounts
-        if not account.server_url:
-            error_msg = "Missing portal URL (server_url) for MAC account"
-            logger.error(error_msg)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = error_msg
-            account.save(update_fields=["status", "last_message"])
-            send_m3u_update(
-                account_id, "processing_groups", 100, status="error", error=error_msg
-            )
-            release_task_lock("refresh_m3u_account_groups", account_id)
-            return error_msg, None
-
-        # sicherstellen, dass aus mac_address ggf. MAC-Objekte entstanden sind
-        account._ensure_macs_from_mac_address()
-        mac_entries = list(account.macs.all().order_by("priority", "id"))
-
-        if not mac_entries:
-            error_msg = "Missing MAC address for MAC account"
-            logger.error(error_msg)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = error_msg
-            account.save(update_fields=["status", "last_message"])
-            send_m3u_update(
-                account_id, "processing_groups", 100, status="error", error=error_msg
-            )
-            release_task_lock("refresh_m3u_account_groups", account_id)
-            return error_msg, None
-
-        primary_channels = None
-
-        # Prepare HTTP proxy rotation for MAC checks (per account, reused across MACs)
-        props = account.custom_properties or {}
-        proxy_value = props.get("proxy")
-        tz_name_default = props.get("timezone", "Europe/Berlin")
-        multi_enabled = bool(props.get("multi_proxy_enabled", False))
-
-        # Parse proxy list: support comma, whitespace or newline separated values
-        proxy_list = []
-        if isinstance(proxy_value, str):
-            raw = proxy_value.replace("\r", "\n")
-            raw = raw.replace(",", "\n")
-            parts = [p.strip() for p in raw.split() if p.strip()]
-            seen = set()
-            for p in parts:
-                if p not in seen:
-                    seen.add(p)
-                    proxy_list.append(p)
-        elif isinstance(proxy_value, (list, tuple)):
-            seen = set()
-            for p in proxy_value:
-                if not p:
-                    continue
-                s = str(p).strip()
-                if not s or s in seen:
-                    continue
-                seen.add(s)
-                proxy_list.append(s)
-
-        # If no proxies are configured, use direct connection (None)
-        if not proxy_list:
-            proxy_list = [None]
-        elif not multi_enabled:
-            # Single-proxy mode: always use first configured proxy only
-            proxy_list = [proxy_list[0]]
-
-        dead_proxies = set()
-
-        for mac_index, mac_entry in enumerate(mac_entries):
-            mac_value = mac_entry.address
-            logger.info(
-                "MAC account %s: checking MAC %s (priority %s)",
-                account_id,
-                mac_value,
-                mac_entry.priority,
-            )
-
-            tz_name = tz_name_default
-
-            # Build working proxy set for this run (skip proxies that already failed hard)
-            working_proxies = [p for p in proxy_list if p not in dead_proxies]
-
-            if not working_proxies:
-                # No working proxies left
-                if proxy_list == [None]:
-                    # No proxies configured at all -> direct connection only
-                    working_proxies = [None]
-                else:
-                    # Proxies are configured but all considered dead.
-                    # IMPORTANT: Do NOT fall back to direct connection if any proxy is configured.
-                    logger.warning(
-                        "MAC account %s: all configured proxies are marked dead, skipping MAC %s without direct fallback",
-                        account_id,
-                        mac_value,
-                    )
-                    continue
-
-            # Rotate proxies per MAC only if multi-proxy is enabled and we have >1
-            if multi_enabled and len(working_proxies) > 1:
-                # MAC1->proxy1, MAC2->proxy2, ..., with dead proxies skipped
-                start_index = mac_index % len(working_proxies)
-                ordered_proxies = working_proxies[start_index:] + working_proxies[:start_index]
-            else:
-                ordered_proxies = working_proxies
-
-            mac_value = mac_entry.address
-            logger.info(
-                "MAC account %s: checking MAC %s (priority %s)",
-                account_id,
-                mac_value,
-                mac_entry.priority,
-            )
-
-            tz_name = tz_name_default
-
-
-            # Build working proxy set for this run (skip proxies that already failed hard)
-            working_proxies = [p for p in proxy_list if p not in dead_proxies]
-
-            if not working_proxies:
-                # All proxies considered dead -> fall back once to direct connection (proxy=None)
-                working_proxies = [None]
-            # Rotate proxies per MAC: MAC1->proxy1, MAC2->proxy2, ..., with dead proxies skipped
-            start_index = mac_index % len(working_proxies)
-            ordered_proxies = working_proxies[start_index:] + working_proxies[:start_index]
-
-            final_status = None
-            final_expires_at = None
-            final_expires_text = None
-            last_error = None
-
-            for proxy in ordered_proxies:
-                logger.info(
-                    "MAC account %s: trying MAC %s with proxy %s",
-                    account_id,
-                    mac_value,
-                    proxy,
-                )
-                expires_at = None
-                expires_text = None
-                attempt_status = None
-
-                try:
-                    client = MacPortalClient(
-                        base_url=account.server_url,
-                        mac=mac_value,
-                        proxy=proxy,
-                        timezone=tz_name,
-                    )
-
-                    # Ablaufinfo (fürs UI + Status)
-                    expiry_info = None
-                    try:
-                        expiry_info = client.get_expires()
-                        logger.info(
-                            "MAC account %s (%s) expiry info: %s",
-                            account_id,
-                            mac_value,
-                            expiry_info,
-                        )
-                    except MacPortalError as exp_err:
-                        # Treat explicit portal errors as potential expiry info
-                        logger.warning(
-                            "Could not fetch MAC expiry info for %s: %s",
-                            mac_value,
-                            exp_err,
-                        )
-                        mac_entry.last_error = str(exp_err)
-                        low = str(exp_err).lower()
-                        if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
-                            attempt_status = M3UAccountMac.Status.EXPIRED
-                        else:
-                            attempt_status = M3UAccountMac.Status.ERROR
-
-                    if expiry_info is not None:
-                        expires_at, expires_text = _parse_mac_portal_expiry(expiry_info)
-
-                    # Channels nur laden, wenn noch keine Primary gewählt
-                    channels = None
-                    if primary_channels is None:
-                        channels = client.get_channels()
-                        logger.info(
-                            "MAC account %s (MAC %s): received %s channels from portal",
-                            account_id,
-                            mac_value,
-                            len(channels),
-                        )
-                        primary_channels = channels
-                    else:
-                        channels = primary_channels
-
-                    # Wenn wir noch keinen Status aus dem Expiry-Block haben, aus expires_at/text bestimmen
-                    if attempt_status is None:
-                        now_ts = timezone.now()
-                        if expires_at is not None:
-                            if expires_at <= now_ts:
-                                attempt_status = M3UAccountMac.Status.EXPIRED
-                            else:
-                                attempt_status = M3UAccountMac.Status.VALID
-                        elif expires_text:
-                            low = (expires_text or "").lower()
-                            if "expir" in low or "no active" in low or "ended" in low or "expired" in low:
-                                attempt_status = M3UAccountMac.Status.EXPIRED
-                            else:
-                                attempt_status = M3UAccountMac.Status.VALID
-                        else:
-                            attempt_status = M3UAccountMac.Status.UNKNOWN
-
-                    # Valid/Expired -> fertig mit dieser MAC, keinen weiteren Proxy testen
-                    if attempt_status in (
-                        M3UAccountMac.Status.VALID,
-                        M3UAccountMac.Status.EXPIRED,
-                    ):
-                        final_status = attempt_status
-                        final_expires_at = expires_at
-                        final_expires_text = expires_text
-                        break
-
-                    # ERROR/UNKNOWN mit funktionierendem Proxy -> nächsten Proxy probieren
-                    last_error = MacPortalError(
-                        f"MAC {mac_value} returned status {attempt_status} with proxy {proxy}"
-                    )
-                    continue
-
-                except (MacPortalError, requests.RequestException) as e:
-                    # Classify error as proxy-level or MAC-level.
-                    # - MAC-level (e.g. invalid handshake, 401/403/404) -> keep proxy, try next proxy / MAC.
-                    # - Proxy/network-level (timeouts, connection errors, DNS, 5xx, etc.) -> mark proxy as dead.
-                    last_error = e
-                    mac_entry.last_error = str(e)
-
-                    proxy_is_dead = False
-
-                    # MacPortalError is considered a MAC-level problem (invalid handshake, bad JSON, etc.)
-                    if isinstance(e, MacPortalError):
-                        proxy_is_dead = False
-                    elif isinstance(e, requests.HTTPError):
-                        status_code = None
-                        try:
-                            if e.response is not None:
-                                status_code = e.response.status_code
-                        except Exception:
-                            status_code = None
-                        # 401/403/404 -> MAC ungültig, Proxy bleibt leben
-                        if status_code in (401, 403, 404):
-                            proxy_is_dead = False
-                        else:
-                            proxy_is_dead = True
-                    else:
-                        # Sonstige RequestException: Timeout, ConnectionError, DNS etc. -> Proxy als tot markieren
-                        proxy_is_dead = True
-
-                    if proxy_is_dead and proxy is not None:
-                        dead_proxies.add(proxy)
-                        logger.warning(
-                            "MAC %s failed during refresh for account %s with proxy %s (proxy marked dead): %s",
-                            mac_value,
-                            account_id,
-                            proxy,
-                            e,
-                        )
-                    else:
-                        logger.warning(
-                            "MAC %s failed during refresh for account %s with proxy %s (proxy kept, MAC-level error): %s",
-                            mac_value,
-                            account_id,
-                            proxy,
-                            e,
-                        )
-
-                    # Fehler: nächsten Proxy für diese MAC probieren
-                    continue
-            # Proxy-Schleife fertig -> finalen Status für diese MAC bestimmen
-            mac_entry.last_checked = timezone.now()
-            mac_entry.expires_at = final_expires_at
-            mac_entry.expires_text = final_expires_text
-
-            if final_status is not None:
-                mac_entry.status = final_status
-                mac_entry.last_error = None
-            else:
-                # Kein erfolgreicher Proxy -> Status aus letztem Fehler ableiten
-                if last_error is not None:
-                    msg = str(last_error).lower()
-                    if "expir" in msg or "no active" in msg or "ended" in msg or "expired" in msg:
-                        mac_entry.status = M3UAccountMac.Status.EXPIRED
-                    else:
-                        mac_entry.status = M3UAccountMac.Status.ERROR
-                else:
-                    mac_entry.status = M3UAccountMac.Status.UNKNOWN
-
-            mac_entry.save(
-                update_fields=[
-                    "expires_at",
-                    "expires_text",
-                    "status",
-                    "last_checked",
-                    "last_error",
-                ]
-            )
-
-        if primary_channels is None:
-            error_msg = "Error fetching MAC portal data: no working MAC found"
-            logger.error(error_msg)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = error_msg
-            account.save(update_fields=["status", "last_message"])
-            send_m3u_update(
-                account_id, "processing_groups", 100, status="error", error=error_msg
-            )
-            release_task_lock("refresh_m3u_account_groups", account_id)
-            return error_msg, None
-
-        # ab hier: wie bisher – nur dass wir primary_channels verwenden
-        channels = primary_channels
-
-        for ch in channels:
-            group_title = ch.get("group") or "MAC"
-            if group_title not in groups:
-                groups[group_title] = {}
-
-            ch_id = str(ch.get("id"))
-            ch_name = ch.get("name")
-            ch_url = ch.get("url")
-
-            raw_ch = ch.get("raw") or {}
-            cmd = raw_ch.get("cmd") or ""
-
-            groups[group_title][ch_id] = {
-                "name": ch_name,
-                "url": ch_url,
-                "raw": raw_ch,
-            }
-
-            attributes = {
-                "tvg-id": ch_id,
-                "tvg-name": ch_name,
-                "group-title": group_title,
-            }
-            if cmd:
-                attributes["mac_cmd"] = cmd
-
-            extinf_data.append(
-                {
-                    "name": ch_name,
-                    "url": ch_url,
-                    "attributes": attributes,
-                }
-            )
-
-
     else:
-
         # Here's the key change - use the success flag from fetch_m3u_lines
         lines, success = fetch_m3u_lines(account, use_cache)
         if not success:
@@ -1795,10 +1541,12 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
                     )
                     problematic_lines.append((line_index + 1, line[:200]))
 
-            elif extinf_data and line.startswith("http"):
+            elif extinf_data and (line.startswith("http") or line.startswith("rtsp") or line.startswith("rtp") or line.startswith("udp")):
                 url_count += 1
+                # Normalize UDP URLs only (e.g., remove VLC-specific @ prefix)
+                normalized_url = normalize_stream_url(line) if line.startswith("udp") else line
                 # Associate URL with the last EXTINF line
-                extinf_data[-1]["url"] = line
+                extinf_data[-1]["url"] = normalized_url
                 valid_stream_count += 1
 
                 # Periodically log progress for large files
@@ -1862,6 +1610,13 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False):
             status="pending_setup",
             message="M3U groups loaded. Please select groups or refresh M3U to complete setup.",
         )
+
+    # Memory cleanup after refresh (especially important for large M3U files)
+    try:
+        gc.collect()
+        logger.info(f"Memory cleanup completed after refresh for account {account_id}")
+    except Exception as e:
+        logger.debug(f"Memory cleanup failed: {e}")
 
     return extinf_data, groups
 
@@ -2023,11 +1778,12 @@ def sync_auto_channels(account_id, scan_start_time=None):
             )
 
             # Get all current streams in this group for this M3U account, filter out stale streams
+            # OPTIMIZED: select_related to avoid additional queries for m3u_account
             current_streams = Stream.objects.filter(
                 m3u_account=account,
                 channel_group=channel_group,
                 last_seen__gte=scan_start_time,
-            )
+            ).select_related('m3u_account')
 
             # --- FILTER STREAMS BY NAME MATCH REGEX IF SPECIFIED ---
             if name_match_regex:
@@ -2072,23 +1828,25 @@ def sync_auto_channels(account_id, scan_start_time=None):
 
             # Get existing auto-created channels for this account (regardless of current group)
             # We'll find them by their stream associations instead of just group location
+            # OPTIMIZED: Use prefetch_related to avoid N+1 queries
             existing_channels = Channel.objects.filter(
                 auto_created=True, auto_created_by=account
-            ).select_related("logo", "epg_data")
+            ).select_related("logo", "epg_data").prefetch_related(
+                models.Prefetch(
+                    'channelstream_set',
+                    queryset=ChannelStream.objects.filter(
+                        stream__m3u_account=account,
+                        stream__channel_group=channel_group
+                    ).select_related('stream')
+                )
+            )
 
             # Create mapping of existing channels by their associated stream
             # This approach finds channels even if they've been moved to different groups
             existing_channel_map = {}
             for channel in existing_channels:
-                # Get streams associated with this channel that belong to our M3U account and original group
-                channel_streams = ChannelStream.objects.filter(
-                    channel=channel,
-                    stream__m3u_account=account,
-                    stream__channel_group=channel_group,  # Match streams from the original group
-                ).select_related("stream")
-
-                # Map each of our M3U account's streams to this channel
-                for channel_stream in channel_streams:
+                # Use prefetched data instead of additional queries
+                for channel_stream in channel.channelstream_set.all():
                     if channel_stream.stream:
                         existing_channel_map[channel_stream.stream.id] = channel
 
@@ -2659,6 +2417,106 @@ def get_transformed_credentials(account, profile=None):
 
 
 @shared_task
+def refresh_account_profiles(account_id):
+    """Refresh account information for all active profiles of an XC account.
+
+    This task runs asynchronously in the background after account refresh completes.
+    It includes rate limiting delays between profile authentications to prevent provider bans.
+    """
+    from django.conf import settings
+    import time
+
+    try:
+        account = M3UAccount.objects.get(id=account_id, is_active=True)
+
+        if account.account_type != M3UAccount.Types.XC:
+            logger.debug(f"Account {account_id} is not XC type, skipping profile refresh")
+            return f"Account {account_id} is not an XtreamCodes account"
+
+        from apps.m3u.models import M3UAccountProfile
+
+        profiles = M3UAccountProfile.objects.filter(
+            m3u_account=account,
+            is_active=True
+        )
+
+        if not profiles.exists():
+            logger.info(f"No active profiles found for account {account.name}")
+            return f"No active profiles for account {account_id}"
+
+        # Get user agent for this account
+        try:
+            user_agent_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            if account.user_agent_id:
+                from core.models import UserAgent
+                ua_obj = UserAgent.objects.get(id=account.user_agent_id)
+                if ua_obj and hasattr(ua_obj, "user_agent") and ua_obj.user_agent:
+                    user_agent_string = ua_obj.user_agent
+        except Exception as e:
+            logger.warning(f"Error getting user agent, using fallback: {str(e)}")
+        logger.debug(f"Using user agent for profile refresh: {user_agent_string}")
+        # Get rate limiting delay from settings
+        profile_delay = getattr(settings, 'XC_PROFILE_REFRESH_DELAY', 2.5)
+
+        profiles_updated = 0
+        profiles_failed = 0
+
+        logger.info(f"Starting background refresh for {profiles.count()} profiles of account {account.name}")
+
+        for idx, profile in enumerate(profiles):
+            try:
+                # Add delay between profiles to prevent rate limiting (except for first profile)
+                if idx > 0:
+                    logger.info(f"Waiting {profile_delay}s before refreshing next profile to avoid rate limiting")
+                    time.sleep(profile_delay)
+
+                # Get transformed credentials for this specific profile
+                profile_url, profile_username, profile_password = get_transformed_credentials(account, profile)
+
+                # Create a separate XC client for this profile's credentials
+                with XCClient(
+                    profile_url,
+                    profile_username,
+                    profile_password,
+                    user_agent_string
+                ) as profile_client:
+                    # Authenticate with this profile's credentials
+                    if profile_client.authenticate():
+                        # Get account information specific to this profile's credentials
+                        profile_account_info = profile_client.get_account_info()
+
+                        # Merge with existing custom_properties if they exist
+                        existing_props = profile.custom_properties or {}
+                        existing_props.update(profile_account_info)
+                        profile.custom_properties = existing_props
+                        profile.save(update_fields=['custom_properties'])
+
+                        profiles_updated += 1
+                        logger.info(f"Updated account information for profile '{profile.name}' ({profiles_updated}/{profiles.count()})")
+                    else:
+                        profiles_failed += 1
+                        logger.warning(f"Failed to authenticate profile '{profile.name}' with transformed credentials")
+
+            except Exception as profile_error:
+                profiles_failed += 1
+                logger.error(f"Failed to update account information for profile '{profile.name}': {str(profile_error)}")
+                # Continue with other profiles even if one fails
+
+        result_msg = f"Profile refresh complete for account {account.name}: {profiles_updated} updated, {profiles_failed} failed"
+        logger.info(result_msg)
+        return result_msg
+
+    except M3UAccount.DoesNotExist:
+        error_msg = f"Account {account_id} not found"
+        logger.error(error_msg)
+        return error_msg
+    except Exception as e:
+        error_msg = f"Error refreshing profiles for account {account_id}: {str(e)}"
+        logger.error(error_msg)
+        return error_msg
+
+
+@shared_task
 def refresh_account_info(profile_id):
     """Refresh only the account information for a specific M3U profile."""
     if not acquire_task_lock("refresh_account_info", profile_id):
@@ -2883,9 +2741,15 @@ def refresh_single_m3u_account(account_id):
                 )
         except Exception as e:
             logger.error(f"Exception in refresh_m3u_groups: {str(e)}", exc_info=True)
-            account.status = M3UAccount.Status.ERROR
-            account.last_message = f"Error refreshing M3U groups: {str(e)}"
-            account.save(update_fields=["status", "last_message"])
+            # Safe save - account may have been deleted during refresh
+            try:
+                # Refresh account from DB to ensure it still exists
+                account.refresh_from_db()
+                account.status = M3UAccount.Status.ERROR
+                account.last_message = f"Error refreshing M3U groups: {str(e)}"
+                account.save(update_fields=["status", "last_message"])
+            except (M3UAccount.DoesNotExist, Exception) as save_error:
+                logger.warning(f"Could not update account {account_id} status: {save_error}")
             send_m3u_update(
                 account_id,
                 "parsing",
@@ -2942,9 +2806,9 @@ def refresh_single_m3u_account(account_id):
         streams_created = 0
         streams_updated = 0
 
-        if account.account_type in (M3UAccount.Types.STADNARD, M3UAccount.Types.MAC):
+        if account.account_type in [M3UAccount.Types.STADNARD, M3UAccount.Types.MAC]:
             logger.debug(
-                f"Processing Standard account ({account_id}) with groups: {existing_groups}"
+                f"Processing {account.get_account_type_display()} account ({account_id}) with groups: {existing_groups}"
             )
             # Break into batches and process with threading - use global batch size
             batches = [
@@ -3014,7 +2878,7 @@ def refresh_single_m3u_account(account_id):
                         completed_batches += 1  # Still count it to avoid hanging
 
             logger.info(f"Thread-based processing completed for account {account_id}")
-        elif account.account_type == M3UAccount.Types.XC:
+        else:
             # For XC accounts, get the groups with their custom properties containing xc_id
             logger.debug(f"Processing XC account with groups: {existing_groups}")
 
@@ -3167,6 +3031,17 @@ def refresh_single_m3u_account(account_id):
         account.updated_at = timezone.now()
         account.save(update_fields=["status", "last_message", "updated_at"])
 
+        # Log system event for M3U refresh
+        log_system_event(
+            event_type='m3u_refresh',
+            account_name=account.name,
+            elapsed_time=round(elapsed_time, 2),
+            streams_created=streams_created,
+            streams_updated=streams_updated,
+            streams_deleted=streams_deleted,
+            total_processed=streams_processed,
+        )
+
         # Send final update with complete metrics and explicitly include success status
         send_m3u_update(
             account_id,
@@ -3182,15 +3057,40 @@ def refresh_single_m3u_account(account_id):
             message=account.last_message,
         )
 
-        # Trigger VOD refresh if enabled and account is XtreamCodes type
-        if vod_enabled and account.account_type == M3UAccount.Types.XC:
-            logger.info(f"VOD is enabled for account {account_id}, triggering VOD refresh")
-            try:
-                from apps.vod.tasks import refresh_vod_content
-                refresh_vod_content.delay(account_id)
-                logger.info(f"VOD refresh task queued for account {account_id}")
-            except Exception as e:
-                logger.error(f"Failed to queue VOD refresh for account {account_id}: {str(e)}")
+        # Trigger VOD refresh if enabled
+        if vod_enabled:
+            if account.account_type == M3UAccount.Types.XC:
+                logger.info(f"VOD is enabled for XC account {account_id}, triggering VOD refresh")
+                try:
+                    from apps.vod.tasks import refresh_vod_content
+                    refresh_vod_content.delay(account_id)
+                    logger.info(f"VOD refresh task queued for XC account {account_id}")
+                except Exception as e:
+                    logger.error(f"Failed to queue VOD refresh for XC account {account_id}: {str(e)}")
+            elif account.account_type == M3UAccount.Types.MAC:
+                logger.info(f"VOD is enabled for MAC account {account_id}, checking VOD categories")
+                try:
+                    # Check if VOD categories already exist and are enabled
+                    enabled_vod_groups = ChannelGroupM3UAccount.objects.filter(
+                        m3u_account=account,
+                        enabled=True,
+                        channel_group__group_type__in=['vod_movie', 'vod_series']
+                    ).exists()
+                    
+                    if enabled_vod_groups:
+                        # Phase 2: Import VOD content for selected categories
+                        logger.info(f"Found enabled VOD categories, triggering VOD content import for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_selected_vod
+                        refresh_mac_portal_selected_vod.delay(account_id)
+                        logger.info(f"MAC VOD content import task queued for account {account_id}")
+                    else:
+                        # Phase 1: Load categories first
+                        logger.info(f"No VOD categories yet, triggering MAC VOD category refresh for account {account_id}")
+                        from apps.m3u.mac_vod_tasks import refresh_mac_portal_categories
+                        refresh_mac_portal_categories.delay(account_id)
+                        logger.info(f"MAC VOD category refresh task queued for account {account_id}")
+                except Exception as e:
+                    logger.error(f"Failed to queue MAC VOD refresh for account {account_id}: {str(e)}")
 
     except Exception as e:
         logger.error(f"Error processing M3U for account {account_id}: {str(e)}")
@@ -3213,7 +3113,6 @@ def refresh_single_m3u_account(account_id):
         del batches
 
     from core.utils import cleanup_memory
-
     cleanup_memory(log_usage=True, force_collection=True)
 
     # Clean up cache file since we've fully processed it
@@ -3240,7 +3139,7 @@ def send_m3u_update(account_id, action, progress, **kwargs):
                 data["status"] = account.status
             if "message" not in kwargs and account.last_message:
                 data["message"] = account.last_message
-    except:
+    except M3UAccount.DoesNotExist:
         pass  # If account can't be retrieved, continue without these fields
 
     # Add the additional key-value pairs from kwargs
@@ -3249,3 +3148,791 @@ def send_m3u_update(account_id, action, progress, **kwargs):
 
     # Explicitly clear data reference to help garbage collection
     data = None
+
+
+def _refresh_mac_account_with_groups(account_id):
+    """Direct MAC account refresh function that also returns groups for processing."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    try:
+        account = M3UAccount.objects.get(id=account_id)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            logger.warning(f"Account {account_id} is not a MAC account")
+            return {"error": "Not a MAC account"}
+        
+        if not account.server_url:
+            logger.error(f"MAC account {account_id} has no server URL")
+            return {"error": "No server URL configured"}
+        
+        # Get portal engine from GLOBAL settings only
+        # Simplified logic:
+        # - "fastest" → use benchmark result (fastest_engine) per portal
+        # - "auto" → try all engines, cache first working one (until refresh)
+        # - specific engine (macreplay, istb, etc.) → use THAT engine directly, ignore all caches
+        portal_engine = 'auto'
+        account_props = account.custom_properties or {}
+        
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                # Use benchmark result for this portal
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC refresh: FASTEST mode using benchmarked engine '{portal_engine}'")
+                else:
+                    portal_engine = 'auto'
+                    logger.info("MAC refresh: FASTEST mode but no benchmark, falling back to auto")
+            elif global_engine == 'auto':
+                # Auto mode - will try all engines and cache first working
+                portal_engine = 'auto'
+                logger.info("MAC refresh: AUTO mode - will try engines in order")
+            else:
+                # Specific engine selected - use it directly, ignore any cached results
+                portal_engine = global_engine
+                logger.info(f"MAC refresh: Using manually selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC refresh: Using default engine 'auto'")
+        
+        # Ensure MAC addresses are processed into M3UAccountMac objects
+        # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
+        if account.mac_address:
+            existing_macs = account.macs.all()
+            valid_or_unknown_macs = existing_macs.filter(status__in=[
+                M3UAccountMac.Status.VALID,
+                M3UAccountMac.Status.UNKNOWN
+            ])
+            
+            # Process if no MAC objects exist, or if all are in ERROR status
+            if not existing_macs.exists() or (existing_macs.exists() and not valid_or_unknown_macs.exists()):
+                logger.info(f"Processing MAC addresses for account {account.name} (existing: {existing_macs.count()}, valid/unknown: {valid_or_unknown_macs.count()})")
+                # Reset ERROR status MACs to UNKNOWN so they can be retried
+                existing_macs.filter(status=M3UAccountMac.Status.ERROR).update(status=M3UAccountMac.Status.UNKNOWN)
+                account._process_mac_addresses()
+        
+        # Get MAC addresses for this account
+        # Include VALID, UNKNOWN, and ERROR - all should be checked on refresh
+        # Only exclude EXPIRED MACs (they need manual intervention)
+        macs = account.macs.exclude(
+            status=M3UAccountMac.Status.EXPIRED
+        ).order_by('priority')
+        
+        error_macs_count = account.macs.filter(status=M3UAccountMac.Status.ERROR).count()
+        if error_macs_count > 0:
+            logger.info(f"Will retry {error_macs_count} ERROR MACs on this refresh")
+        
+        if not macs.exists():
+            # If still no MACs after processing, check if we have raw MAC addresses
+            if account.mac_address:
+                logger.error(f"MAC account {account_id} has MAC addresses in mac_address field but failed to create MAC objects: {account.mac_address}")
+                # Log more details for debugging
+                all_macs = account.macs.all()
+                logger.error(f"All MAC objects for account: {[(m.address, m.status) for m in all_macs]}")
+                return {"error": f"Failed to process MAC addresses: {account.mac_address}"}
+            else:
+                logger.error(f"MAC account {account_id} has no MAC addresses configured")
+                return {"error": "No MAC addresses configured"}
+        
+        success_count = 0
+        total_channels = 0
+        groups = {}
+        extinf_data = []
+        channels_fetched = False
+        
+        # OPTIMIZATION: Only use Prio 0 (highest priority) MAC for channel fetching
+        # Other MACs are only checked for status (failover purposes)
+        prio_0_mac = macs.first()  # First MAC is Prio 0 (highest priority)
+        
+        # Try Prio 0 MAC first for channel fetching
+        if prio_0_mac:
+            try:
+                logger.info(f"Trying Prio 0 MAC {prio_0_mac.address} for channel fetching (account {account.name})")
+                
+                # Use UnifiedMacPortalClient for all engines including 'auto'
+                # AUTO mode will try all engines in priority order
+                from .mac_portal_client import UnifiedMacPortalClient
+                client = UnifiedMacPortalClient(
+                    base_url=account.server_url,
+                    mac=prio_0_mac.address,
+                    proxy=getattr(account, 'proxy', None),
+                    portal_engine=portal_engine  # Use the resolved engine from benchmark/settings
+                )
+                
+                # Test connection and get channels
+                channels = client.get_channels()
+                
+                if channels:
+                    total_channels = len(channels)
+                    logger.info(f"Successfully got {total_channels} channels from Prio 0 MAC {prio_0_mac.address}")
+                    channels_fetched = True
+                    
+                    # Save portal type/version info to account custom_properties
+                    # NOTE: We do NOT save portal_engine here anymore!
+                    # portal_engine should only be set explicitly by user or benchmark,
+                    # not automatically from global settings (which caused the bug where
+                    # changing global engine didn't take effect because account had cached value)
+                    try:
+                        custom_props = account.custom_properties or {}
+                        
+                        # Try to get portal type/version from UnifiedMacPortalClient
+                        if hasattr(client, '_unified_client') and client._unified_client:
+                            result = getattr(client._unified_client, '_last_result', None)
+                            if result:
+                                if result.portal_type:
+                                    custom_props['portal_type'] = result.portal_type
+                                if result.portal_version:
+                                    custom_props['portal_version'] = result.portal_version
+                        
+                        account.custom_properties = custom_props
+                        account.save(update_fields=['custom_properties'])
+                        logger.debug(f"Saved portal info: type={custom_props.get('portal_type')}, version={custom_props.get('portal_version')}")
+                    except Exception as e:
+                        logger.debug(f"Could not save portal info: {e}")
+                    
+                    # Convert MAC channels to EXTINF format and extract groups
+                    for channel in channels:
+                        group_name = channel.get('group', 'Default Group')
+                        if group_name not in groups:
+                            groups[group_name] = {}
+                        
+                        # Convert MAC channel to EXTINF format
+                        # CRITICAL: Store 'cmd' in attributes for create_link() to work!
+                        # The 'cmd' field contains the portal command (e.g. "ffmpeg http://localhost/ch/1288_")
+                        # which is needed by create_link() to resolve the actual stream URL.
+                        cmd = channel.get('cmd', '')
+                        
+                        # Build attributes dict with mac_cmd for failover
+                        attrs = {
+                            'group-title': group_name,
+                            'tvg-id': str(channel.get('id', '')),
+                            'tvg-logo': channel.get('logo', ''),
+                            'tvg-name': channel.get('name', '')
+                        }
+                        
+                        # Store cmd for create_link() - this is CRITICAL for MAC streaming!
+                        if cmd:
+                            attrs['mac_cmd'] = cmd
+                        
+                        # Get URL - should be mac:// format from UnifiedMacPortalClient
+                        channel_url = channel.get('url', '')
+                        
+                        # CRITICAL: If URL is not mac:// format, generate it now
+                        # This ensures all MAC streams use the proper mac:// URL format
+                        # which will be resolved at playback time via create_link()
+                        if channel_url and channel_url.startswith('mac://'):
+                            # URL is already in correct format
+                            final_url = channel_url
+                        elif cmd:
+                            # Generate mac:// URL from cmd
+                            import base64
+                            proxy_str = getattr(account, 'proxy', '') or ''
+                            mac_data = f"{account.server_url}|{prio_0_mac.address}|{cmd}|{proxy_str}"
+                            encoded_data = base64.urlsafe_b64encode(mac_data.encode()).decode()
+                            final_url = f"mac://{encoded_data}"
+                            logger.debug(f"Generated mac:// URL for channel {channel.get('name', '')}")
+                        else:
+                            # No cmd available - skip this channel
+                            logger.warning(f"Skipping channel {channel.get('name', '')} - no cmd available")
+                            continue
+                        
+                        extinf_entry = {
+                            'name': channel.get('name', ''),
+                            'url': final_url,
+                            'attributes': attrs,
+                            'display_name': channel.get('name', '')
+                        }
+                        extinf_data.append(extinf_entry)
+                    
+                    logger.info(f"Extracted {len(groups)} groups and {len(extinf_data)} channels from Prio 0 MAC")
+                    
+                    # Update MAC status
+                    prio_0_mac.status = M3UAccountMac.Status.VALID
+                    prio_0_mac.last_checked = timezone.now()
+                    prio_0_mac.last_error = None
+                    
+                    # Try to get expiry info
+                    try:
+                        expires_text = client.get_expires()
+                        if expires_text:
+                            prio_0_mac.expires_text = expires_text
+                            prio_0_mac.expires_at = parse_expiry_date(expires_text)
+                    except Exception as e:
+                        logger.debug(f"Could not get expiry for Prio 0 MAC {prio_0_mac.address}: {e}")
+                    
+                    success_count += 1
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for Prio 0 MAC {prio_0_mac.address}: {e}")
+                prio_0_mac.status = M3UAccountMac.Status.ERROR
+                prio_0_mac.last_checked = timezone.now()
+                prio_0_mac.last_error = str(e)
+            except Exception as e:
+                logger.error(f"Unexpected error for Prio 0 MAC {prio_0_mac.address}: {e}")
+                prio_0_mac.status = M3UAccountMac.Status.ERROR
+                prio_0_mac.last_checked = timezone.now()
+                prio_0_mac.last_error = str(e)
+        
+        # Check status of other MACs (for failover) - but don't fetch channels
+        other_macs = macs[1:]  # All MACs except Prio 0
+        macs_to_update = []  # Collect MACs for bulk update
+        
+        for mac_obj in other_macs:
+            try:
+                logger.info(f"Checking status of backup MAC {mac_obj.address} (account {account.name})")
+                
+                from .mac_portal_client import UnifiedMacPortalClient
+                client = UnifiedMacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None),
+                    portal_engine=portal_engine
+                )
+                
+                # Only get expiry/status, don't fetch channels
+                try:
+                    expires_text = client.get_expires()
+                    if expires_text:
+                        mac_obj.expires_text = expires_text
+                        mac_obj.expires_at = parse_expiry_date(expires_text)
+                        mac_obj.status = M3UAccountMac.Status.VALID
+                        mac_obj.last_checked = timezone.now()
+                        mac_obj.last_error = None
+                        macs_to_update.append(mac_obj)
+                        success_count += 1
+                        logger.info(f"Backup MAC {mac_obj.address} is valid (expires: {expires_text})")
+                except Exception as e:
+                    logger.debug(f"Could not get expiry for backup MAC {mac_obj.address}: {e}")
+                    # Still mark as valid if we got here without exception
+                    mac_obj.status = M3UAccountMac.Status.VALID
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    macs_to_update.append(mac_obj)
+                    success_count += 1
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for backup MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                macs_to_update.append(mac_obj)
+            except Exception as e:
+                logger.error(f"Unexpected error for backup MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                macs_to_update.append(mac_obj)
+        
+        # Bulk update all MACs (including prio_0_mac)
+        macs_to_update.append(prio_0_mac)
+        if macs_to_update:
+            M3UAccountMac.objects.bulk_update(
+                macs_to_update,
+                ['status', 'last_checked', 'last_error', 'expires_text'],
+                batch_size=100
+            )
+        
+        # Memory cleanup after processing large channel lists (can be 20k+ channels)
+        if total_channels > 2500:
+            logger.info(f"MAC account processed {total_channels} channels, running memory cleanup")
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
+        if channels_fetched:
+            return {
+                "success": True,
+                "channels": total_channels,
+                "working_macs": success_count,
+                "groups": groups,
+                "extinf_data": extinf_data,
+                "prio_0_used": True
+            }
+        elif success_count > 0:
+            # Some MACs are valid but Prio 0 failed to fetch channels
+            return {
+                "success": False,
+                "error": "Prio 0 MAC failed, but backup MACs are available",
+                "working_macs": success_count
+            }
+        else:
+            return {"error": "All MAC addresses failed"}
+            
+    except M3UAccount.DoesNotExist:
+        logger.error(f"MAC account {account_id} not found")
+        return {"error": "Account not found"}
+    except Exception as e:
+        logger.error(f"Error refreshing MAC account {account_id}: {e}")
+        return {"error": str(e)}
+
+
+def _refresh_mac_account_direct(account_id):
+    """Direct MAC account refresh function (non-Celery) to avoid anti-pattern."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    try:
+        account = M3UAccount.objects.get(id=account_id)
+        
+        if account.account_type != M3UAccount.Types.MAC:
+            logger.warning(f"Account {account_id} is not a MAC account")
+            return {"error": "Not a MAC account"}
+        
+        if not account.server_url:
+            logger.error(f"MAC account {account_id} has no server URL")
+            return {"error": "No server URL configured"}
+        
+        # Get portal engine from GLOBAL settings only
+        # - "fastest" → use benchmark result per portal
+        # - "auto" → try all engines, cache first working
+        # - specific engine → use directly, ignore caches
+        portal_engine = 'auto'
+        account_props = account.custom_properties or {}
+        
+        try:
+            from .mac_portal_models import MACPortalGlobalSettings
+            settings = MACPortalGlobalSettings.get_settings()
+            global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+            
+            if global_engine == 'fastest':
+                fastest_engine = account_props.get('fastest_engine')
+                if fastest_engine:
+                    portal_engine = fastest_engine
+                    logger.info(f"MAC direct refresh: FASTEST mode using '{portal_engine}'")
+                else:
+                    portal_engine = 'auto'
+                    logger.info("MAC direct refresh: FASTEST but no benchmark, using auto")
+            elif global_engine == 'auto':
+                portal_engine = 'auto'
+                logger.info("MAC direct refresh: AUTO mode")
+            else:
+                portal_engine = global_engine
+                logger.info(f"MAC direct refresh: Using selected engine '{portal_engine}'")
+        except Exception:
+            logger.info("MAC direct refresh: Using default engine 'auto'")
+        
+        # Ensure MAC addresses are processed into M3UAccountMac objects
+        # Always process if we have mac_address field but no MAC objects, OR if all MACs are in ERROR status
+        if account.mac_address:
+            existing_macs = account.macs.all()
+            valid_or_unknown_macs = existing_macs.filter(status__in=[
+                M3UAccountMac.Status.VALID,
+                M3UAccountMac.Status.UNKNOWN
+            ])
+            
+            # Process if no MAC objects exist, or if all are in ERROR status
+            if not existing_macs.exists() or (existing_macs.exists() and not valid_or_unknown_macs.exists()):
+                logger.info(f"Processing MAC addresses for account {account.name} (existing: {existing_macs.count()}, valid/unknown: {valid_or_unknown_macs.count()})")
+                # Reset ERROR status MACs to UNKNOWN so they can be retried
+                existing_macs.filter(status=M3UAccountMac.Status.ERROR).update(status=M3UAccountMac.Status.UNKNOWN)
+                account._process_mac_addresses()
+        
+        # Get MAC addresses for this account
+        macs = account.macs.filter(status__in=[
+            M3UAccountMac.Status.VALID,
+            M3UAccountMac.Status.UNKNOWN
+        ]).order_by('priority')
+        
+        if not macs.exists():
+            # If still no MACs after processing, check if we have raw MAC addresses
+            if account.mac_address:
+                logger.error(f"MAC account {account_id} has MAC addresses in mac_address field but failed to create MAC objects: {account.mac_address}")
+                # Log more details for debugging
+                all_macs = account.macs.all()
+                logger.error(f"All MAC objects for account: {[(m.address, m.status) for m in all_macs]}")
+                return {"error": f"Failed to process MAC addresses: {account.mac_address}"}
+            else:
+                logger.error(f"MAC account {account_id} has no MAC addresses configured")
+                return {"error": "No MAC addresses configured"}
+        
+        success_count = 0
+        total_channels = 0
+        
+        # Try each MAC and check all of them for status
+        working_mac_found = False
+        
+        for mac_obj in macs:
+            try:
+                logger.info(f"Trying MAC {mac_obj.address} for account {account.name}")
+                
+                # Use UnifiedMacPortalClient for all engines including 'auto'
+                from .mac_portal_client import UnifiedMacPortalClient
+                client = UnifiedMacPortalClient(
+                    base_url=account.server_url,
+                    mac=mac_obj.address,
+                    proxy=getattr(account, 'proxy', None),
+                    portal_engine=portal_engine  # Use the resolved engine from benchmark/settings
+                )
+                
+                # Test connection and get channels
+                channels = client.get_channels()
+                
+                if channels:
+                    if not working_mac_found:
+                        # Only count channels from first working MAC
+                        total_channels = len(channels)
+                        logger.info(f"Successfully got {total_channels} channels from MAC {mac_obj.address}")
+                        working_mac_found = True
+                    else:
+                        logger.info(f"MAC {mac_obj.address} is also working (backup)")
+                    
+                    # Update MAC status
+                    mac_obj.status = M3UAccountMac.Status.VALID
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    
+                    # Try to get expiry info
+                    try:
+                        expires_text = client.get_expires()
+                        if expires_text:
+                            mac_obj.expires_text = expires_text
+                            mac_obj.expires_at = parse_expiry_date(expires_text)
+                    except Exception as e:
+                        logger.debug(f"Could not get expiry for MAC {mac_obj.address}: {e}")
+                    
+                    success_count += 1
+                    
+            except MacPortalError as e:
+                logger.error(f"MAC Portal error for {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error for MAC {mac_obj.address}: {e}")
+                mac_obj.status = M3UAccountMac.Status.ERROR
+                mac_obj.last_checked = timezone.now()
+                mac_obj.last_error = str(e)
+                continue
+        
+        # Bulk update all MACs at once (much faster than individual saves)
+        if macs:
+            M3UAccountMac.objects.bulk_update(
+                list(macs),
+                ['status', 'last_checked', 'last_error', 'expires_text'],
+                batch_size=100
+            )
+        
+        # Memory cleanup after MAC status check (especially with many MACs)
+        if len(list(macs)) > 10:
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
+        if success_count > 0:
+            return {
+                "success": True,
+                "channels": total_channels,
+                "working_macs": success_count
+            }
+        else:
+            return {"error": "All MAC addresses failed"}
+            
+    except M3UAccount.DoesNotExist:
+        logger.error(f"MAC account {account_id} not found")
+        return {"error": "Account not found"}
+    except Exception as e:
+        logger.error(f"Error refreshing MAC account {account_id}: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def refresh_mac_account(account_id):
+    """Refresh MAC account channels and status using MAC Portal Client.
+    
+    This is now a wrapper around the direct function to avoid Celery anti-patterns.
+    """
+    return _refresh_mac_account_direct(account_id)
+
+
+@shared_task
+def check_mac_expiry(account_id=None):
+    """Check MAC expiry status for accounts."""
+    from .models import M3UAccount, M3UAccountMac
+    from .mac_portal_client import MacPortalClient, MacPortalError
+    from django.utils import timezone
+    
+    if account_id:
+        accounts = M3UAccount.objects.filter(
+            id=account_id,
+            account_type=M3UAccount.Types.MAC,
+            is_active=True
+        )
+    else:
+        accounts = M3UAccount.objects.filter(
+            account_type=M3UAccount.Types.MAC,
+            is_active=True
+        )
+    
+    results = []
+    
+    for account in accounts:
+        try:
+            # Get portal engine from GLOBAL settings only
+            portal_engine = 'auto'
+            account_props = account.custom_properties or {}
+            
+            try:
+                from .mac_portal_models import MACPortalGlobalSettings
+                settings = MACPortalGlobalSettings.get_settings()
+                global_engine = getattr(settings, 'portal_engine', 'auto') or 'auto'
+                
+                if global_engine == 'fastest':
+                    fastest_engine = account_props.get('fastest_engine')
+                    portal_engine = fastest_engine if fastest_engine else 'auto'
+                elif global_engine == 'auto':
+                    portal_engine = 'auto'
+                else:
+                    portal_engine = global_engine
+            except Exception:
+                pass
+            
+            # Set flag to check all MACs, not just first successful one
+            account._status_check_mode = True
+            
+            # Use the direct MAC refresh function for status checking
+            logger.info(f"Checking MAC status for account {account.name}")
+            result = _refresh_mac_account_direct(account.id)
+            
+            if result:
+                logger.info(f"MAC status check completed for account {account.name}: {result}")
+                results.append({
+                    "account": account.name,
+                    "result": result
+                })
+            
+            # Also do individual MAC expiry checks
+            macs = list(account.macs.all())
+            macs_to_update = []
+            
+            for mac_obj in macs:
+                try:
+                    # Use UnifiedMacPortalClient for all engines including 'auto'
+                    from .mac_portal_client import UnifiedMacPortalClient
+                    client = UnifiedMacPortalClient(
+                        base_url=account.server_url,
+                        mac=mac_obj.address,
+                        proxy=getattr(account, 'proxy', None),
+                        portal_engine=portal_engine  # Use the resolved engine
+                    )
+                    
+                    expires_text = client.get_expires()
+                    
+                    if expires_text:
+                        mac_obj.expires_text = expires_text
+                        mac_obj.expires_at = parse_expiry_date(expires_text)
+                        mac_obj.status = M3UAccountMac.Status.VALID
+                    else:
+                        mac_obj.status = M3UAccountMac.Status.UNKNOWN
+                    
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = None
+                    macs_to_update.append(mac_obj)
+                    
+                    results.append({
+                        "account": account.name,
+                        "mac": mac_obj.address,
+                        "status": mac_obj.status,
+                        "expires": expires_text
+                    })
+                    
+                except MacPortalError as e:
+                    logger.error(f"MAC Portal error checking expiry for {mac_obj.address}: {e}")
+                    mac_obj.status = M3UAccountMac.Status.ERROR
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = str(e)
+                    macs_to_update.append(mac_obj)
+                    
+                except Exception as e:
+                    logger.error(f"Error checking expiry for MAC {mac_obj.address}: {e}")
+                    mac_obj.status = M3UAccountMac.Status.ERROR
+                    mac_obj.last_checked = timezone.now()
+                    mac_obj.last_error = str(e)
+                    macs_to_update.append(mac_obj)
+            
+            # Bulk update all MACs at once (much faster than individual saves)
+            if macs_to_update:
+                M3UAccountMac.objects.bulk_update(
+                    macs_to_update,
+                    ['status', 'last_checked', 'last_error', 'expires_text'],
+                    batch_size=100
+                )
+        
+        except Exception as e:
+            logger.error(f"Error checking MAC expiry for account {account.id}: {e}")
+    
+    # Memory cleanup after checking multiple accounts/MACs
+    if len(results) > 20:
+        from core.utils import cleanup_memory
+        cleanup_memory(log_usage=True, force_collection=True)
+    
+    return {"checked": len(results), "results": results}
+
+
+@shared_task
+def cleanup_expired_macs():
+    """Cleanup expired MACs across all accounts."""
+    from .models import M3UAccount, M3UAccountMac
+    from django.db import transaction
+    
+    expired_count = 0
+    
+    try:
+        with transaction.atomic():
+            expired_macs = M3UAccountMac.objects.filter(
+                status=M3UAccountMac.Status.EXPIRED
+            )
+            
+            expired_count = expired_macs.count()
+            
+            if expired_count > 0:
+                logger.info(f"Cleaning up {expired_count} expired MAC addresses")
+                
+                # Group by account to update mac_address field
+                accounts_to_update = set()
+                for mac in expired_macs:
+                    accounts_to_update.add(mac.account_id)
+                
+                # Delete expired MACs
+                expired_macs.delete()
+                
+                # Update mac_address field for affected accounts
+                for account_id in accounts_to_update:
+                    try:
+                        account = M3UAccount.objects.get(id=account_id)
+                        remaining_macs = account.macs.order_by('priority', 'id')
+                        account.mac_address = ' '.join(m.address for m in remaining_macs)
+                        account.save(update_fields=['mac_address'])
+                    except Exception as e:
+                        logger.error(f"Error updating mac_address for account {account_id}: {e}")
+        
+        logger.info(f"Successfully cleaned up {expired_count} expired MAC addresses")
+        
+        # Memory cleanup after bulk MAC operations
+        if expired_count > 0:
+            from core.utils import cleanup_memory
+            cleanup_memory(log_usage=True, force_collection=True)
+        
+        return {"cleaned": expired_count}
+        
+    except Exception as e:
+        logger.error(f"Error during MAC cleanup: {e}")
+        return {"error": str(e)}
+
+
+
+@shared_task
+def recover_macs_from_cooldown():
+    """
+    Automatically recover MACs from cooldown when their cooldown period expires.
+    
+    Requirements: 56.4
+    
+    This task should be scheduled to run periodically (e.g., every 5 minutes)
+    to check for MACs that can be recovered from cooldown.
+    """
+    from .models import M3UAccount
+    from .mac_rotation_manager import MACRotationManager
+    
+    total_recovered = 0
+    accounts_processed = 0
+    
+    try:
+        # Get all MAC/STB portal accounts
+        mac_accounts = M3UAccount.objects.filter(
+            account_type__in=['mac', 'stb']
+        )
+        
+        for account in mac_accounts:
+            try:
+                manager = MACRotationManager(account.id)
+                recovered = manager.check_and_recover_macs()
+                total_recovered += recovered
+                accounts_processed += 1
+            except Exception as e:
+                logger.error(f"Error recovering MACs for account {account.id}: {e}")
+        
+        if total_recovered > 0:
+            logger.info(f"Auto-recovery: Recovered {total_recovered} MACs from cooldown across {accounts_processed} accounts")
+        
+        return {
+            "accounts_processed": accounts_processed,
+            "macs_recovered": total_recovered
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during MAC auto-recovery: {e}")
+        return {"error": str(e)}
+
+
+# cleanup_old_health_records task removed - Health Score System has been removed
+
+
+@shared_task
+def cleanup_old_failover_events():
+    """
+    Cleanup old failover events to prevent database bloat.
+    
+    Requirements: 61.1
+    
+    This task should be scheduled to run daily to remove failover events
+    older than 30 days.
+    """
+    from .mac_portal_models import FailoverEvent
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=30)
+        
+        deleted_count, _ = FailoverEvent.objects.filter(
+            timestamp__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old failover events")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up failover events: {e}")
+        return {"error": str(e)}
+
+
+@shared_task
+def cleanup_old_cooldowns():
+    """
+    Cleanup old inactive cooldown records.
+    
+    Requirements: 46.3
+    
+    This task should be scheduled to run daily to remove inactive cooldown
+    records older than 7 days.
+    """
+    from .mac_portal_models import MACCooldown
+    from django.utils import timezone
+    
+    try:
+        cutoff = timezone.now() - timezone.timedelta(days=7)
+        
+        deleted_count, _ = MACCooldown.objects.filter(
+            is_active=False,
+            expires_at__lt=cutoff
+        ).delete()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} old cooldown records")
+        
+        return {"deleted": deleted_count}
+        
+    except Exception as e:
+        logger.error(f"Error cleaning up cooldown records: {e}")
+        return {"error": str(e)}
+
+
+# Import mac_vod_tasks to register them with Celery
+# This is needed because Celery autodiscover only finds tasks.py, not mac_vod_tasks.py
+from . import mac_vod_tasks  # noqa: F401
