@@ -574,7 +574,31 @@ class MacPortalClient:
             
         except requests.exceptions.JSONDecodeError as e:
             logger.error(f"Invalid JSON response getting expiry for MAC {self.mac}: {e}")
-            logger.debug(f"Response content: {response.text[:200] if 'response' in locals() else 'No response'}")
+            if 'response' in locals():
+                logger.debug(f"Response status: {response.status_code}")
+                logger.debug(f"Response content: {response.text[:500]}")
+                
+                # Try alternative endpoints if main one fails
+                alternatives = [
+                    f"{portal}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
+                    f"{self.base_url}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
+                    f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
+                ]
+                
+                for alt_url in alternatives:
+                    try:
+                        logger.debug(f"Trying alternative expiry endpoint: {alt_url}")
+                        alt_response = session.get(alt_url, cookies=cookies, headers=headers,
+                                                  proxies=proxies, timeout=15)
+                        if alt_response.status_code == 200:
+                            alt_data = alt_response.json()
+                            expires = alt_data.get("js", {}).get("phone", "")
+                            if expires:
+                                logger.info(f"Got expiry via alternative endpoint: {expires}")
+                                return expires
+                    except Exception as alt_e:
+                        logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                        continue
             return None
         except Exception as e:
             logger.error(f"Error getting expiry for MAC {self.mac}: {e}")
@@ -666,6 +690,27 @@ class MacPortalClient:
                 except requests.exceptions.JSONDecodeError as e:
                     logger.error(f"Invalid JSON response getting channels (GET): {e}")
                     logger.debug(f"Response content: {response.text[:200]}")
+                    
+                    # Try alternative endpoints
+                    alternatives = [
+                        f"{self.base_url}/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml",
+                        f"{self.base_url}/stalker_portal/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml",
+                        f"{self.base_url}/c/portal.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml"
+                    ]
+                    
+                    for alt_url in alternatives:
+                        try:
+                            logger.debug(f"Trying alternative channels endpoint: {alt_url}")
+                            alt_response = session.get(alt_url, cookies=cookies, headers=headers,
+                                                      proxies=proxies, timeout=30)
+                            if alt_response.status_code == 200:
+                                alt_channels = alt_response.json().get("js", {}).get("data", [])
+                                if alt_channels:
+                                    logger.info(f"Got {len(alt_channels)} channels via alternative endpoint")
+                                    return alt_channels
+                        except Exception as alt_e:
+                            logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                            continue
         except Exception as e:
             logger.debug(f"GET channels failed: {e}, trying POST")
         
@@ -684,6 +729,27 @@ class MacPortalClient:
                 except requests.exceptions.JSONDecodeError as e:
                     logger.error(f"Invalid JSON response getting channels (POST): {e}")
                     logger.debug(f"Response content: {response.text[:200]}")
+                    
+                    # Try alternative POST endpoints
+                    alternatives = [
+                        f"{self.base_url}/server/load.php",
+                        f"{self.base_url}/stalker_portal/server/load.php",
+                        f"{self.base_url}/c/portal.php"
+                    ]
+                    
+                    for alt_url in alternatives:
+                        try:
+                            logger.debug(f"Trying alternative POST channels endpoint: {alt_url}")
+                            alt_response = session.post(alt_url, data=params, cookies=cookies,
+                                                       headers=headers, proxies=proxies, timeout=30)
+                            if alt_response.status_code == 200:
+                                alt_channels = alt_response.json().get("js", {}).get("data", [])
+                                if alt_channels:
+                                    logger.info(f"Got {len(alt_channels)} channels via alternative POST endpoint")
+                                    return alt_channels
+                        except Exception as alt_e:
+                            logger.debug(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
+                            continue
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
         
