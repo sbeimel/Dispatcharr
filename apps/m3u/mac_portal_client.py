@@ -487,7 +487,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_enhanced_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -530,7 +530,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_enhanced_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -565,6 +565,10 @@ class MacPortalClient:
                 return expires
             return "Unlimited"
             
+        except requests.exceptions.JSONDecodeError as e:
+            logger.error(f"Invalid JSON response getting expiry for MAC {self.mac}: {e}")
+            logger.debug(f"Response content: {response.text[:200] if 'response' in locals() else 'No response'}")
+            return None
         except Exception as e:
             logger.error(f"Error getting expiry for MAC {self.mac}: {e}")
             return None
@@ -579,7 +583,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -627,7 +631,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -645,10 +649,16 @@ class MacPortalClient:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             response = session.get(portal, params=params, cookies=cookies,
                                   headers=headers, proxies=proxies, timeout=30)
-            channels = response.json().get("js", {}).get("data", [])
-            if channels:
-                logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
-                return channels
+            
+            if response.status_code == 200:
+                try:
+                    channels = response.json().get("js", {}).get("data", [])
+                    if channels:
+                        logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
+                        return channels
+                except requests.exceptions.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON response getting channels (GET): {e}")
+                    logger.debug(f"Response content: {response.text[:200]}")
         except Exception as e:
             logger.debug(f"GET channels failed: {e}, trying POST")
         
@@ -657,10 +667,16 @@ class MacPortalClient:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
             response = session.post(portal, data=params, cookies=cookies,
                                    headers=headers, proxies=proxies, timeout=30)
-            channels = response.json().get("js", {}).get("data", [])
-            if channels:
-                logger.info(f"Got {len(channels)} channels via POST")
-                return channels
+            
+            if response.status_code == 200:
+                try:
+                    channels = response.json().get("js", {}).get("data", [])
+                    if channels:
+                        logger.info(f"Got {len(channels)} channels via POST")
+                        return channels
+                except requests.exceptions.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON response getting channels (POST): {e}")
+                    logger.debug(f"Response content: {response.text[:200]}")
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
         
@@ -679,7 +695,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
 
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -732,7 +748,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session()
+        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
