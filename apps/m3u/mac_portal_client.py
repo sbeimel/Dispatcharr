@@ -472,7 +472,16 @@ class MacPortalClient:
                                     self.token = token
                                     # Store the working portal URL
                                     self.portal_url = full_url.split('?')[0]
+                                    
+                                    # Store any cookies from handshake response for future requests
+                                    if response.cookies:
+                                        logger.debug(f"Storing {len(response.cookies)} cookies from handshake")
+                                        for cookie in response.cookies:
+                                            session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+                                    
                                     logger.info(f"Handshake successful with {model} at {full_url}")
+                                    # Small delay to let portal process the handshake
+                                    time.sleep(0.1)
                                     return token
                         except Exception as e:
                             logger.debug(f"Failed to parse handshake response: {e}")
@@ -537,6 +546,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
+        # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_enhanced_cookies()
         headers = self._get_headers(with_auth=True)
@@ -552,6 +562,8 @@ class MacPortalClient:
             expires_url = f"{portal}/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
         
         try:
+            logger.debug(f"Making expiry request with cookies: {dict(cookies)}")
+            logger.debug(f"Session cookies: {dict(session.cookies)}")
             response = session.get(expires_url, cookies=cookies, headers=headers,
                                   proxies=proxies, timeout=15)
             
@@ -589,7 +601,6 @@ class MacPortalClient:
                 
                 # Try alternative endpoints if main one fails
                 alternatives = [
-                    f"{portal}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
                     f"{self.base_url}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
                     f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
                 ]
@@ -678,6 +689,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
+        # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
@@ -693,6 +705,8 @@ class MacPortalClient:
         
         # Try GET first
         try:
+            logger.debug(f"Making channels request with cookies: {dict(cookies)}")
+            logger.debug(f"Session cookies: {dict(session.cookies)}")
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             response = session.get(portal, params=params, cookies=cookies,
                                   headers=headers, proxies=proxies, timeout=30)
