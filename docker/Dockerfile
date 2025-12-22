@@ -28,6 +28,8 @@ WORKDIR /app
 
 # Copy application code
 COPY . /app
+# Ensure entrypoint script is executable
+RUN chmod +x /app/docker/entrypoint.sh /app/docker/init/*.sh
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder
