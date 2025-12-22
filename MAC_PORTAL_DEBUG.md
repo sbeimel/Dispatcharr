@@ -1,77 +1,79 @@
 # MAC Portal Debugging Guide
 
-## 🔍 **NEUE ERKENNTNIS - Cookie-Handling Problem!**
+## 🎯 **DURCHBRUCH: "login-failed" Problem identifiziert!**
 
-### Problem identifiziert (2025-12-22 11:11)
+### Neue Erkenntnisse (2025-12-22 11:15)
 
-Das Portal `dlta4k.com` gibt **leere Antworten** zurück, weil unser Cookie-Handling nicht korrekt ist!
+**Das Portal antwortet mit "login-failed" - Status 488!**
 
-**Beobachtung aus MacReplayXC:**
-- MacReplayXC sendet Cookies nur als Session-Cookies, nicht als explizite `cookies=` Parameter
-- Dispatcharr hat beide gesendet: Session-Cookies UND explizite Cookies
+**Logs zeigen:**
+- ✅ Handshake erfolgreich
+- ❌ `Session cookies: {}` - Keine Cookies in Session
+- ❌ `Response status: 488` (nicht 200)
+- ❌ `Response content: " login-failed "`
 
-### ✅ **Neue Fixes implementiert:**
+### Root Cause gefunden:
+Das Portal erwartet, dass die **Enhanced Cookies aus dem Handshake in der Session gespeichert** werden, nicht als explizite Cookie-Parameter gesendet.
 
-1. **Cookie-Handling korrigiert:**
+### ✅ **Kritische Fixes implementiert:**
+
+1. **Enhanced Cookies VOR Handshake in Session setzen:**
 ```python
-# VORHER (falsch):
-response = session.get(url, cookies=cookies, headers=headers, ...)
+# Enhanced Cookies in Session setzen BEVOR Handshake
+for cookie_name, cookie_value in cookies.items():
+    session.cookies.set(cookie_name, cookie_value)
 
-# JETZT (korrekt):
-# Cookies in Session setzen, dann ohne cookies= Parameter
-for cookie_name, cookie_value in session.cookies.items():
-    cookies[cookie_name] = cookie_value
-response = session.get(url, headers=headers, ...)  # Nur Session-Cookies
+# Handshake OHNE explizite cookies= Parameter
+response = session.get(full_url, headers=headers, proxies=proxies, timeout=20)
 ```
 
-2. **Enhanced Logging auf INFO-Level:**
+2. **Alle API-Calls verwenden nur Session-Cookies:**
 ```python
-logger.info(f"Making expiry request with combined cookies: {dict(cookies)}")
-logger.info(f"Session cookies: {dict(session.cookies)}")
+# Keine expliziten cookies= Parameter mehr
+response = session.get(url, headers=headers, proxies=proxies, timeout=15)
 ```
 
-3. **Cookie-Kombination:**
-- Enhanced Cookies (MAC, Device IDs, etc.) werden in Session gesetzt
-- Session-Cookies aus Handshake werden beibehalten
-- Nur Session-Cookies werden verwendet, keine expliziten Cookie-Parameter
+3. **Enhanced Logging für Session-Cookies:**
+```python
+logger.info(f"Session cookies for expiry request: {dict(session.cookies)}")
+logger.info(f"Session now has {len(session.cookies)} total cookies")
+```
 
-### Erwartete Verbesserung
+### Erwartetes Ergebnis:
 
 Das Portal sollte jetzt:
-1. ✅ Handshake erfolgreich (funktioniert bereits)
-2. ✅ Cookies aus Handshake in Session speichern
-3. ✅ Enhanced Cookies in Session kombinieren
-4. ✅ Nur Session-Cookies für API-Calls verwenden
-5. ✅ **Nicht-leere JSON-Antworten erhalten**
+1. ✅ Enhanced Cookies in Session haben
+2. ✅ Handshake mit Session-Cookies durchführen
+3. ✅ **Status 200 statt 488 zurückgeben**
+4. ✅ **Gültige JSON-Antworten statt "login-failed"**
+5. ✅ Channels und Expiry-Daten liefern
 
-### Nächster Test
-
-Die Logs werden jetzt zeigen:
-- `Making expiry request with combined cookies: {...}`
-- `Session cookies: {...}`
-- Ob das Portal endlich Inhalte zurückgibt
+### Nächster Test wird zeigen:
+- `Set X enhanced cookies in session before handshake`
+- `Session now has X total cookies`
+- `Session cookies for expiry request: {...}`
+- **Hoffentlich Status 200 und gültige JSON-Antworten!**
 
 ## Technische Details
 
 ### Cookie-Flow (korrigiert):
-1. **Handshake**: Enhanced Cookies → Session
-2. **Handshake Response**: Portal-Cookies → Session hinzufügen
-3. **API Calls**: Nur Session-Cookies verwenden
-4. **Keine expliziten cookies= Parameter mehr**
+1. **Enhanced Cookies → Session** (VOR Handshake)
+2. **Handshake** mit Session-Cookies (keine expliziten)
+3. **Portal-Response-Cookies → Session** (falls vorhanden)
+4. **API-Calls** nur mit Session-Cookies
 
-### MacReplayXC Vergleich:
+### Das war der Fehler:
 ```python
-# MacReplayXC (funktioniert):
-cookies = {"mac": mac, "stb_lang": "en", "timezone": "Europe/London"}
-response = session.get(url, cookies=cookies, ...)
+# FALSCH (Portal sagt "login-failed"):
+response = session.get(url, cookies=explicit_cookies, ...)
 
-# Dispatcharr (jetzt korrigiert):
-# Cookies in Session, dann:
-response = session.get(url, ...)  # Session handled cookies
+# RICHTIG (Portal sollte funktionieren):
+session.cookies.set(name, value)  # Cookies in Session
+response = session.get(url, ...)  # Nur Session-Cookies
 ```
 
 ## Fazit
 
-**Das war der entscheidende Unterschied zu MacReplayXC!**
+**Das "login-failed" Problem sollte jetzt gelöst sein!**
 
-Die Cookie-Behandlung war der Grund für die leeren Antworten. Mit der korrigierten Implementierung sollte `dlta4k.com` jetzt funktionieren.
+Der entscheidende Unterschied war, dass das Portal erwartet, dass die Enhanced Cookies als **Session-Cookies** gesendet werden, nicht als explizite Request-Parameter.
