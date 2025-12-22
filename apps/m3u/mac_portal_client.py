@@ -548,7 +548,13 @@ class MacPortalClient:
         
         # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        
+        # Combine enhanced cookies with any session cookies from handshake
         cookies = self._get_enhanced_cookies()
+        # Add any session cookies to the request cookies
+        for cookie_name, cookie_value in session.cookies.items():
+            cookies[cookie_name] = cookie_value
+            
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
         portal = self.resolve_portal_url()
@@ -562,16 +568,19 @@ class MacPortalClient:
             expires_url = f"{portal}/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
         
         try:
-            logger.debug(f"Making expiry request with cookies: {dict(cookies)}")
-            logger.debug(f"Session cookies: {dict(session.cookies)}")
-            response = session.get(expires_url, cookies=cookies, headers=headers,
+            logger.info(f"Making expiry request with combined cookies: {dict(cookies)}")
+            logger.info(f"Session cookies: {dict(session.cookies)}")
+            logger.info(f"Expiry request URL: {expires_url}")
+            
+            # Try without explicit cookies parameter - let session handle cookies
+            response = session.get(expires_url, headers=headers,
                                   proxies=proxies, timeout=15)
             
             if response.status_code != 200 and not url_path.endswith('.php'):
                 try:
                     response = session.get(
                         f"{portal}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
-                        cookies=cookies, headers=headers, proxies=proxies, timeout=15
+                        headers=headers, proxies=proxies, timeout=15
                     )
                 except:
                     pass
@@ -609,7 +618,7 @@ class MacPortalClient:
                 for alt_url in alternatives:
                     try:
                         logger.info(f"Trying alternative expiry endpoint: {alt_url}")
-                        alt_response = session.get(alt_url, cookies=cookies, headers=headers,
+                        alt_response = session.get(alt_url, headers=headers,
                                                   proxies=proxies, timeout=15)
                         logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
                         if alt_response.status_code == 200:
@@ -691,7 +700,13 @@ class MacPortalClient:
         
         # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        
+        # Combine basic cookies with any session cookies from handshake
         cookies = self._get_basic_cookies()
+        # Add any session cookies to the request cookies
+        for cookie_name, cookie_value in session.cookies.items():
+            cookies[cookie_name] = cookie_value
+            
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
         portal = self.resolve_portal_url()
@@ -705,11 +720,14 @@ class MacPortalClient:
         
         # Try GET first
         try:
-            logger.debug(f"Making channels request with cookies: {dict(cookies)}")
-            logger.debug(f"Session cookies: {dict(session.cookies)}")
+            logger.info(f"Making channels request with combined cookies: {dict(cookies)}")
+            logger.info(f"Session cookies: {dict(session.cookies)}")
+            logger.info(f"Channels request URL: {portal}")
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
-            response = session.get(portal, params=params, cookies=cookies,
-                                  headers=headers, proxies=proxies, timeout=30)
+            
+            # Try without explicit cookies parameter - let session handle cookies
+            response = session.get(portal, params=params, headers=headers,
+                                  proxies=proxies, timeout=30)
             
             if response.status_code == 200:
                 try:
@@ -742,7 +760,7 @@ class MacPortalClient:
                     for alt_url in alternatives:
                         try:
                             logger.info(f"Trying alternative channels endpoint: {alt_url}")
-                            alt_response = session.get(alt_url, cookies=cookies, headers=headers,
+                            alt_response = session.get(alt_url, headers=headers,
                                                       proxies=proxies, timeout=30)
                             logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
                             if alt_response.status_code == 200:
@@ -764,8 +782,8 @@ class MacPortalClient:
         # Try POST as fallback
         try:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
-            response = session.post(portal, data=params, cookies=cookies,
-                                   headers=headers, proxies=proxies, timeout=30)
+            response = session.post(portal, data=params, headers=headers,
+                                   proxies=proxies, timeout=30)
             
             if response.status_code == 200:
                 try:
@@ -787,8 +805,8 @@ class MacPortalClient:
                     for alt_url in alternatives:
                         try:
                             logger.debug(f"Trying alternative POST channels endpoint: {alt_url}")
-                            alt_response = session.post(alt_url, data=params, cookies=cookies,
-                                                       headers=headers, proxies=proxies, timeout=30)
+                            alt_response = session.post(alt_url, data=params, headers=headers,
+                                                       proxies=proxies, timeout=30)
                             if alt_response.status_code == 200:
                                 try:
                                     alt_channels = alt_response.json().get("js", {}).get("data", [])
