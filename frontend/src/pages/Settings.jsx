@@ -574,6 +574,16 @@ const SettingsPage = () => {
       redis_chunk_ttl: 60,
       channel_shutdown_delay: 0,
       channel_init_grace_period: 5,
+      max_retries: 2,
+      max_stream_switches: 10,
+      retry_timeout_base: 0.25,
+      retry_timeout_max: 3.0,
+      connection_timeout: 10,
+      stream_timeout: 20,
+      url_switch_timeout: 4,
+      failover_grace_period: 20,
+      mac_cooldown_minutes: 10,
+      profile_cooldown_minutes: 10,
     };
 
     proxySettingsForm.setValues(defaultValues);
@@ -1185,15 +1195,62 @@ const SettingsPage = () => {
                       )}
                       {Object.entries(PROXY_SETTINGS_OPTIONS).map(
                         ([key, config]) => {
-                          // Determine if this field should be a NumberInput
+                          // Determine if this field should be a NumberInput (integer)
                           const isNumericField = [
                             'buffering_timeout',
                             'redis_chunk_ttl',
                             'channel_shutdown_delay',
                             'channel_init_grace_period',
+                            'max_retries',
+                            'max_stream_switches',
+                            'connection_timeout',
+                            'stream_timeout',
+                            'url_switch_timeout',
+                            'failover_grace_period',
+                            'mac_cooldown_minutes',
+                            'profile_cooldown_minutes',
                           ].includes(key);
 
-                          const isFloatField = key === 'buffering_speed';
+                          // Float fields
+                          const isFloatField = [
+                            'buffering_speed',
+                            'retry_timeout_base',
+                            'retry_timeout_max',
+                          ].includes(key);
+
+                          // Define max values for each field
+                          const getMaxValue = (fieldKey) => {
+                            const maxValues = {
+                              buffering_timeout: 300,
+                              redis_chunk_ttl: 3600,
+                              channel_shutdown_delay: 300,
+                              channel_init_grace_period: 60,
+                              max_retries: 10,
+                              max_stream_switches: 50,
+                              connection_timeout: 60,
+                              stream_timeout: 120,
+                              url_switch_timeout: 30,
+                              failover_grace_period: 120,
+                              mac_cooldown_minutes: 60,
+                              profile_cooldown_minutes: 60,
+                            };
+                            return maxValues[fieldKey] || 100;
+                          };
+
+                          // Define min values for each field
+                          const getMinValue = (fieldKey) => {
+                            const minValues = {
+                              max_retries: 1,
+                              max_stream_switches: 1,
+                              connection_timeout: 5,
+                              stream_timeout: 10,
+                              url_switch_timeout: 2,
+                              failover_grace_period: 5,
+                              mac_cooldown_minutes: 1,
+                              profile_cooldown_minutes: 1,
+                            };
+                            return minValues[fieldKey] || 0;
+                          };
 
                           if (isNumericField) {
                             return (
@@ -1202,16 +1259,8 @@ const SettingsPage = () => {
                                 label={config.label}
                                 {...proxySettingsForm.getInputProps(key)}
                                 description={config.description || null}
-                                min={0}
-                                max={
-                                  key === 'buffering_timeout'
-                                    ? 300
-                                    : key === 'redis_chunk_ttl'
-                                      ? 3600
-                                      : key === 'channel_shutdown_delay'
-                                        ? 300
-                                        : 60
-                                }
+                                min={getMinValue(key)}
+                                max={getMaxValue(key)}
                               />
                             );
                           } else if (isFloatField) {
@@ -1221,10 +1270,10 @@ const SettingsPage = () => {
                                 label={config.label}
                                 {...proxySettingsForm.getInputProps(key)}
                                 description={config.description || null}
-                                min={0.0}
-                                max={10.0}
+                                min={key === 'retry_timeout_base' ? 0.1 : (key === 'retry_timeout_max' ? 1.0 : 0.1)}
+                                max={key === 'retry_timeout_base' ? 5.0 : (key === 'retry_timeout_max' ? 30.0 : 10.0)}
                                 step={0.01}
-                                precision={1}
+                                precision={2}
                               />
                             );
                           } else {

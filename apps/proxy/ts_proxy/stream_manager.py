@@ -340,7 +340,9 @@ class StreamManager:
                             logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
                         else:
                             # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            retry_base = ConfigHelper.retry_timeout_base()
+                            retry_max = ConfigHelper.retry_timeout_max()
+                            timeout = min(retry_base * self.retry_count, retry_max)
                             logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
                             gevent.sleep(timeout)  # REPLACE time.sleep(timeout)
 
@@ -353,7 +355,9 @@ class StreamManager:
                             url_failed = True
                         else:
                             # Wait with exponential backoff before retrying
-                            timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
+                            retry_base = ConfigHelper.retry_timeout_base()
+                            retry_max = ConfigHelper.retry_timeout_max()
+                            timeout = min(retry_base * self.retry_count, retry_max)
                             logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
                 
                 # If URL failed and we're still running, try MAC failover first (for MAC accounts), then profile/stream failover
@@ -516,7 +520,7 @@ class StreamManager:
         # ----------------------------------------------------------------------
         
         if mac_entry and redis_client:
-            COOLDOWN_DURATION = 10 * 60  # 10x 60 Sekunden also 6 Minuten Cooldown
+            COOLDOWN_DURATION = ConfigHelper.mac_cooldown_seconds()
             
             # 1. MAC temporär in Cooldown setzen (in Redis)
             try:
@@ -1815,9 +1819,10 @@ class StreamManager:
 
                     if redis_client:
                         try:
-                            # Set cooldown for 60 seconds (MAC temporarily unavailable)
+                            # Set cooldown using configurable duration
                             cooldown_key = RedisKeys.mac_cooldown(mac_entry.id)
-                            redis_client.setex(cooldown_key, 60, "runtime_stream_failure")
+                            cooldown_seconds = ConfigHelper.mac_cooldown_seconds()
+                            redis_client.setex(cooldown_key, cooldown_seconds, "runtime_stream_failure")
                             logger.info(
                                 "Set cooldown for MAC %s on account %s due to runtime failure on channel %s",
                                 current_mac_value,
@@ -2169,10 +2174,12 @@ class StreamManager:
                 try:
                     profile_id_int = int(profile_id.decode("utf-8"))
                     cooldown_key = RedisKeys.m3u_profile_cooldown(profile_id_int)
-                    redis_client.setex(cooldown_key, 10 * 60, "1")
+                    cooldown_seconds = ConfigHelper.profile_cooldown_seconds()
+                    redis_client.setex(cooldown_key, cooldown_seconds, "1")
                     logger.warning(
-                        "Put M3U profile %s on 10Min cooldown after failures for channel %s",
+                        "Put M3U profile %s on %dMin cooldown after failures for channel %s",
                         profile_id_int,
+                        cooldown_seconds // 60,
                         self.channel_id,
                     )
                 except Exception:

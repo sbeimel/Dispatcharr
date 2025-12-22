@@ -55,6 +55,46 @@ export const PROXY_SETTINGS_OPTIONS = {
     label: 'Channel Initialization Grace Period',
     description: 'Grace period in seconds during channel initialization',
   },
+  max_retries: {
+    label: 'Max Retries per URL',
+    description: 'Maximum connection retry attempts per stream URL before switching to next stream',
+  },
+  max_stream_switches: {
+    label: 'Max Stream Switches',
+    description: 'Maximum number of stream/profile failover attempts before giving up',
+  },
+  retry_timeout_base: {
+    label: 'Retry Timeout Base',
+    description: 'Base multiplier for exponential backoff between retries (e.g., 0.25 = 0.25s, 0.5s, 0.75s...)',
+  },
+  retry_timeout_max: {
+    label: 'Retry Timeout Max',
+    description: 'Maximum wait time in seconds between retry attempts',
+  },
+  connection_timeout: {
+    label: 'Connection Timeout',
+    description: 'Timeout in seconds for initial stream connection',
+  },
+  stream_timeout: {
+    label: 'Stream Timeout',
+    description: 'Disconnect after this many seconds of no data received',
+  },
+  url_switch_timeout: {
+    label: 'URL Switch Timeout',
+    description: 'Maximum time in seconds allowed for a stream switch operation',
+  },
+  failover_grace_period: {
+    label: 'Failover Grace Period',
+    description: 'Extra time in seconds to allow for stream switching before disconnecting clients',
+  },
+  mac_cooldown_minutes: {
+    label: 'MAC Cooldown (Minutes)',
+    description: 'Time in minutes a failed MAC address is excluded from selection',
+  },
+  profile_cooldown_minutes: {
+    label: 'Profile Cooldown (Minutes)',
+    description: 'Time in minutes a failed M3U profile is excluded from selection',
+  },
 };
 
 export const M3U_FILTER_TYPES = [

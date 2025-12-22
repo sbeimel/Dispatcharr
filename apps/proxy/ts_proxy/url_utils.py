@@ -5,7 +5,6 @@ Utilities for handling stream URLs and transformations.
 import logging
 import re
 from typing import Optional, Tuple, List, Dict
-from urllib.parse import urlparse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from apps.channels.models import Channel, Stream
@@ -18,49 +17,6 @@ from uuid import UUID
 import requests
 
 logger = get_logger()
-
-
-def _clean_duplicate_url(url: str) -> str:
-    """
-    Clean URLs that have duplicate domain/path patterns.
-    Example: http://anonymoustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/oustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/2221
-    Should become: http://oustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/2221
-    """
-    if not url:
-        return url
-    
-    # Check for multiple :// patterns (indicates duplicate URLs)
-    if url.count('://') > 1:
-        logger.warning(f"Detected duplicate URL pattern: {url}")
-        # Find the last http:// or https:// and use from there
-        last_http = url.rfind('http://')
-        last_https = url.rfind('https://')
-        last_pos = max(last_http, last_https)
-        if last_pos > 0:
-            cleaned = url[last_pos:]
-            logger.info(f"Cleaned URL from {url} to {cleaned}")
-            return cleaned
-    
-    # Check for domain appearing twice in the URL path
-    try:
-        parsed = urlparse(url)
-        if parsed.netloc and parsed.path:
-            path = parsed.path
-            # Look for patterns like /domain:port/ or /domain/ in the path
-            domain_pattern = re.search(r'/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(:\d+)?/', path)
-            if domain_pattern:
-                found_domain = domain_pattern.group(1)
-                # Check if this looks like a real domain (not just a path segment)
-                if '.' in found_domain and len(found_domain) > 4:
-                    match_start = domain_pattern.start()
-                    new_path = path[match_start + 1:]  # +1 to skip the leading /
-                    cleaned = f"{parsed.scheme}://{new_path}"
-                    logger.info(f"Cleaned duplicate domain URL from {url} to {cleaned}")
-                    return cleaned
-    except Exception as e:
-        logger.debug(f"Error parsing URL for duplicate check: {e}")
-    
-    return url
 
 
 def _resolve_mac_stream_with_failover(
@@ -115,9 +71,6 @@ def _resolve_mac_stream_with_failover(
     # determine command for the portal
     stream_props = stream.custom_properties or {}
     cmd = stream_props.get("mac_cmd") or stream_props.get("cmd") or stream.url
-    
-    # Clean cmd if it has duplicate URL patterns
-    cmd = _clean_duplicate_url(cmd)
 
     error_messages = []
 

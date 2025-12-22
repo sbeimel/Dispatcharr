@@ -565,48 +565,6 @@ class MacPortalClient:
                 return expires
             return "Unlimited"
             
-        except requests.exceptions.JSONDecodeError as e:
-            logger.error(f"Invalid JSON response getting expiry for MAC {self.mac}: {e}")
-            logger.error(f"Response status: {response.status_code}")
-            logger.error(f"Response headers: {dict(response.headers)}")
-            logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
-            
-            # Check if this is an HTML response (Cloudflare block, etc.)
-            if response.text.strip().startswith('<'):
-                logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
-                if 'cloudflare' in response.text.lower():
-                    logger.error("Cloudflare protection detected in response")
-                if 'access denied' in response.text.lower():
-                    logger.error("Access denied detected in response")
-            
-            # Try alternative endpoints like MacReplayXC
-            alternatives = [
-                f"{self.base_url}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
-                f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
-            ]
-            
-            logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative expiry endpoints...")
-            for alt_url in alternatives:
-                try:
-                    logger.info(f"Trying alternative expiry endpoint: {alt_url}")
-                    alt_response = session.get(alt_url, cookies=cookies, headers=headers,
-                                              proxies=proxies, timeout=15)
-                    logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
-                    if alt_response.status_code == 200:
-                        try:
-                            alt_data = alt_response.json()
-                            expires = alt_data.get("js", {}).get("phone", "")
-                            if expires:
-                                logger.info(f"Got expiry via alternative endpoint: {expires}")
-                                return expires
-                        except requests.exceptions.JSONDecodeError as alt_json_e:
-                            logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
-                            logger.info(f"Alternative response content: {alt_response.text[:200]}")
-                            continue
-                except Exception as alt_e:
-                    logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
-                    continue
-            return None
         except Exception as e:
             logger.error(f"Error getting expiry for MAC {self.mac}: {e}")
             return None
@@ -687,53 +645,10 @@ class MacPortalClient:
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             response = session.get(portal, params=params, cookies=cookies,
                                   headers=headers, proxies=proxies, timeout=30)
-            
-            if response.status_code == 200:
-                try:
-                    channels = response.json().get("js", {}).get("data", [])
-                    if channels:
-                        logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
-                        return channels
-                except requests.exceptions.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON response getting channels (GET): {e}")
-                    logger.error(f"Response status: {response.status_code}")
-                    logger.error(f"Response headers: {dict(response.headers)}")
-                    logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
-                    
-                    # Check if this is an HTML response (Cloudflare block, etc.)
-                    if response.text.strip().startswith('<'):
-                        logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
-                        if 'cloudflare' in response.text.lower():
-                            logger.error("Cloudflare protection detected in response")
-                        if 'access denied' in response.text.lower():
-                            logger.error("Access denied detected in response")
-                    
-                    # Try alternative endpoints like MacReplayXC
-                    alternatives = [
-                        f"{self.base_url}/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml",
-                        f"{self.base_url}/stalker_portal/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml"
-                    ]
-                    
-                    logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative channel endpoints...")
-                    for alt_url in alternatives:
-                        try:
-                            logger.info(f"Trying alternative channels endpoint: {alt_url}")
-                            alt_response = session.get(alt_url, cookies=cookies, headers=headers,
-                                                      proxies=proxies, timeout=30)
-                            logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
-                            if alt_response.status_code == 200:
-                                try:
-                                    alt_channels = alt_response.json().get("js", {}).get("data", [])
-                                    if alt_channels:
-                                        logger.info(f"Got {len(alt_channels)} channels via alternative endpoint")
-                                        return alt_channels
-                                except requests.exceptions.JSONDecodeError as alt_json_e:
-                                    logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
-                                    logger.info(f"Alternative response content: {alt_response.text[:200]}")
-                                    continue
-                        except Exception as alt_e:
-                            logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
-                            continue
+            channels = response.json().get("js", {}).get("data", [])
+            if channels:
+                logger.info(f"Got {len(channels)} channels for MAC {self.mac}")
+                return channels
         except Exception as e:
             logger.debug(f"GET channels failed: {e}, trying POST")
         
@@ -742,43 +657,10 @@ class MacPortalClient:
             logger.debug(f"Getting all channels for MAC {self.mac} (POST)")
             response = session.post(portal, data=params, cookies=cookies,
                                    headers=headers, proxies=proxies, timeout=30)
-            
-            if response.status_code == 200:
-                try:
-                    channels = response.json().get("js", {}).get("data", [])
-                    if channels:
-                        logger.info(f"Got {len(channels)} channels via POST")
-                        return channels
-                except requests.exceptions.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON response getting channels (POST): {e}")
-                    logger.error(f"Response content: {response.text[:200]}")
-                    
-                    # Try alternative POST endpoints like MacReplayXC
-                    alternatives = [
-                        f"{self.base_url}/server/load.php",
-                        f"{self.base_url}/stalker_portal/server/load.php"
-                    ]
-                    
-                    logger.info(f"POST JSON parsing failed, trying {len(alternatives)} alternative POST endpoints...")
-                    for alt_url in alternatives:
-                        try:
-                            logger.info(f"Trying alternative POST channels endpoint: {alt_url}")
-                            alt_response = session.post(alt_url, data=params, cookies=cookies,
-                                                       headers=headers, proxies=proxies, timeout=30)
-                            logger.info(f"Alternative POST endpoint response status: {alt_response.status_code}")
-                            if alt_response.status_code == 200:
-                                try:
-                                    alt_channels = alt_response.json().get("js", {}).get("data", [])
-                                    if alt_channels:
-                                        logger.info(f"Got {len(alt_channels)} channels via alternative POST endpoint")
-                                        return alt_channels
-                                except requests.exceptions.JSONDecodeError as alt_json_e:
-                                    logger.info(f"Alternative POST endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
-                                    logger.info(f"Alternative response content: {alt_response.text[:200]}")
-                                    continue
-                        except Exception as alt_e:
-                            logger.info(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
-                            continue
+            channels = response.json().get("js", {}).get("data", [])
+            if channels:
+                logger.info(f"Got {len(channels)} channels via POST")
+                return channels
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
         
@@ -796,11 +678,6 @@ class MacPortalClient:
 
         if not self.token:
             self.handshake()
-
-        logger.debug(f"Creating link for cmd: {cmd}")
-        
-        # Clean cmd if it already contains a duplicate URL pattern
-        cmd = self._clean_duplicate_url(cmd)
 
         session = self._get_session()
         cookies = self._get_basic_cookies()
@@ -826,45 +703,10 @@ class MacPortalClient:
                                   headers=headers, proxies=proxies, timeout=10)
             data = response.json()
             cmd_value = data.get("js", {}).get("cmd", "")
-            logger.debug(f"Portal returned cmd_value: {cmd_value}")
             if cmd_value:
                 link = cmd_value.split()[-1]
-                logger.debug(f"Extracted link: {link}")
-                
-                # Clean the returned link
-                link = self._clean_duplicate_url(link)
-                
                 if link.startswith("http"):
                     return link
-        except requests.exceptions.JSONDecodeError as e:
-            logger.debug(f"GET create_link JSON error: {e}, trying alternative endpoints")
-            
-            # Try alternative GET endpoints like MacReplayXC
-            alternatives = [
-                f"{self.base_url}/server/load.php",
-                f"{self.base_url}/stalker_portal/server/load.php"
-            ]
-            
-            for alt_url in alternatives:
-                try:
-                    logger.debug(f"Trying alternative create_link endpoint: {alt_url}")
-                    alt_response = session.get(alt_url, params=params, cookies=cookies,
-                                              headers=headers, proxies=proxies, timeout=10)
-                    if alt_response.status_code == 200:
-                        alt_data = alt_response.json()
-                        cmd_value = alt_data.get("js", {}).get("cmd", "")
-                        if cmd_value:
-                            link = cmd_value.split()[-1]
-                            
-                            # Clean the returned link
-                            link = self._clean_duplicate_url(link)
-                            
-                            if link.startswith("http"):
-                                logger.debug(f"Got link via alternative endpoint: {link}")
-                                return link
-                except Exception as alt_e:
-                    logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
-                    continue
         except Exception as e:
             logger.debug(f"GET create_link failed: {e}, trying POST")
 
@@ -874,45 +716,10 @@ class MacPortalClient:
                                    headers=headers, proxies=proxies, timeout=10)
             data = response.json()
             cmd_value = data.get("js", {}).get("cmd", "")
-            logger.debug(f"Portal returned cmd_value (POST): {cmd_value}")
             if cmd_value:
                 link = cmd_value.split()[-1]
-                logger.debug(f"Extracted link (POST): {link}")
-                
-                # Clean the returned link
-                link = self._clean_duplicate_url(link)
-                
                 if link.startswith("http"):
                     return link
-        except requests.exceptions.JSONDecodeError as e:
-            logger.debug(f"POST create_link JSON error: {e}, trying alternative POST endpoints")
-            
-            # Try alternative POST endpoints like MacReplayXC
-            alternatives = [
-                f"{self.base_url}/server/load.php",
-                f"{self.base_url}/stalker_portal/server/load.php"
-            ]
-            
-            for alt_url in alternatives:
-                try:
-                    logger.debug(f"Trying alternative POST create_link endpoint: {alt_url}")
-                    alt_response = session.post(alt_url, data=params, cookies=cookies,
-                                               headers=headers, proxies=proxies, timeout=10)
-                    if alt_response.status_code == 200:
-                        alt_data = alt_response.json()
-                        cmd_value = alt_data.get("js", {}).get("cmd", "")
-                        if cmd_value:
-                            link = cmd_value.split()[-1]
-                            
-                            # Clean the returned link
-                            link = self._clean_duplicate_url(link)
-                            
-                            if link.startswith("http"):
-                                logger.debug(f"Got link via alternative POST endpoint: {link}")
-                                return link
-                except Exception as alt_e:
-                    logger.debug(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
-                    continue
         except Exception as e:
             logger.debug(f"POST create_link failed: {e}")
 
@@ -971,55 +778,8 @@ class MacPortalClient:
         parts = cmd.split()
         for p in parts:
             if p.startswith("http://") or p.startswith("https://"):
-                # Clean duplicate URL patterns before returning
-                return self._clean_duplicate_url(p)
+                return p
         return None
-
-    def _clean_duplicate_url(self, url: str) -> str:
-        """
-        Clean URLs that have duplicate domain/path patterns.
-        Example: http://anonymoustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/oustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/2221
-        Should become: http://oustv.club:80/AIGb0EMuXT/mSTZYrVX4Y/2221
-        """
-        if not url:
-            return url
-        
-        # Check for multiple :// patterns (indicates duplicate URLs)
-        if url.count('://') > 1:
-            logger.warning(f"Detected duplicate URL pattern: {url}")
-            # Find the last http:// or https:// and use from there
-            last_http = url.rfind('http://')
-            last_https = url.rfind('https://')
-            last_pos = max(last_http, last_https)
-            if last_pos > 0:
-                cleaned = url[last_pos:]
-                logger.info(f"Cleaned URL from {url} to {cleaned}")
-                return cleaned
-        
-        # Check for domain appearing twice in the URL path
-        # Pattern: domain appears in both host and path
-        try:
-            parsed = urlparse(url)
-            if parsed.netloc and parsed.path:
-                # Check if another domain:port pattern exists in the path
-                path = parsed.path
-                # Look for patterns like /domain:port/ or /domain/ in the path
-                domain_pattern = re.search(r'/([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})(:\d+)?/', path)
-                if domain_pattern:
-                    found_domain = domain_pattern.group(1)
-                    found_port = domain_pattern.group(2) or ''
-                    # Check if this looks like a real domain (not just a path segment)
-                    if '.' in found_domain and len(found_domain) > 4:
-                        # Extract everything from this domain onwards
-                        match_start = domain_pattern.start()
-                        new_path = path[match_start + 1:]  # +1 to skip the leading /
-                        cleaned = f"{parsed.scheme}://{new_path}"
-                        logger.info(f"Cleaned duplicate domain URL from {url} to {cleaned}")
-                        return cleaned
-        except Exception as e:
-            logger.debug(f"Error parsing URL for duplicate check: {e}")
-        
-        return url
 
     def _detect_group_title(self, ch: Dict[str, Any]) -> str:
         """Best-effort detection of group/category name for a channel."""

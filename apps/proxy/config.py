@@ -87,7 +87,7 @@ class TSConfig(BaseConfig):
 
     # Streaming settings
     TARGET_BITRATE = 8000000   # Target bitrate (8 Mbps)
-    STREAM_TIMEOUT = 20        # Disconnect after this many seconds of no data
+    STREAM_TIMEOUT = 20        # Disconnect after this many seconds of no data (fallback)
     HEALTH_CHECK_INTERVAL = 5  # Check stream health every N seconds
 
     # Resource management
@@ -100,12 +100,12 @@ class TSConfig(BaseConfig):
     GHOST_CLIENT_MULTIPLIER = 6.0  # How many heartbeat intervals before client considered ghost (6 would mean 36 seconds if heartbeat interval is 6)
     CLIENT_WAIT_TIMEOUT = 30  # Seconds to wait for client to connect
 
-    # Stream health and recovery settings
+    # Stream health and recovery settings (fallbacks - now configurable via DB)
     MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
-    FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
-    URL_SWITCH_TIMEOUT = 4   # Max time allowed for a stream switch operation
+    FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients (fallback)
+    URL_SWITCH_TIMEOUT = 4   # Max time allowed for a stream switch operation (fallback)
 
 
 
@@ -133,6 +133,67 @@ class TSConfig(BaseConfig):
         """Get channel init grace period from database or default"""
         settings = cls.get_proxy_settings()
         return settings.get("channel_init_grace_period", 5)
+
+    # NEW: Retry and Failover settings from database
+    @classmethod
+    def get_max_retries(cls):
+        """Get max retries per URL from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("max_retries", 2)
+
+    @classmethod
+    def get_max_stream_switches(cls):
+        """Get max stream switch attempts from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("max_stream_switches", 10)
+
+    @classmethod
+    def get_retry_timeout_base(cls):
+        """Get base retry timeout multiplier from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("retry_timeout_base", 0.25)
+
+    @classmethod
+    def get_retry_timeout_max(cls):
+        """Get max retry timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("retry_timeout_max", 3.0)
+
+    @classmethod
+    def get_connection_timeout(cls):
+        """Get connection timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("connection_timeout", 10)
+
+    @classmethod
+    def get_stream_timeout(cls):
+        """Get stream timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("stream_timeout", 20)
+
+    @classmethod
+    def get_url_switch_timeout(cls):
+        """Get URL switch timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("url_switch_timeout", 4)
+
+    @classmethod
+    def get_failover_grace_period(cls):
+        """Get failover grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("failover_grace_period", 20)
+
+    @classmethod
+    def get_mac_cooldown_seconds(cls):
+        """Get MAC cooldown in seconds from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("mac_cooldown_minutes", 10) * 60
+
+    @classmethod
+    def get_profile_cooldown_seconds(cls):
+        """Get profile cooldown in seconds from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("profile_cooldown_minutes", 10) * 60
 
     # Dynamic property access for these settings
     @property
