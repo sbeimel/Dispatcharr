@@ -575,8 +575,17 @@ class MacPortalClient:
         except requests.exceptions.JSONDecodeError as e:
             logger.error(f"Invalid JSON response getting expiry for MAC {self.mac}: {e}")
             if 'response' in locals():
-                logger.debug(f"Response status: {response.status_code}")
-                logger.debug(f"Response content: {response.text[:500]}")
+                logger.error(f"Response status: {response.status_code}")
+                logger.error(f"Response headers: {dict(response.headers)}")
+                logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
+                
+                # Check if this is an HTML response (Cloudflare block, etc.)
+                if response.text.strip().startswith('<'):
+                    logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
+                    if 'cloudflare' in response.text.lower():
+                        logger.error("Cloudflare protection detected in response")
+                    if 'access denied' in response.text.lower():
+                        logger.error("Access denied detected in response")
                 
                 # Try alternative endpoints if main one fails
                 alternatives = [
@@ -585,19 +594,26 @@ class MacPortalClient:
                     f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
                 ]
                 
+                logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative expiry endpoints...")
                 for alt_url in alternatives:
                     try:
-                        logger.debug(f"Trying alternative expiry endpoint: {alt_url}")
+                        logger.info(f"Trying alternative expiry endpoint: {alt_url}")
                         alt_response = session.get(alt_url, cookies=cookies, headers=headers,
                                                   proxies=proxies, timeout=15)
+                        logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
                         if alt_response.status_code == 200:
-                            alt_data = alt_response.json()
-                            expires = alt_data.get("js", {}).get("phone", "")
-                            if expires:
-                                logger.info(f"Got expiry via alternative endpoint: {expires}")
-                                return expires
+                            try:
+                                alt_data = alt_response.json()
+                                expires = alt_data.get("js", {}).get("phone", "")
+                                if expires:
+                                    logger.info(f"Got expiry via alternative endpoint: {expires}")
+                                    return expires
+                            except requests.exceptions.JSONDecodeError as alt_json_e:
+                                logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
+                                logger.info(f"Alternative response content: {alt_response.text[:200]}")
+                                continue
                     except Exception as alt_e:
-                        logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                        logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
                         continue
             return None
         except Exception as e:
@@ -689,7 +705,17 @@ class MacPortalClient:
                         return channels
                 except requests.exceptions.JSONDecodeError as e:
                     logger.error(f"Invalid JSON response getting channels (GET): {e}")
-                    logger.debug(f"Response content: {response.text[:200]}")
+                    logger.error(f"Response status: {response.status_code}")
+                    logger.error(f"Response headers: {dict(response.headers)}")
+                    logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
+                    
+                    # Check if this is an HTML response (Cloudflare block, etc.)
+                    if response.text.strip().startswith('<'):
+                        logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
+                        if 'cloudflare' in response.text.lower():
+                            logger.error("Cloudflare protection detected in response")
+                        if 'access denied' in response.text.lower():
+                            logger.error("Access denied detected in response")
                     
                     # Try alternative endpoints
                     alternatives = [
@@ -698,18 +724,25 @@ class MacPortalClient:
                         f"{self.base_url}/c/portal.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml"
                     ]
                     
+                    logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative channel endpoints...")
                     for alt_url in alternatives:
                         try:
-                            logger.debug(f"Trying alternative channels endpoint: {alt_url}")
+                            logger.info(f"Trying alternative channels endpoint: {alt_url}")
                             alt_response = session.get(alt_url, cookies=cookies, headers=headers,
                                                       proxies=proxies, timeout=30)
+                            logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
                             if alt_response.status_code == 200:
-                                alt_channels = alt_response.json().get("js", {}).get("data", [])
-                                if alt_channels:
-                                    logger.info(f"Got {len(alt_channels)} channels via alternative endpoint")
-                                    return alt_channels
+                                try:
+                                    alt_channels = alt_response.json().get("js", {}).get("data", [])
+                                    if alt_channels:
+                                        logger.info(f"Got {len(alt_channels)} channels via alternative endpoint")
+                                        return alt_channels
+                                except requests.exceptions.JSONDecodeError as alt_json_e:
+                                    logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
+                                    logger.info(f"Alternative response content: {alt_response.text[:200]}")
+                                    continue
                         except Exception as alt_e:
-                            logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                            logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
                             continue
         except Exception as e:
             logger.debug(f"GET channels failed: {e}, trying POST")
@@ -743,10 +776,15 @@ class MacPortalClient:
                             alt_response = session.post(alt_url, data=params, cookies=cookies,
                                                        headers=headers, proxies=proxies, timeout=30)
                             if alt_response.status_code == 200:
-                                alt_channels = alt_response.json().get("js", {}).get("data", [])
-                                if alt_channels:
-                                    logger.info(f"Got {len(alt_channels)} channels via alternative POST endpoint")
-                                    return alt_channels
+                                try:
+                                    alt_channels = alt_response.json().get("js", {}).get("data", [])
+                                    if alt_channels:
+                                        logger.info(f"Got {len(alt_channels)} channels via alternative POST endpoint")
+                                        return alt_channels
+                                except requests.exceptions.JSONDecodeError as alt_json_e:
+                                    logger.debug(f"Alternative POST endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
+                                    logger.debug(f"Alternative response content: {alt_response.text[:200]}")
+                                    continue
                         except Exception as alt_e:
                             logger.debug(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
                             continue
