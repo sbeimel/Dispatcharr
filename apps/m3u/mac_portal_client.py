@@ -22,9 +22,13 @@ logger = logging.getLogger(__name__)
 try:
     import cloudscraper
     CLOUDSCRAPER_AVAILABLE = True
-except ImportError:
+    logger.info("cloudscraper successfully imported and available")
+except ImportError as e:
     CLOUDSCRAPER_AVAILABLE = False
-    logger.info("cloudscraper not available - some portals with Cloudflare protection may not work")
+    logger.warning(f"cloudscraper not available - some portals with Cloudflare protection may not work: {e}")
+except Exception as e:
+    CLOUDSCRAPER_AVAILABLE = False
+    logger.error(f"Error importing cloudscraper: {e}")
 
 
 class MacPortalError(Exception):
@@ -64,7 +68,7 @@ def _get_session(use_cloudscraper: bool = False, session_key: str = "default") -
                 'desktop': True
             }
         )
-        logger.debug("Created cloudscraper session for Cloudflare bypass")
+        logger.info("Created cloudscraper session for Cloudflare bypass")
     else:
         session = requests.Session()
         retries = Retry(
@@ -75,7 +79,10 @@ def _get_session(use_cloudscraper: bool = False, session_key: str = "default") -
         )
         session.mount("http://", HTTPAdapter(max_retries=retries))
         session.mount("https://", HTTPAdapter(max_retries=retries))
-        logger.debug("Created new requests session")
+        if use_cloudscraper:
+            logger.warning("Cloudscraper requested but not available, using regular requests session")
+        else:
+            logger.debug("Created new requests session")
     
     _session_cache[cache_key] = (session, current_time)
     return session
