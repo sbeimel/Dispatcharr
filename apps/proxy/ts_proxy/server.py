@@ -19,7 +19,7 @@ import gevent  # Add gevent import
 from typing import Dict, Optional, Set
 from apps.proxy.config import TSConfig as Config
 from apps.channels.models import Channel, Stream
-from core.utils import RedisClient
+from core.utils import RedisClient, log_system_event
 from redis.exceptions import ConnectionError, TimeoutError
 from .stream_manager import StreamManager
 from .stream_buffer import StreamBuffer
@@ -194,35 +194,11 @@ class ProxyServer:
                                         self.redis_client.delete(disconnect_key)
 
                                     elif event_type == EventType.CLIENT_DISCONNECTED:
-                                        logger.debug(f"Owner received {EventType.CLIENT_DISCONNECTED} event for channel {channel_id}")
-                                        # Check if any clients remain
-                                        if channel_id in self.client_managers:
-                                            # VERIFY REDIS CLIENT COUNT DIRECTLY
-                                            client_set_key = RedisKeys.clients(channel_id)
-                                            total = self.redis_client.scard(client_set_key) or 0
-
-                                            if total == 0:
-                                                logger.debug(f"No clients left after disconnect event - stopping channel {channel_id}")
-                                                # Set the disconnect timer for other workers to see
-                                                disconnect_key = RedisKeys.last_client_disconnect(channel_id)
-                                                self.redis_client.setex(disconnect_key, 60, str(time.time()))
-
-                                                # Get configured shutdown delay or default
-                                                shutdown_delay = ConfigHelper.channel_shutdown_delay()
-
-                                                if shutdown_delay > 0:
-                                                    logger.info(f"Waiting {shutdown_delay}s before stopping channel...")
-                                                    gevent.sleep(shutdown_delay)  # REPLACE: time.sleep(shutdown_delay)
-
-                                                    # Re-check client count before stopping
-                                                    total = self.redis_client.scard(client_set_key) or 0
-                                                    if total > 0:
-                                                        logger.info(f"New clients connected during shutdown delay - aborting shutdown")
-                                                        self.redis_client.delete(disconnect_key)
-                                                        return
-
-                                                # Stop the channel directly
-                                                self.stop_channel(channel_id)
+                                        client_id = data.get("client_id")
+                                        worker_id = data.get("worker_id")
+                                        logger.debug(f"Owner received {EventType.CLIENT_DISCONNECTED} event for channel {channel_id}, client {client_id} from worker {worker_id}")
+                                        # Delegate to dedicated method
+                                        self.handle_client_disconnect(channel_id)
 
 
                                     elif event_type == EventType.STREAM_SWITCH:
@@ -646,6 +622,29 @@ class ProxyServer:
             logger.info(f"Created StreamManager for channel {channel_id} with stream ID {channel_stream_id}")
             self.stream_managers[channel_id] = stream_manager
 
+            # Log channel start event
+            try:
+                channel_obj = Channel.objects.get(uuid=channel_id)
+
+                # Get stream name if stream_id is available
+                stream_name = None
+                if channel_stream_id:
+                    try:
+                        stream_obj = Stream.objects.get(id=channel_stream_id)
+                        stream_name = stream_obj.name
+                    except Exception:
+                        pass
+
+                log_system_event(
+                    'channel_start',
+                    channel_id=channel_id,
+                    channel_name=channel_obj.name,
+                    stream_name=stream_name,
+                    stream_id=channel_stream_id
+                )
+            except Exception as e:
+                logger.error(f"Could not log channel start event: {e}")
+
             # Create client manager with channel_id, redis_client AND worker_id (only if not already exists)
             if channel_id not in self.client_managers:
                 client_manager = ClientManager(
@@ -800,6 +799,44 @@ class ProxyServer:
             logger.error(f"Error cleaning zombie channel {channel_id}: {e}", exc_info=True)
             return False
 
+    def handle_client_disconnect(self, channel_id):
+        """
+        Handle client disconnect event - check if channel should shut down.
+        Can be called directly by owner or via PubSub from non-owner workers.
+        """
+        if channel_id not in self.client_managers:
+            return
+
+        try:
+            # VERIFY REDIS CLIENT COUNT DIRECTLY
+            client_set_key = RedisKeys.clients(channel_id)
+            total = self.redis_client.scard(client_set_key) or 0
+
+            if total == 0:
+                logger.debug(f"No clients left after disconnect event - stopping channel {channel_id}")
+                # Set the disconnect timer for other workers to see
+                disconnect_key = RedisKeys.last_client_disconnect(channel_id)
+                self.redis_client.setex(disconnect_key, 60, str(time.time()))
+
+                # Get configured shutdown delay or default
+                shutdown_delay = ConfigHelper.channel_shutdown_delay()
+
+                if shutdown_delay > 0:
+                    logger.info(f"Waiting {shutdown_delay}s before stopping channel...")
+                    gevent.sleep(shutdown_delay)
+
+                    # Re-check client count before stopping
+                    total = self.redis_client.scard(client_set_key) or 0
+                    if total > 0:
+                        logger.info(f"New clients connected during shutdown delay - aborting shutdown")
+                        self.redis_client.delete(disconnect_key)
+                        return
+
+                # Stop the channel directly
+                self.stop_channel(channel_id)
+        except Exception as e:
+            logger.error(f"Error handling client disconnect for channel {channel_id}: {e}")
+
     def stop_channel(self, channel_id):
         """Stop a channel with proper ownership handling"""
         try:
@@ -846,6 +883,41 @@ class ProxyServer:
                 # Release ownership
                 self.release_ownership(channel_id)
                 logger.info(f"Released ownership of channel {channel_id}")
+
+                # Log channel stop event (after cleanup, before releasing ownership section ends)
+                try:
+                    channel_obj = Channel.objects.get(uuid=channel_id)
+
+                    # Calculate runtime and get total bytes from metadata
+                    runtime = None
+                    total_bytes = None
+                    if self.redis_client:
+                        metadata_key = RedisKeys.channel_metadata(channel_id)
+                        metadata = self.redis_client.hgetall(metadata_key)
+                        if metadata:
+                            # Calculate runtime from init_time
+                            if b'init_time' in metadata:
+                                try:
+                                    init_time = float(metadata[b'init_time'].decode('utf-8'))
+                                    runtime = round(time.time() - init_time, 2)
+                                except Exception:
+                                    pass
+                            # Get total bytes transferred
+                            if b'total_bytes' in metadata:
+                                try:
+                                    total_bytes = int(metadata[b'total_bytes'].decode('utf-8'))
+                                except Exception:
+                                    pass
+
+                    log_system_event(
+                        'channel_stop',
+                        channel_id=channel_id,
+                        channel_name=channel_obj.name,
+                        runtime=runtime,
+                        total_bytes=total_bytes
+                    )
+                except Exception as e:
+                    logger.error(f"Could not log channel stop event: {e}")
 
             # Always clean up local resources - WITH SAFE CHECKS
             if channel_id in self.stream_managers:
@@ -968,6 +1040,13 @@ class ProxyServer:
 
                             # If in connecting or waiting_for_clients state, check grace period
                             if channel_state in [ChannelState.CONNECTING, ChannelState.WAITING_FOR_CLIENTS]:
+                                # Check if channel is already stopping
+                                if self.redis_client:
+                                    stop_key = RedisKeys.channel_stopping(channel_id)
+                                    if self.redis_client.exists(stop_key):
+                                        logger.debug(f"Channel {channel_id} is already stopping - skipping monitor shutdown")
+                                        continue
+
                                 # Get connection_ready_time from metadata (indicates if channel reached ready state)
                                 connection_ready_time = None
                                 if metadata and b'connection_ready_time' in metadata:
@@ -1048,6 +1127,13 @@ class ProxyServer:
                                             logger.info(f"Channel {channel_id} activated with {total_clients} clients after grace period")
                             # If active and no clients, start normal shutdown procedure
                             elif channel_state not in [ChannelState.CONNECTING, ChannelState.WAITING_FOR_CLIENTS] and total_clients == 0:
+                                # Check if channel is already stopping
+                                if self.redis_client:
+                                    stop_key = RedisKeys.channel_stopping(channel_id)
+                                    if self.redis_client.exists(stop_key):
+                                        logger.debug(f"Channel {channel_id} is already stopping - skipping monitor shutdown")
+                                        continue
+
                                 # Check if there's a pending no-clients timeout
                                 disconnect_key = RedisKeys.last_client_disconnect(channel_id)
                                 disconnect_time = None

@@ -34,6 +34,10 @@ class ClientManager:
         self.heartbeat_interval = ConfigHelper.get('CLIENT_HEARTBEAT_INTERVAL', 10)
         self.last_heartbeat_time = {}
 
+        # Get ProxyServer instance for ownership checks
+        from .server import ProxyServer
+        self.proxy_server = ProxyServer.get_instance()
+
         # Start heartbeat thread for local clients
         self._start_heartbeat_thread()
         self._registered_clients = set()  # Track already registered client IDs
@@ -44,9 +48,11 @@ class ClientManager:
             # Import here to avoid potential import issues
             from apps.proxy.ts_proxy.channel_status import ChannelStatus
             import redis
+            from django.conf import settings
 
-            # Get all channels from Redis
-            redis_client = redis.Redis.from_url('redis://localhost:6379', decode_responses=True)
+            # Get all channels from Redis using settings
+            redis_url = getattr(settings, 'REDIS_URL', 'redis://localhost:6379/0')
+            redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
             all_channels = []
             cursor = 0
 
@@ -337,16 +343,30 @@ class ClientManager:
 
                 self._notify_owner_of_activity()
 
-                # Publish client disconnected event
-                event_data = json.dumps({
-                    "event": EventType.CLIENT_DISCONNECTED,  # Use constant instead of string
-                    "channel_id": self.channel_id,
-                    "client_id": client_id,
-                    "worker_id": self.worker_id or "unknown",
-                    "timestamp": time.time(),
-                    "remaining_clients": remaining
-                })
-                self.redis_client.publish(RedisKeys.events_channel(self.channel_id), event_data)
+                # Check if we're the owner - if so, handle locally; if not, publish event
+                am_i_owner = self.proxy_server and self.proxy_server.am_i_owner(self.channel_id)
+
+                if am_i_owner:
+                    # We're the owner - handle the disconnect directly
+                    logger.debug(f"Owner handling CLIENT_DISCONNECTED for client {client_id} locally (not publishing)")
+                    if remaining == 0:
+                        # Trigger shutdown check directly via ProxyServer method
+                        logger.debug(f"No clients left - triggering immediate shutdown check")
+                        # Spawn greenlet to avoid blocking
+                        import gevent
+                        gevent.spawn(self.proxy_server.handle_client_disconnect, self.channel_id)
+                else:
+                    # We're not the owner - publish event so owner can handle it
+                    logger.debug(f"Non-owner publishing CLIENT_DISCONNECTED event for client {client_id} on channel {self.channel_id} from worker {self.worker_id}")
+                    event_data = json.dumps({
+                        "event": EventType.CLIENT_DISCONNECTED,
+                        "channel_id": self.channel_id,
+                        "client_id": client_id,
+                        "worker_id": self.worker_id or "unknown",
+                        "timestamp": time.time(),
+                        "remaining_clients": remaining
+                    })
+                    self.redis_client.publish(RedisKeys.events_channel(self.channel_id), event_data)
 
                 # Trigger channel stats update via WebSocket
                 self._trigger_stats_update()

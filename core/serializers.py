@@ -73,18 +73,6 @@ class ProxySettingsSerializer(serializers.Serializer):
     redis_chunk_ttl = serializers.IntegerField(min_value=10, max_value=3600)
     channel_shutdown_delay = serializers.IntegerField(min_value=0, max_value=300)
     channel_init_grace_period = serializers.IntegerField(min_value=0, max_value=60)
-    
-    # Retry and Failover Settings
-    max_retries = serializers.IntegerField(min_value=1, max_value=10, default=2)
-    max_stream_switches = serializers.IntegerField(min_value=1, max_value=50, default=10)
-    retry_timeout_base = serializers.FloatField(min_value=0.1, max_value=5.0, default=0.25)
-    retry_timeout_max = serializers.FloatField(min_value=1.0, max_value=30.0, default=3.0)
-    connection_timeout = serializers.IntegerField(min_value=5, max_value=60, default=10)
-    stream_timeout = serializers.IntegerField(min_value=10, max_value=120, default=20)
-    url_switch_timeout = serializers.IntegerField(min_value=2, max_value=30, default=4)
-    failover_grace_period = serializers.IntegerField(min_value=5, max_value=120, default=20)
-    mac_cooldown_minutes = serializers.IntegerField(min_value=1, max_value=60, default=10)
-    profile_cooldown_minutes = serializers.IntegerField(min_value=1, max_value=60, default=10)
 
     def validate_buffering_timeout(self, value):
         if value < 0 or value > 300:

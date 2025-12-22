@@ -1,8 +1,19 @@
 // frontend/src/components/forms/SuperuserForm.js
-import React, { useState } from 'react';
-import { TextInput, Center, Button, Paper, Title, Stack } from '@mantine/core';
+import React, { useState, useEffect } from 'react';
+import {
+  TextInput,
+  Center,
+  Button,
+  Paper,
+  Title,
+  Stack,
+  Text,
+  Image,
+  Divider,
+} from '@mantine/core';
 import API from '../../api';
 import useAuthStore from '../../store/auth';
+import logo from '../../assets/logo.png';
 
 function SuperuserForm() {
   const [formData, setFormData] = useState({
@@ -11,7 +22,15 @@ function SuperuserForm() {
     email: '',
   });
   const [error, setError] = useState('');
+  const [version, setVersion] = useState(null);
   const setSuperuserExists = useAuthStore((s) => s.setSuperuserExists);
+
+  useEffect(() => {
+    // Fetch version info
+    API.getVersion().then((data) => {
+      setVersion(data?.version);
+    });
+  }, []);
 
   const handleChange = (e) => {
     setFormData((prev) => ({
@@ -46,11 +65,29 @@ function SuperuserForm() {
     >
       <Paper
         elevation={3}
-        style={{ padding: 30, width: '100%', maxWidth: 400 }}
+        style={{
+          padding: 30,
+          width: '100%',
+          maxWidth: 500,
+          position: 'relative',
+        }}
       >
-        <Title order={4} align="center">
-          Create your Super User Account
-        </Title>
+        <Stack align="center" spacing="lg">
+          <Image
+            src={logo}
+            alt="Dispatcharr Logo"
+            width={120}
+            height={120}
+            fit="contain"
+          />
+          <Title order={2} align="center">
+            Dispatcharr
+          </Title>
+          <Text size="sm" color="dimmed" align="center">
+            Welcome! Create your Super User Account to get started.
+          </Text>
+          <Divider style={{ width: '100%' }} />
+        </Stack>
         <form onSubmit={handleSubmit}>
           <Stack>
             <TextInput
@@ -77,11 +114,25 @@ function SuperuserForm() {
               onChange={handleChange}
             />
 
-            <Button type="submit" size="sm" sx={{ pt: 1 }}>
-              Submit
+            <Button type="submit" fullWidth>
+              Create Account
             </Button>
           </Stack>
         </form>
+
+        {version && (
+          <Text
+            size="xs"
+            color="dimmed"
+            style={{
+              position: 'absolute',
+              bottom: 6,
+              right: 30,
+            }}
+          >
+            v{version}
+          </Text>
+        )}
       </Paper>
     </Center>
   );

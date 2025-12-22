@@ -388,3 +388,48 @@ def validate_flexible_url(value):
 
         # If it doesn't match our flexible patterns, raise the original error
         raise ValidationError("Enter a valid URL.")
+
+
+def log_system_event(event_type, channel_id=None, channel_name=None, **details):
+    """
+    Log a system event and maintain the configured max history.
+
+    Args:
+        event_type: Type of event (e.g., 'channel_start', 'client_connect')
+        channel_id: Optional UUID of the channel
+        channel_name: Optional name of the channel
+        **details: Additional details to store in the event (stored as JSON)
+
+    Example:
+        log_system_event('channel_start', channel_id=uuid, channel_name='CNN',
+                        stream_url='http://...', user='admin')
+    """
+    from core.models import SystemEvent, CoreSettings
+
+    try:
+        # Create the event
+        SystemEvent.objects.create(
+            event_type=event_type,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            details=details
+        )
+
+        # Get max events from settings (default 100)
+        try:
+            max_events_setting = CoreSettings.objects.filter(key='max-system-events').first()
+            max_events = int(max_events_setting.value) if max_events_setting else 100
+        except Exception:
+            max_events = 100
+
+        # Delete old events beyond the limit (keep it efficient with a single query)
+        total_count = SystemEvent.objects.count()
+        if total_count > max_events:
+            # Get the ID of the event at the cutoff point
+            cutoff_event = SystemEvent.objects.values_list('id', flat=True)[max_events]
+            # Delete all events with ID less than cutoff (older events)
+            SystemEvent.objects.filter(id__lt=cutoff_event).delete()
+
+    except Exception as e:
+        # Don't let event logging break the main application
+        logger.error(f"Failed to log system event {event_type}: {e}")

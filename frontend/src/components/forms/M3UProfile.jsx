@@ -149,6 +149,9 @@ const RegexFormAndView = ({ profile = null, m3u, isOpen, onClose }) => {
       }
 
       resetForm();
+      // Reset local state to sync with formik reset
+      setSearchPattern('');
+      setReplacePattern('');
       setSubmitting(false);
       onClose();
     },

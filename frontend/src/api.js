@@ -170,7 +170,7 @@ export default class API {
 
   static async logout() {
     return await request(`${host}/api/accounts/auth/logout/`, {
-      auth: false,
+      auth: true,  // Send JWT token so backend can identify the user
       method: 'POST',
     });
   }
@@ -462,7 +462,16 @@ export default class API {
         }
       );
 
-      // Don't automatically update the store here - let the caller handle it
+      // Show success notification
+      if (response.message) {
+        notifications.show({
+          title: 'Channels Updated',
+          message: response.message,
+          color: 'green',
+          autoClose: 4000,
+        });
+      }
+
       return response;
     } catch (e) {
       errorNotification('Failed to update channels', e);
@@ -1044,7 +1053,19 @@ export default class API {
   }
 
   static async updateEPG(values, isToggle = false) {
+    // Validate that values is an object
+    if (!values || typeof values !== 'object') {
+      console.error('updateEPG called with invalid values:', values);
+      return;
+    }
+
     const { id, ...payload } = values;
+
+    // Validate that we have an ID and payload is an object
+    if (!id || typeof payload !== 'object') {
+      console.error('updateEPG: invalid id or payload', { id, payload });
+      return;
+    }
 
     try {
       // If this is just toggling the active state, make a simpler request
@@ -1328,6 +1349,183 @@ export default class API {
     }
   }
 
+  // Backup API (async with Celery task polling)
+  static async listBackups() {
+    try {
+      const response = await request(`${host}/api/backups/`);
+      return response || [];
+    } catch (e) {
+      errorNotification('Failed to load backups', e);
+      throw e;
+    }
+  }
+
+  static async getBackupStatus(taskId, token = null) {
+    try {
+      let url = `${host}/api/backups/status/${taskId}/`;
+      if (token) {
+        url += `?token=${encodeURIComponent(token)}`;
+      }
+      const response = await request(url, { auth: !token });
+      return response;
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  static async waitForBackupTask(taskId, onProgress, token = null) {
+    const pollInterval = 2000; // Poll every 2 seconds
+    const maxAttempts = 300; // Max 10 minutes (300 * 2s)
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const status = await API.getBackupStatus(taskId, token);
+
+        if (onProgress) {
+          onProgress(status);
+        }
+
+        if (status.state === 'completed') {
+          return status.result;
+        } else if (status.state === 'failed') {
+          throw new Error(status.error || 'Task failed');
+        }
+      } catch (e) {
+        throw e;
+      }
+
+      // Wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, pollInterval));
+    }
+
+    throw new Error('Task timed out');
+  }
+
+  static async createBackup(onProgress) {
+    try {
+      // Start the backup task
+      const response = await request(`${host}/api/backups/create/`, {
+        method: 'POST',
+      });
+
+      // Wait for the task to complete using token for auth
+      const result = await API.waitForBackupTask(response.task_id, onProgress, response.task_token);
+      return result;
+    } catch (e) {
+      errorNotification('Failed to create backup', e);
+      throw e;
+    }
+  }
+
+  static async uploadBackup(file) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await request(
+        `${host}/api/backups/upload/`,
+        {
+          method: 'POST',
+          body: formData,
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification('Failed to upload backup', e);
+      throw e;
+    }
+  }
+
+  static async deleteBackup(filename) {
+    try {
+      const encodedFilename = encodeURIComponent(filename);
+      await request(`${host}/api/backups/${encodedFilename}/delete/`, {
+        method: 'DELETE',
+      });
+    } catch (e) {
+      errorNotification('Failed to delete backup', e);
+      throw e;
+    }
+  }
+
+  static async getDownloadToken(filename) {
+    // Get a download token from the server
+    try {
+      const response = await request(`${host}/api/backups/${encodeURIComponent(filename)}/download-token/`);
+      return response.token;
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  static async downloadBackup(filename) {
+    try {
+      // Get a download token first (requires auth)
+      const token = await API.getDownloadToken(filename);
+      const encodedFilename = encodeURIComponent(filename);
+
+      // Build the download URL with token
+      const downloadUrl = `${host}/api/backups/${encodedFilename}/download/?token=${encodeURIComponent(token)}`;
+
+      // Use direct browser navigation instead of fetch to avoid CORS issues
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      return { filename };
+    } catch (e) {
+      errorNotification('Failed to download backup', e);
+      throw e;
+    }
+  }
+
+  static async restoreBackup(filename, onProgress) {
+    try {
+      // Start the restore task
+      const encodedFilename = encodeURIComponent(filename);
+      const response = await request(
+        `${host}/api/backups/${encodedFilename}/restore/`,
+        {
+          method: 'POST',
+        }
+      );
+
+      // Wait for the task to complete using token for auth
+      // Token-based auth allows status polling even after DB restore invalidates user sessions
+      const result = await API.waitForBackupTask(response.task_id, onProgress, response.task_token);
+      return result;
+    } catch (e) {
+      errorNotification('Failed to restore backup', e);
+      throw e;
+    }
+  }
+
+  static async getBackupSchedule() {
+    try {
+      const response = await request(`${host}/api/backups/schedule/`);
+      return response;
+    } catch (e) {
+      errorNotification('Failed to get backup schedule', e);
+      throw e;
+    }
+  }
+
+  static async updateBackupSchedule(settings) {
+    try {
+      const response = await request(`${host}/api/backups/schedule/update/`, {
+        method: 'PUT',
+        body: settings,
+      });
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update backup schedule', e);
+      throw e;
+    }
+  }
+
   static async getVersion() {
     try {
       const response = await request(`${host}/api/core/version/`, {
@@ -1490,6 +1688,19 @@ export default class API {
       return response;
     } catch (e) {
       errorNotification('Failed to retrieve VOD stats', e);
+    }
+  }
+
+  static async stopVODClient(clientId) {
+    try {
+      const response = await request(`${host}/proxy/vod/stop_client/`, {
+        method: 'POST',
+        body: { client_id: clientId },
+      });
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to stop VOD client', e);
     }
   }
 
@@ -1788,6 +1999,77 @@ export default class API {
     }
   }
 
+  // VOD Logo Methods
+  static async getVODLogos(params = {}) {
+    try {
+      // Transform usage filter to match backend expectations
+      const apiParams = { ...params };
+      if (apiParams.usage === 'used') {
+        apiParams.used = 'true';
+        delete apiParams.usage;
+      } else if (apiParams.usage === 'unused') {
+        apiParams.used = 'false';
+        delete apiParams.usage;
+      } else if (apiParams.usage === 'movies') {
+        apiParams.used = 'movies';
+        delete apiParams.usage;
+      } else if (apiParams.usage === 'series') {
+        apiParams.used = 'series';
+        delete apiParams.usage;
+      }
+
+      const queryParams = new URLSearchParams(apiParams);
+      const response = await request(
+        `${host}/api/vod/vodlogos/?${queryParams.toString()}`
+      );
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve VOD logos', e);
+      throw e;
+    }
+  }
+
+  static async deleteVODLogo(id) {
+    try {
+      await request(`${host}/api/vod/vodlogos/${id}/`, {
+        method: 'DELETE',
+      });
+
+      return true;
+    } catch (e) {
+      errorNotification('Failed to delete VOD logo', e);
+      throw e;
+    }
+  }
+
+  static async deleteVODLogos(ids) {
+    try {
+      await request(`${host}/api/vod/vodlogos/bulk-delete/`, {
+        method: 'DELETE',
+        body: { logo_ids: ids },
+      });
+
+      return true;
+    } catch (e) {
+      errorNotification('Failed to delete VOD logos', e);
+      throw e;
+    }
+  }
+
+  static async cleanupUnusedVODLogos() {
+    try {
+      const response = await request(`${host}/api/vod/vodlogos/cleanup/`, {
+        method: 'POST',
+      });
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to cleanup unused VOD logos', e);
+      throw e;
+    }
+  }
+
   static async getChannelProfiles() {
     try {
       const response = await request(`${host}/api/channels/profiles/`);
@@ -2039,7 +2321,8 @@ export default class API {
 
   static async deleteSeriesRule(tvgId) {
     try {
-      await request(`${host}/api/channels/series-rules/${tvgId}/`, { method: 'DELETE' });
+      const encodedTvgId = encodeURIComponent(tvgId);
+      await request(`${host}/api/channels/series-rules/${encodedTvgId}/`, { method: 'DELETE' });
       notifications.show({ title: 'Series rule removed' });
     } catch (e) {
       errorNotification('Failed to remove series rule', e);
@@ -2132,9 +2415,15 @@ export default class API {
 
       // If successful, requery channels to update UI
       if (response.success) {
+        // Build message based on whether EPG sources need refreshing
+        let message = `Updated ${response.channels_updated} channel${response.channels_updated !== 1 ? 's' : ''}`;
+        if (response.programs_refreshed > 0) {
+          message += `, refreshing ${response.programs_refreshed} EPG source${response.programs_refreshed !== 1 ? 's' : ''}`;
+        }
+
         notifications.show({
           title: 'EPG Association',
-          message: `Updated ${response.channels_updated} channels, refreshing ${response.programs_refreshed} EPG sources.`,
+          message: message,
           color: 'blue',
         });
 
@@ -2395,47 +2684,21 @@ export default class API {
       errorNotification('Failed to update playback position', e);
     }
   }
-  static async deleteExpiredMacs(accountId) {
+
+  static async getSystemEvents(limit = 100, offset = 0, eventType = null) {
     try {
-      return await request(
-        `${host}/api/m3u/accounts/${accountId}/delete-expired-macs/`,
-        {
-          method: 'POST',
-        }
+      const params = new URLSearchParams();
+      params.append('limit', limit);
+      params.append('offset', offset);
+      if (eventType) {
+        params.append('event_type', eventType);
+      }
+      const response = await request(
+        `${host}/api/core/system-events/?${params.toString()}`
       );
+      return response;
     } catch (e) {
-      errorNotification('Failed to delete expired MACs', e);
-      throw e;
+      errorNotification('Failed to retrieve system events', e);
     }
   }
-
-  static async deleteAccountMac(accountId, macId) {
-    try {
-      return await request(
-        `${host}/api/m3u/accounts/${accountId}/macs/${macId}/`,
-        {
-          method: 'DELETE',
-        }
-      );
-    } catch (e) {
-      errorNotification('Failed to delete MAC', e);
-      throw e;
-    }
-  }
-
-  static async reorderAccountMacs(accountId, order) {
-    try {
-      return await request(
-        `${host}/api/m3u/accounts/${accountId}/reorder-macs/`,
-        {
-          method: 'POST',
-          body: { order },
-        }
-      );
-    } catch (e) {
-      errorNotification('Failed to reorder MACs', e);
-      throw e;
-    }
-  }
-
 }

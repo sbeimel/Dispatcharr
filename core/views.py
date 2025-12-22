@@ -37,7 +37,9 @@ def stream_view(request, channel_uuid):
     """
     try:
         redis_host = getattr(settings, "REDIS_HOST", "localhost")
-        redis_client = redis.Redis(host=settings.REDIS_HOST, port=6379, db=int(getattr(settings, "REDIS_DB", "0")))
+        redis_port = int(getattr(settings, "REDIS_PORT", 6379))
+        redis_db = int(getattr(settings, "REDIS_DB", "0"))
+        redis_client = redis.Redis(host=redis_host, port=redis_port, db=redis_db)
 
         # Retrieve the channel by the provided stream_id.
         channel = Channel.objects.get(uuid=channel_uuid)

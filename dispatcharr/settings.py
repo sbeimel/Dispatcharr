@@ -4,8 +4,9 @@ from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "REPLACE_ME_WITH_A_REAL_SECRET"
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_DB = os.environ.get("REDIS_DB", "0")
 
 # Set DEBUG to True for development, False for production
@@ -118,7 +119,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [(REDIS_HOST, 6379, REDIS_DB)],  # Ensure Redis is running
+            "hosts": [(REDIS_HOST, REDIS_PORT, REDIS_DB)],  # Ensure Redis is running
         },
     },
 }
@@ -184,8 +185,10 @@ STATICFILES_DIRS = [
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+# Build default Redis URL from components for Celery
+_default_redis_url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", _default_redis_url)
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 
 # Configure Redis key prefix
 CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS = {
@@ -226,6 +229,13 @@ CELERY_BEAT_SCHEDULE = {
 MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "/media/"
 
+# Backup settings
+BACKUP_ROOT = os.environ.get("BACKUP_ROOT", "/data/backups")
+BACKUP_DATA_DIRS = [
+    os.environ.get("LOGOS_DIR", "/data/logos"),
+    os.environ.get("UPLOADS_DIR", "/data/uploads"),
+    os.environ.get("PLUGINS_DIR", "/data/plugins"),
+]
 
 SERVER_IP = "127.0.0.1"
 
@@ -242,7 +252,7 @@ SIMPLE_JWT = {
 }
 
 # Redis connection settings
-REDIS_URL = "redis://localhost:6379/0"
+REDIS_URL = os.environ.get("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
 REDIS_SOCKET_TIMEOUT = 60  # Socket timeout in seconds
 REDIS_SOCKET_CONNECT_TIMEOUT = 5  # Connection timeout in seconds
 REDIS_HEALTH_CHECK_INTERVAL = 15  # Health check every 15 seconds

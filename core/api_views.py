@@ -166,17 +166,6 @@ class ProxySettingsViewSet(viewsets.ViewSet):
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 5,
-                # Retry and Failover defaults
-                "max_retries": 2,
-                "max_stream_switches": 10,
-                "retry_timeout_base": 0.25,
-                "retry_timeout_max": 3.0,
-                "connection_timeout": 10,
-                "stream_timeout": 20,
-                "url_switch_timeout": 4,
-                "failover_grace_period": 20,
-                "mac_cooldown_minutes": 10,
-                "profile_cooldown_minutes": 10,
             }
             settings_obj, created = CoreSettings.objects.get_or_create(
                 key=PROXY_SETTINGS_KEY,
@@ -185,23 +174,6 @@ class ProxySettingsViewSet(viewsets.ViewSet):
                     "value": json.dumps(settings_data)
                 }
             )
-        
-        # Ensure all new fields exist (for existing installations)
-        defaults = {
-            "max_retries": 2,
-            "max_stream_switches": 10,
-            "retry_timeout_base": 0.25,
-            "retry_timeout_max": 3.0,
-            "connection_timeout": 10,
-            "stream_timeout": 20,
-            "url_switch_timeout": 4,
-            "failover_grace_period": 20,
-            "mac_cooldown_minutes": 10,
-            "profile_cooldown_minutes": 10,
-        }
-        for key, default_value in defaults.items():
-            if key not in settings_data:
-                settings_data[key] = default_value
         return settings_obj, settings_data
 
     def list(self, request):
@@ -424,3 +396,64 @@ class TimezoneListView(APIView):
             'grouped': grouped,
             'count': len(all_timezones)
         })
+
+
+# ─────────────────────────────
+# System Events API
+# ─────────────────────────────
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_system_events(request):
+    """
+    Get recent system events (channel start/stop, buffering, client connections, etc.)
+
+    Query Parameters:
+        limit: Number of events to return per page (default: 100, max: 1000)
+        offset: Number of events to skip (for pagination, default: 0)
+        event_type: Filter by specific event type (optional)
+    """
+    from core.models import SystemEvent
+
+    try:
+        # Get pagination params
+        limit = min(int(request.GET.get('limit', 100)), 1000)
+        offset = int(request.GET.get('offset', 0))
+
+        # Start with all events
+        events = SystemEvent.objects.all()
+
+        # Filter by event_type if provided
+        event_type = request.GET.get('event_type')
+        if event_type:
+            events = events.filter(event_type=event_type)
+
+        # Get total count before applying pagination
+        total_count = events.count()
+
+        # Apply offset and limit for pagination
+        events = events[offset:offset + limit]
+
+        # Serialize the data
+        events_data = [{
+            'id': event.id,
+            'event_type': event.event_type,
+            'event_type_display': event.get_event_type_display(),
+            'timestamp': event.timestamp.isoformat(),
+            'channel_id': str(event.channel_id) if event.channel_id else None,
+            'channel_name': event.channel_name,
+            'details': event.details
+        } for event in events]
+
+        return Response({
+            'events': events_data,
+            'count': len(events_data),
+            'total': total_count,
+            'offset': offset,
+            'limit': limit
+        })
+
+    except Exception as e:
+        logger.error(f"Error fetching system events: {e}")
+        return Response({
+            'error': 'Failed to fetch system events'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

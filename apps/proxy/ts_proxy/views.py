@@ -604,12 +604,12 @@ def change_stream(request, channel_id):
         # Get the stream manager before updating URL
         stream_manager = proxy_server.stream_managers.get(channel_id)
 
-        # If we have a stream manager, reset its tried_stream_ids when manually changing streams
+        # If we have a stream manager, reset its tried combinations when manually changing streams
         if stream_manager:
-            # Reset tried streams when manually switching URL via API
-            stream_manager.tried_stream_ids = set()
+            # Reset tried combinations when manually switching URL via API
+            stream_manager.tried_combinations = set()
             logger.debug(
-                f"Reset tried stream IDs for channel {channel_id} during manual stream change"
+                f"Reset tried combinations for channel {channel_id} during manual stream change"
             )
 
         if result.get("status") == "error":

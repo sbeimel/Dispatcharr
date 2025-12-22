@@ -513,7 +513,8 @@ def rehash_streams(keys):
 
                 for obj in batch:
                     # Generate new hash
-                    new_hash = Stream.generate_hash_key(obj.name, obj.url, obj.tvg_id, keys, m3u_id=obj.m3u_account_id)
+                    group_name = obj.channel_group.name if obj.channel_group else None
+                    new_hash = Stream.generate_hash_key(obj.name, obj.url, obj.tvg_id, keys, m3u_id=obj.m3u_account_id, group=group_name)
 
                     # Check if this hash already exists in our tracking dict or in database
                     if new_hash in hash_keys:

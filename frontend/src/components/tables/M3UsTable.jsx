@@ -432,16 +432,10 @@ const M3UTable = () => {
         header: 'Type',
         accessorKey: 'account_type',
         sortable: true,
-        size: 140,
+        size: 100,
         cell: ({ cell }) => {
-          const raw = cell.getValue();
-          const typeLabelMap = {
-            STD: 'M3U',
-            XC: 'Xtream Codes',
-            MAC: 'MAC / STB-Portal',
-          };
-          const label = typeLabelMap[raw] || raw || 'Unknown';
-          return label;
+          const value = cell.getValue();
+          return value === 'XC' ? 'XC' : 'M3U';
         },
       },
       {
@@ -906,13 +900,7 @@ const M3UTable = () => {
               {`Are you sure you want to delete the following M3U account?
 
 Name: ${playlistToDelete.name}
-Type: ${
-                playlistToDelete.account_type === 'XC'
-                  ? 'Xtream Codes'
-                  : playlistToDelete.account_type === 'MAC'
-                    ? 'MAC / STB-Portal'
-                    : 'M3U'
-              }
+Type: ${playlistToDelete.account_type === 'XC' ? 'Xtream Codes' : 'Standard'}
 Server: ${playlistToDelete.server_url || 'Local file'}
 
 This will remove all related streams and may affect channels using these streams.

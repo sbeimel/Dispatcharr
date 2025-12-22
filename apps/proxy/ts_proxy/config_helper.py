@@ -64,22 +64,12 @@ class ConfigHelper:
     @staticmethod
     def max_retries():
         """Get maximum retry attempts"""
-        return Config.get_max_retries()
+        return ConfigHelper.get('MAX_RETRIES', 3)
 
     @staticmethod
     def max_stream_switches():
         """Get maximum number of stream switch attempts"""
-        return Config.get_max_stream_switches()
-
-    @staticmethod
-    def retry_timeout_base():
-        """Get base retry timeout multiplier"""
-        return Config.get_retry_timeout_base()
-
-    @staticmethod
-    def retry_timeout_max():
-        """Get maximum retry timeout"""
-        return Config.get_retry_timeout_max()
+        return ConfigHelper.get('MAX_STREAM_SWITCHES', 10)
 
     @staticmethod
     def retry_wait_interval():
@@ -89,32 +79,12 @@ class ConfigHelper:
     @staticmethod
     def url_switch_timeout():
         """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
-        return Config.get_url_switch_timeout()
+        return ConfigHelper.get('URL_SWITCH_TIMEOUT', 20)  # Default to 20 seconds
 
     @staticmethod
     def failover_grace_period():
         """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
-        return Config.get_failover_grace_period()
-
-    @staticmethod
-    def connection_timeout():
-        """Get connection timeout in seconds"""
-        return Config.get_connection_timeout()
-
-    @staticmethod
-    def stream_timeout():
-        """Get stream timeout in seconds"""
-        return Config.get_stream_timeout()
-
-    @staticmethod
-    def mac_cooldown_seconds():
-        """Get MAC cooldown in seconds"""
-        return Config.get_mac_cooldown_seconds()
-
-    @staticmethod
-    def profile_cooldown_seconds():
-        """Get profile cooldown in seconds"""
-        return Config.get_profile_cooldown_seconds()
+        return ConfigHelper.get('FAILOVER_GRACE_PERIOD', 20)  # Default to 20 seconds
 
     @staticmethod
     def buffering_timeout():

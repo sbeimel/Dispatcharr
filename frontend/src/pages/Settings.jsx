@@ -30,6 +30,7 @@ import { isNotEmpty, useForm } from '@mantine/form';
 import { notifications } from '@mantine/notifications';
 import UserAgentsTable from '../components/tables/UserAgentsTable';
 import StreamProfilesTable from '../components/tables/StreamProfilesTable';
+import BackupManager from '../components/backups/BackupManager';
 import useLocalStorage from '../hooks/useLocalStorage';
 import useAuthStore from '../store/auth';
 import {
@@ -278,14 +279,15 @@ const SettingsPage = () => {
   const networkAccessForm = useForm({
     mode: 'controlled',
     initialValues: Object.keys(NETWORK_ACCESS_OPTIONS).reduce((acc, key) => {
-      acc[key] = '0.0.0.0/0,::0/0';
+      acc[key] = '0.0.0.0/0,::/0';
       return acc;
     }, {}),
     validate: Object.keys(NETWORK_ACCESS_OPTIONS).reduce((acc, key) => {
       acc[key] = (value) => {
         const cidrs = value.split(',');
         const ipv4CidrRegex = /^([0-9]{1,3}\.){3}[0-9]{1,3}\/\d+$/;
-        const ipv6CidrRegex = /(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])/;
+        const ipv6CidrRegex =
+          /(?:(?:(?:[A-F0-9]{1,4}:){6}|(?=(?:[A-F0-9]{0,4}:){0,6}(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![:.\w]))(([0-9A-F]{1,4}:){0,5}|:)((:[0-9A-F]{1,4}){1,5}:|:)|::(?:[A-F0-9]{1,4}:){5})(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)|(?:[A-F0-9]{1,4}:){7}[A-F0-9]{1,4}|(?=(?:[A-F0-9]{0,4}:){0,7}[A-F0-9]{0,4}(?![:.\w]))(([0-9A-F]{1,4}:){1,7}|:)((:[0-9A-F]{1,4}){1,7}|:)|(?:[A-F0-9]{1,4}:){7}:|:(:[A-F0-9]{1,4}){7})(?![:.\w])\/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9])/;
         for (const cidr of cidrs) {
           if (cidr.match(ipv4CidrRegex) || cidr.match(ipv6CidrRegex)) {
             continue;
@@ -357,7 +359,7 @@ const SettingsPage = () => {
       );
       networkAccessForm.setValues(
         Object.keys(NETWORK_ACCESS_OPTIONS).reduce((acc, key) => {
-          acc[key] = networkAccessSettings[key] || '0.0.0.0/0,::0/0';
+          acc[key] = networkAccessSettings[key] || '0.0.0.0/0,::/0';
           return acc;
         }, {})
       );
@@ -574,16 +576,6 @@ const SettingsPage = () => {
       redis_chunk_ttl: 60,
       channel_shutdown_delay: 0,
       channel_init_grace_period: 5,
-      max_retries: 2,
-      max_stream_switches: 10,
-      retry_timeout_base: 0.25,
-      retry_timeout_max: 3.0,
-      connection_timeout: 10,
-      stream_timeout: 20,
-      url_switch_timeout: 4,
-      failover_grace_period: 20,
-      mac_cooldown_minutes: 10,
-      profile_cooldown_minutes: 10,
     };
 
     proxySettingsForm.setValues(defaultValues);
@@ -1064,6 +1056,10 @@ const SettingsPage = () => {
                           value: 'm3u_id',
                           label: 'M3U ID',
                         },
+                        {
+                          value: 'group',
+                          label: 'Group',
+                        },
                       ]}
                       {...form.getInputProps('m3u-hash-key')}
                       key={form.key('m3u-hash-key')}
@@ -1100,6 +1096,46 @@ const SettingsPage = () => {
                       </Button>
                     </Flex>
                   </form>
+                </Accordion.Panel>
+              </Accordion.Item>
+
+              <Accordion.Item value="system-settings">
+                <Accordion.Control>System Settings</Accordion.Control>
+                <Accordion.Panel>
+                  <Stack gap="md">
+                    {generalSettingsSaved && (
+                      <Alert
+                        variant="light"
+                        color="green"
+                        title="Saved Successfully"
+                      />
+                    )}
+                    <Text size="sm" c="dimmed">
+                      Configure how many system events (channel start/stop,
+                      buffering, etc.) to keep in the database. Events are
+                      displayed on the Stats page.
+                    </Text>
+                    <NumberInput
+                      label="Maximum System Events"
+                      description="Number of events to retain (minimum: 10, maximum: 1000)"
+                      value={form.values['max-system-events'] || 100}
+                      onChange={(value) => {
+                        form.setFieldValue('max-system-events', value);
+                      }}
+                      min={10}
+                      max={1000}
+                      step={10}
+                    />
+                    <Flex mih={50} gap="xs" justify="flex-end" align="flex-end">
+                      <Button
+                        onClick={form.onSubmit(onSubmit)}
+                        disabled={form.submitting}
+                        variant="default"
+                      >
+                        Save
+                      </Button>
+                    </Flex>
+                  </Stack>
                 </Accordion.Panel>
               </Accordion.Item>
 
@@ -1195,62 +1231,15 @@ const SettingsPage = () => {
                       )}
                       {Object.entries(PROXY_SETTINGS_OPTIONS).map(
                         ([key, config]) => {
-                          // Determine if this field should be a NumberInput (integer)
+                          // Determine if this field should be a NumberInput
                           const isNumericField = [
                             'buffering_timeout',
                             'redis_chunk_ttl',
                             'channel_shutdown_delay',
                             'channel_init_grace_period',
-                            'max_retries',
-                            'max_stream_switches',
-                            'connection_timeout',
-                            'stream_timeout',
-                            'url_switch_timeout',
-                            'failover_grace_period',
-                            'mac_cooldown_minutes',
-                            'profile_cooldown_minutes',
                           ].includes(key);
 
-                          // Float fields
-                          const isFloatField = [
-                            'buffering_speed',
-                            'retry_timeout_base',
-                            'retry_timeout_max',
-                          ].includes(key);
-
-                          // Define max values for each field
-                          const getMaxValue = (fieldKey) => {
-                            const maxValues = {
-                              buffering_timeout: 300,
-                              redis_chunk_ttl: 3600,
-                              channel_shutdown_delay: 300,
-                              channel_init_grace_period: 60,
-                              max_retries: 10,
-                              max_stream_switches: 50,
-                              connection_timeout: 60,
-                              stream_timeout: 120,
-                              url_switch_timeout: 30,
-                              failover_grace_period: 120,
-                              mac_cooldown_minutes: 60,
-                              profile_cooldown_minutes: 60,
-                            };
-                            return maxValues[fieldKey] || 100;
-                          };
-
-                          // Define min values for each field
-                          const getMinValue = (fieldKey) => {
-                            const minValues = {
-                              max_retries: 1,
-                              max_stream_switches: 1,
-                              connection_timeout: 5,
-                              stream_timeout: 10,
-                              url_switch_timeout: 2,
-                              failover_grace_period: 5,
-                              mac_cooldown_minutes: 1,
-                              profile_cooldown_minutes: 1,
-                            };
-                            return minValues[fieldKey] || 0;
-                          };
+                          const isFloatField = key === 'buffering_speed';
 
                           if (isNumericField) {
                             return (
@@ -1259,8 +1248,16 @@ const SettingsPage = () => {
                                 label={config.label}
                                 {...proxySettingsForm.getInputProps(key)}
                                 description={config.description || null}
-                                min={getMinValue(key)}
-                                max={getMaxValue(key)}
+                                min={0}
+                                max={
+                                  key === 'buffering_timeout'
+                                    ? 300
+                                    : key === 'redis_chunk_ttl'
+                                      ? 3600
+                                      : key === 'channel_shutdown_delay'
+                                        ? 300
+                                        : 60
+                                }
                               />
                             );
                           } else if (isFloatField) {
@@ -1270,10 +1267,10 @@ const SettingsPage = () => {
                                 label={config.label}
                                 {...proxySettingsForm.getInputProps(key)}
                                 description={config.description || null}
-                                min={key === 'retry_timeout_base' ? 0.1 : (key === 'retry_timeout_max' ? 1.0 : 0.1)}
-                                max={key === 'retry_timeout_base' ? 5.0 : (key === 'retry_timeout_max' ? 30.0 : 10.0)}
+                                min={0.0}
+                                max={10.0}
                                 step={0.01}
-                                precision={2}
+                                precision={1}
                               />
                             );
                           } else {
@@ -1312,6 +1309,13 @@ const SettingsPage = () => {
                       </Flex>
                     </Stack>
                   </form>
+                </Accordion.Panel>
+              </Accordion.Item>
+
+              <Accordion.Item value="backups">
+                <Accordion.Control>Backup & Restore</Accordion.Control>
+                <Accordion.Panel>
+                  <BackupManager />
                 </Accordion.Panel>
               </Accordion.Item>
             </>
