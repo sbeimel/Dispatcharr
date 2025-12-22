@@ -21,6 +21,14 @@
 4. Stream 2, Profil B
 5. ...
 
+**Funktionstest bestätigt:**
+```
+Found 2 alternate stream/profile combinations for channel: [4:2, 4:3]
+Trying stream ID 4 with profile ID 2
+Trying stream ID 4 with profile ID 3
+```
+✅ System probiert automatisch alle verfügbaren Profile durch
+
 ---
 
 ### 2. Basic Auth für /output/m3u und /output/epg (NEU)
@@ -56,22 +64,26 @@ http://username:password@localhost:9191/output/m3u
 - `core/models.py` - `build_command()` akzeptiert `proxy` Parameter
 - `apps/proxy/ts_proxy/stream_manager.py` - Holt Proxy vom M3U Account
 - `apps/m3u/migrations/0019_m3uaccount_proxy.py` - Migration
+- `frontend/src/components/forms/M3U.jsx` - Proxy-Feld im Web-UI
 
 **Nutzung im Web-UI:**
 - Bei M3U Account → Proxy Feld ausfüllen (z.B. `http://proxy:8080`)
+- Wird automatisch als `-http_proxy` Parameter an FFmpeg übergeben
 
 ---
 
 ### 4. Retry/Timeout Werte angepasst (FIX)
 
-**Problem:** Werte wichen von 0.12.0-06 ab.
+**Problem:** Werte wichen von 0.12.0-06 ab und führten zu langsameren Failover-Zeiten.
 
 **Geänderte Datei:** `apps/proxy/config.py`
 
-| Einstellung | Vorher | Nachher |
-|-------------|--------|---------|
-| `MAX_RETRIES` | 3 | **2** |
-| `URL_SWITCH_TIMEOUT` | 20s | **4s** |
+| Einstellung | Vorher (0.15.0) | Nachher (wie 0.12.0-06) | Auswirkung |
+|-------------|------------------|--------------------------|------------|
+| `MAX_RETRIES` | 3 | **2** | Weniger Versuche pro URL → schnellerer Failover |
+| `URL_SWITCH_TIMEOUT` | 20s | **4s** | Schnellerer Stream-Wechsel |
+
+**Resultat:** Aggressiveres Failover-Verhalten für bessere Stream-Stabilität
 
 ---
 
@@ -104,6 +116,7 @@ apps/proxy/ts_proxy/stream_manager.py           # Profil-Failover + Proxy
 apps/proxy/ts_proxy/views.py                    # tried_combinations Reset
 core/models.py                                  # build_command mit Proxy
 docker/Dockerfile                               # chmod +x Fix
+frontend/src/components/forms/M3U.jsx           # Proxy-Feld im Web-UI (NEU)
 ```
 
 ---

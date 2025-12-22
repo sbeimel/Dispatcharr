@@ -497,7 +497,9 @@ class StreamManager:
             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
 
             if proxy:
-                logger.info(f"FFmpeg command with proxy for channel {self.channel_id}")
+                logger.info(f"FFmpeg command with proxy for channel {self.channel_id}: {' '.join(self.transcode_cmd)}")
+            else:
+                logger.debug(f"FFmpeg command without proxy for channel {self.channel_id}: {' '.join(self.transcode_cmd)}")
 
             # For UDP streams, remove any user_agent parameters from the command
             if hasattr(self, 'stream_type') and self.stream_type == StreamType.UDP:
