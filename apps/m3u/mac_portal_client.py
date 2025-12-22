@@ -798,6 +798,19 @@ class MacPortalClient:
             self.handshake()
 
         logger.debug(f"Creating link for cmd: {cmd}")
+        
+        # Check if cmd already contains a duplicate URL pattern
+        # Pattern: http://domain/path/domain/path (domain appears twice)
+        if cmd.count('://') > 1:
+            logger.warning(f"Detected duplicate URL pattern in cmd: {cmd}")
+            # Try to extract the last complete URL
+            parts = cmd.split('://')
+            if len(parts) >= 2:
+                # Reconstruct from the last protocol onwards
+                cleaned_cmd = '://'.join(parts[-2:])
+                if cleaned_cmd.startswith('http'):
+                    logger.info(f"Cleaned cmd from {cmd} to {cleaned_cmd}")
+                    cmd = cleaned_cmd
 
         session = self._get_session()
         cookies = self._get_basic_cookies()
@@ -827,6 +840,17 @@ class MacPortalClient:
             if cmd_value:
                 link = cmd_value.split()[-1]
                 logger.debug(f"Extracted link: {link}")
+                
+                # Check if the returned link also has duplicate URL pattern
+                if link.count('://') > 1:
+                    logger.warning(f"Detected duplicate URL pattern in returned link: {link}")
+                    parts = link.split('://')
+                    if len(parts) >= 2:
+                        cleaned_link = '://'.join(parts[-2:])
+                        if cleaned_link.startswith('http'):
+                            logger.info(f"Cleaned link from {link} to {cleaned_link}")
+                            link = cleaned_link
+                
                 if link.startswith("http"):
                     return link
         except requests.exceptions.JSONDecodeError as e:
@@ -848,6 +872,17 @@ class MacPortalClient:
                         cmd_value = alt_data.get("js", {}).get("cmd", "")
                         if cmd_value:
                             link = cmd_value.split()[-1]
+                            
+                            # Check if the returned link also has duplicate URL pattern
+                            if link.count('://') > 1:
+                                logger.warning(f"Detected duplicate URL pattern in returned link (alt): {link}")
+                                parts = link.split('://')
+                                if len(parts) >= 2:
+                                    cleaned_link = '://'.join(parts[-2:])
+                                    if cleaned_link.startswith('http'):
+                                        logger.info(f"Cleaned link (alt) from {link} to {cleaned_link}")
+                                        link = cleaned_link
+                            
                             if link.startswith("http"):
                                 logger.debug(f"Got link via alternative endpoint: {link}")
                                 return link
@@ -867,6 +902,17 @@ class MacPortalClient:
             if cmd_value:
                 link = cmd_value.split()[-1]
                 logger.debug(f"Extracted link (POST): {link}")
+                
+                # Check if the returned link also has duplicate URL pattern
+                if link.count('://') > 1:
+                    logger.warning(f"Detected duplicate URL pattern in returned link (POST): {link}")
+                    parts = link.split('://')
+                    if len(parts) >= 2:
+                        cleaned_link = '://'.join(parts[-2:])
+                        if cleaned_link.startswith('http'):
+                            logger.info(f"Cleaned link (POST) from {link} to {cleaned_link}")
+                            link = cleaned_link
+                
                 if link.startswith("http"):
                     return link
         except requests.exceptions.JSONDecodeError as e:
@@ -888,6 +934,17 @@ class MacPortalClient:
                         cmd_value = alt_data.get("js", {}).get("cmd", "")
                         if cmd_value:
                             link = cmd_value.split()[-1]
+                            
+                            # Check if the returned link also has duplicate URL pattern
+                            if link.count('://') > 1:
+                                logger.warning(f"Detected duplicate URL pattern in returned link (POST alt): {link}")
+                                parts = link.split('://')
+                                if len(parts) >= 2:
+                                    cleaned_link = '://'.join(parts[-2:])
+                                    if cleaned_link.startswith('http'):
+                                        logger.info(f"Cleaned link (POST alt) from {link} to {cleaned_link}")
+                                        link = cleaned_link
+                            
                             if link.startswith("http"):
                                 logger.debug(f"Got link via alternative POST endpoint: {link}")
                                 return link
