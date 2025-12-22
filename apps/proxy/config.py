@@ -6,9 +6,9 @@ class BaseConfig:
     DEFAULT_USER_AGENT = 'VLC/3.0.20 LibVLC/3.0.20' # Will only be used if connection to settings fail
     CHUNK_SIZE = 8192
     CLIENT_POLL_INTERVAL = 0.1
-    MAX_RETRIES = 2
+    MAX_RETRIES = 1
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
-    CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
+    CONNECTION_TIMEOUT = 15  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
@@ -101,11 +101,11 @@ class TSConfig(BaseConfig):
     CLIENT_WAIT_TIMEOUT = 30  # Seconds to wait for client to connect
 
     # Stream health and recovery settings
-    MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
+    MAX_HEALTH_RECOVERY_ATTEMPTS = 1     # Maximum times to attempt recovery for a single stream
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
-    URL_SWITCH_TIMEOUT = 4   # Max time allowed for a stream switch operation
+    URL_SWITCH_TIMEOUT = 6   # Max time allowed for a stream switch operation
 
 
 
