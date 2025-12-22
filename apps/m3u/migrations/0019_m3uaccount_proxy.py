@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('m3u', '0017_alter_m3uaccount_custom_properties_and_more'),
+        ('m3u', '0018_add_profile_custom_properties'),
     ]
 
     operations = [
