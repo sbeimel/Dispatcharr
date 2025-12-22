@@ -48,4 +48,7 @@ RUN if [ -n "$TIMESTAMP" ]; then \
     cat /app/version.py; \
     fi
 
+# Ensure entrypoint script has execute permissions
+RUN chmod +x /app/docker/entrypoint.sh
+
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
