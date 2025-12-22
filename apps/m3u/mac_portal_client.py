@@ -424,6 +424,12 @@ class MacPortalClient:
         cookies = self._get_enhanced_cookies()
         proxies = self._get_request_proxies()
         
+        # Set enhanced cookies in session BEFORE handshake
+        for cookie_name, cookie_value in cookies.items():
+            session.cookies.set(cookie_name, cookie_value)
+        
+        logger.debug(f"Set {len(cookies)} enhanced cookies in session before handshake")
+        
         parsed = urlparse(self.original_base_url)
         url_path = parsed.path.rstrip('/')
         
@@ -460,7 +466,8 @@ class MacPortalClient:
                 headers = self._get_headers(with_auth=False, model=model)
                 try:
                     logger.debug(f"Trying handshake: {full_url} with {model}")
-                    response = session.get(full_url, cookies=cookies, headers=headers,
+                    # Don't send explicit cookies - let session handle them
+                    response = session.get(full_url, headers=headers,
                                           proxies=proxies, timeout=20)
                     
                     if response.status_code == 200:
@@ -475,10 +482,13 @@ class MacPortalClient:
                                     
                                     # Store any cookies from handshake response for future requests
                                     if response.cookies:
-                                        logger.debug(f"Storing {len(response.cookies)} cookies from handshake")
+                                        logger.info(f"Storing {len(response.cookies)} cookies from handshake response")
                                         for cookie in response.cookies:
                                             session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+                                    else:
+                                        logger.info("No cookies received from handshake response")
                                     
+                                    logger.info(f"Session now has {len(session.cookies)} total cookies")
                                     logger.info(f"Handshake successful with {model} at {full_url}")
                                     # Small delay to let portal process the handshake
                                     time.sleep(0.1)
@@ -549,12 +559,7 @@ class MacPortalClient:
         # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         
-        # Combine enhanced cookies with any session cookies from handshake
-        cookies = self._get_enhanced_cookies()
-        # Add any session cookies to the request cookies
-        for cookie_name, cookie_value in session.cookies.items():
-            cookies[cookie_name] = cookie_value
-            
+        # Session should already have all necessary cookies from handshake
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
         portal = self.resolve_portal_url()
@@ -568,11 +573,10 @@ class MacPortalClient:
             expires_url = f"{portal}/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
         
         try:
-            logger.info(f"Making expiry request with combined cookies: {dict(cookies)}")
-            logger.info(f"Session cookies: {dict(session.cookies)}")
+            logger.info(f"Session cookies for expiry request: {dict(session.cookies)}")
             logger.info(f"Expiry request URL: {expires_url}")
             
-            # Try without explicit cookies parameter - let session handle cookies
+            # Use only session cookies - no explicit cookies parameter
             response = session.get(expires_url, headers=headers,
                                   proxies=proxies, timeout=15)
             
@@ -701,12 +705,7 @@ class MacPortalClient:
         # Use the SAME session that was used for handshake to maintain cookies/state
         session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
         
-        # Combine basic cookies with any session cookies from handshake
-        cookies = self._get_basic_cookies()
-        # Add any session cookies to the request cookies
-        for cookie_name, cookie_value in session.cookies.items():
-            cookies[cookie_name] = cookie_value
-            
+        # Session should already have all necessary cookies from handshake
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
         portal = self.resolve_portal_url()
@@ -720,12 +719,11 @@ class MacPortalClient:
         
         # Try GET first
         try:
-            logger.info(f"Making channels request with combined cookies: {dict(cookies)}")
-            logger.info(f"Session cookies: {dict(session.cookies)}")
+            logger.info(f"Session cookies for channels request: {dict(session.cookies)}")
             logger.info(f"Channels request URL: {portal}")
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
             
-            # Try without explicit cookies parameter - let session handle cookies
+            # Use only session cookies - no explicit cookies parameter
             response = session.get(portal, params=params, headers=headers,
                                   proxies=proxies, timeout=30)
             
