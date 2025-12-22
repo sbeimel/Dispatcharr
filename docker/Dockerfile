@@ -35,9 +35,6 @@ RUN rm -rf /app/frontend
 # Copy built frontend assets
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
-# Install Python dependencies (ensure cloudscraper is installed)
-RUN pip install --no-cache-dir -r requirements.txt
-
 # Run Django collectstatic
 RUN python manage.py collectstatic --noinput
 

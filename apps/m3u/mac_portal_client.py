@@ -22,13 +22,9 @@ logger = logging.getLogger(__name__)
 try:
     import cloudscraper
     CLOUDSCRAPER_AVAILABLE = True
-    logger.info("cloudscraper successfully imported and available")
-except ImportError as e:
+except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
-    logger.warning(f"cloudscraper not available - some portals with Cloudflare protection may not work: {e}")
-except Exception as e:
-    CLOUDSCRAPER_AVAILABLE = False
-    logger.error(f"Error importing cloudscraper: {e}")
+    logger.info("cloudscraper not available - some portals with Cloudflare protection may not work")
 
 
 class MacPortalError(Exception):
@@ -68,7 +64,7 @@ def _get_session(use_cloudscraper: bool = False, session_key: str = "default") -
                 'desktop': True
             }
         )
-        logger.info("Created cloudscraper session for Cloudflare bypass")
+        logger.debug("Created cloudscraper session for Cloudflare bypass")
     else:
         session = requests.Session()
         retries = Retry(
@@ -79,10 +75,7 @@ def _get_session(use_cloudscraper: bool = False, session_key: str = "default") -
         )
         session.mount("http://", HTTPAdapter(max_retries=retries))
         session.mount("https://", HTTPAdapter(max_retries=retries))
-        if use_cloudscraper:
-            logger.warning("Cloudscraper requested but not available, using regular requests session")
-        else:
-            logger.debug("Created new requests session")
+        logger.debug("Created new requests session")
     
     _session_cache[cache_key] = (session, current_time)
     return session
@@ -424,8 +417,6 @@ class MacPortalClient:
         cookies = self._get_enhanced_cookies()
         proxies = self._get_request_proxies()
         
-        logger.debug(f"Using enhanced cookies for handshake: {dict(cookies)}")
-        
         parsed = urlparse(self.original_base_url)
         url_path = parsed.path.rstrip('/')
         
@@ -462,7 +453,6 @@ class MacPortalClient:
                 headers = self._get_headers(with_auth=False, model=model)
                 try:
                     logger.debug(f"Trying handshake: {full_url} with {model}")
-                    # Use explicit cookies like MacReplayXC
                     response = session.get(full_url, cookies=cookies, headers=headers,
                                           proxies=proxies, timeout=20)
                     
@@ -475,18 +465,7 @@ class MacPortalClient:
                                     self.token = token
                                     # Store the working portal URL
                                     self.portal_url = full_url.split('?')[0]
-                                    
-                                    # Store any cookies from handshake response for future requests
-                                    if response.cookies:
-                                        logger.info(f"Handshake returned {len(response.cookies)} cookies")
-                                        for cookie in response.cookies:
-                                            logger.debug(f"Handshake cookie: {cookie.name}={cookie.value}")
-                                    else:
-                                        logger.info("No cookies received from handshake response")
-                                    
                                     logger.info(f"Handshake successful with {model} at {full_url}")
-                                    # Small delay to let portal process the handshake
-                                    time.sleep(0.1)
                                     return token
                         except Exception as e:
                             logger.debug(f"Failed to parse handshake response: {e}")
@@ -508,7 +487,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        session = self._get_session()
         cookies = self._get_enhanced_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -551,10 +530,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        # Use fresh session like MacReplayXC does
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
-        
-        # Use enhanced cookies as explicit cookies parameter like MacReplayXC
+        session = self._get_session()
         cookies = self._get_enhanced_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -569,10 +545,6 @@ class MacPortalClient:
             expires_url = f"{portal}/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
         
         try:
-            logger.info(f"Enhanced cookies for expiry request: {dict(cookies)}")
-            logger.info(f"Expiry request URL: {expires_url}")
-            
-            # Use explicit cookies parameter like MacReplayXC
             response = session.get(expires_url, cookies=cookies, headers=headers,
                                   proxies=proxies, timeout=15)
             
@@ -595,46 +567,45 @@ class MacPortalClient:
             
         except requests.exceptions.JSONDecodeError as e:
             logger.error(f"Invalid JSON response getting expiry for MAC {self.mac}: {e}")
-            if 'response' in locals():
-                logger.error(f"Response status: {response.status_code}")
-                logger.error(f"Response headers: {dict(response.headers)}")
-                logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
-                
-                # Check if this is an HTML response (Cloudflare block, etc.)
-                if response.text.strip().startswith('<'):
-                    logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
-                    if 'cloudflare' in response.text.lower():
-                        logger.error("Cloudflare protection detected in response")
-                    if 'access denied' in response.text.lower():
-                        logger.error("Access denied detected in response")
-                
-                # Try alternative endpoints if main one fails
-                alternatives = [
-                    f"{self.base_url}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
-                    f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
-                ]
-                
-                logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative expiry endpoints...")
-                for alt_url in alternatives:
-                    try:
-                        logger.info(f"Trying alternative expiry endpoint: {alt_url}")
-                        alt_response = session.get(alt_url, cookies=cookies, headers=headers,
-                                                  proxies=proxies, timeout=15)
-                        logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
-                        if alt_response.status_code == 200:
-                            try:
-                                alt_data = alt_response.json()
-                                expires = alt_data.get("js", {}).get("phone", "")
-                                if expires:
-                                    logger.info(f"Got expiry via alternative endpoint: {expires}")
-                                    return expires
-                            except requests.exceptions.JSONDecodeError as alt_json_e:
-                                logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
-                                logger.info(f"Alternative response content: {alt_response.text[:200]}")
-                                continue
-                    except Exception as alt_e:
-                        logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
-                        continue
+            logger.error(f"Response status: {response.status_code}")
+            logger.error(f"Response headers: {dict(response.headers)}")
+            logger.error(f"Response content (first 1000 chars): {response.text[:1000]}")
+            
+            # Check if this is an HTML response (Cloudflare block, etc.)
+            if response.text.strip().startswith('<'):
+                logger.error("Portal returned HTML instead of JSON - possible Cloudflare block or portal misconfiguration")
+                if 'cloudflare' in response.text.lower():
+                    logger.error("Cloudflare protection detected in response")
+                if 'access denied' in response.text.lower():
+                    logger.error("Access denied detected in response")
+            
+            # Try alternative endpoints like MacReplayXC
+            alternatives = [
+                f"{self.base_url}/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml",
+                f"{self.base_url}/stalker_portal/server/load.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml"
+            ]
+            
+            logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative expiry endpoints...")
+            for alt_url in alternatives:
+                try:
+                    logger.info(f"Trying alternative expiry endpoint: {alt_url}")
+                    alt_response = session.get(alt_url, cookies=cookies, headers=headers,
+                                              proxies=proxies, timeout=15)
+                    logger.info(f"Alternative endpoint response status: {alt_response.status_code}")
+                    if alt_response.status_code == 200:
+                        try:
+                            alt_data = alt_response.json()
+                            expires = alt_data.get("js", {}).get("phone", "")
+                            if expires:
+                                logger.info(f"Got expiry via alternative endpoint: {expires}")
+                                return expires
+                        except requests.exceptions.JSONDecodeError as alt_json_e:
+                            logger.info(f"Alternative endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
+                            logger.info(f"Alternative response content: {alt_response.text[:200]}")
+                            continue
+                except Exception as alt_e:
+                    logger.info(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                    continue
             return None
         except Exception as e:
             logger.error(f"Error getting expiry for MAC {self.mac}: {e}")
@@ -650,7 +621,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        session = self._get_session()
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -698,10 +669,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        # Use fresh session like MacReplayXC does
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
-        
-        # Use basic cookies as explicit cookies parameter like MacReplayXC
+        session = self._get_session()
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -716,11 +684,7 @@ class MacPortalClient:
         
         # Try GET first
         try:
-            logger.info(f"Basic cookies for channels request: {dict(cookies)}")
-            logger.info(f"Channels request URL: {portal}")
             logger.debug(f"Getting all channels for MAC {self.mac} (GET)")
-            
-            # Use explicit cookies parameter like MacReplayXC
             response = session.get(portal, params=params, cookies=cookies,
                                   headers=headers, proxies=proxies, timeout=30)
             
@@ -744,11 +708,10 @@ class MacPortalClient:
                         if 'access denied' in response.text.lower():
                             logger.error("Access denied detected in response")
                     
-                    # Try alternative endpoints
+                    # Try alternative endpoints like MacReplayXC
                     alternatives = [
                         f"{self.base_url}/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml",
-                        f"{self.base_url}/stalker_portal/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml",
-                        f"{self.base_url}/c/portal.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml"
+                        f"{self.base_url}/stalker_portal/server/load.php?type=itv&action=get_all_channels&force_ch_link_check=&JsHttpRequest=1-xml"
                     ]
                     
                     logger.info(f"JSON parsing failed, trying {len(alternatives)} alternative channel endpoints...")
@@ -788,20 +751,21 @@ class MacPortalClient:
                         return channels
                 except requests.exceptions.JSONDecodeError as e:
                     logger.error(f"Invalid JSON response getting channels (POST): {e}")
-                    logger.debug(f"Response content: {response.text[:200]}")
+                    logger.error(f"Response content: {response.text[:200]}")
                     
-                    # Try alternative POST endpoints
+                    # Try alternative POST endpoints like MacReplayXC
                     alternatives = [
                         f"{self.base_url}/server/load.php",
-                        f"{self.base_url}/stalker_portal/server/load.php",
-                        f"{self.base_url}/c/portal.php"
+                        f"{self.base_url}/stalker_portal/server/load.php"
                     ]
                     
+                    logger.info(f"POST JSON parsing failed, trying {len(alternatives)} alternative POST endpoints...")
                     for alt_url in alternatives:
                         try:
-                            logger.debug(f"Trying alternative POST channels endpoint: {alt_url}")
+                            logger.info(f"Trying alternative POST channels endpoint: {alt_url}")
                             alt_response = session.post(alt_url, data=params, cookies=cookies,
                                                        headers=headers, proxies=proxies, timeout=30)
+                            logger.info(f"Alternative POST endpoint response status: {alt_response.status_code}")
                             if alt_response.status_code == 200:
                                 try:
                                     alt_channels = alt_response.json().get("js", {}).get("data", [])
@@ -809,11 +773,11 @@ class MacPortalClient:
                                         logger.info(f"Got {len(alt_channels)} channels via alternative POST endpoint")
                                         return alt_channels
                                 except requests.exceptions.JSONDecodeError as alt_json_e:
-                                    logger.debug(f"Alternative POST endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
-                                    logger.debug(f"Alternative response content: {alt_response.text[:200]}")
+                                    logger.info(f"Alternative POST endpoint {alt_url} also returned invalid JSON: {alt_json_e}")
+                                    logger.info(f"Alternative response content: {alt_response.text[:200]}")
                                     continue
                         except Exception as alt_e:
-                            logger.debug(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
+                            logger.info(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
                             continue
         except Exception as e:
             logger.error(f"Error getting channels for MAC {self.mac}: {e}")
@@ -833,7 +797,9 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
 
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        logger.debug(f"Creating link for cmd: {cmd}")
+
+        session = self._get_session()
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()
@@ -857,10 +823,37 @@ class MacPortalClient:
                                   headers=headers, proxies=proxies, timeout=10)
             data = response.json()
             cmd_value = data.get("js", {}).get("cmd", "")
+            logger.debug(f"Portal returned cmd_value: {cmd_value}")
             if cmd_value:
                 link = cmd_value.split()[-1]
+                logger.debug(f"Extracted link: {link}")
                 if link.startswith("http"):
                     return link
+        except requests.exceptions.JSONDecodeError as e:
+            logger.debug(f"GET create_link JSON error: {e}, trying alternative endpoints")
+            
+            # Try alternative GET endpoints like MacReplayXC
+            alternatives = [
+                f"{self.base_url}/server/load.php",
+                f"{self.base_url}/stalker_portal/server/load.php"
+            ]
+            
+            for alt_url in alternatives:
+                try:
+                    logger.debug(f"Trying alternative create_link endpoint: {alt_url}")
+                    alt_response = session.get(alt_url, params=params, cookies=cookies,
+                                              headers=headers, proxies=proxies, timeout=10)
+                    if alt_response.status_code == 200:
+                        alt_data = alt_response.json()
+                        cmd_value = alt_data.get("js", {}).get("cmd", "")
+                        if cmd_value:
+                            link = cmd_value.split()[-1]
+                            if link.startswith("http"):
+                                logger.debug(f"Got link via alternative endpoint: {link}")
+                                return link
+                except Exception as alt_e:
+                    logger.debug(f"Alternative endpoint {alt_url} failed: {alt_e}")
+                    continue
         except Exception as e:
             logger.debug(f"GET create_link failed: {e}, trying POST")
 
@@ -870,10 +863,37 @@ class MacPortalClient:
                                    headers=headers, proxies=proxies, timeout=10)
             data = response.json()
             cmd_value = data.get("js", {}).get("cmd", "")
+            logger.debug(f"Portal returned cmd_value (POST): {cmd_value}")
             if cmd_value:
                 link = cmd_value.split()[-1]
+                logger.debug(f"Extracted link (POST): {link}")
                 if link.startswith("http"):
                     return link
+        except requests.exceptions.JSONDecodeError as e:
+            logger.debug(f"POST create_link JSON error: {e}, trying alternative POST endpoints")
+            
+            # Try alternative POST endpoints like MacReplayXC
+            alternatives = [
+                f"{self.base_url}/server/load.php",
+                f"{self.base_url}/stalker_portal/server/load.php"
+            ]
+            
+            for alt_url in alternatives:
+                try:
+                    logger.debug(f"Trying alternative POST create_link endpoint: {alt_url}")
+                    alt_response = session.post(alt_url, data=params, cookies=cookies,
+                                               headers=headers, proxies=proxies, timeout=10)
+                    if alt_response.status_code == 200:
+                        alt_data = alt_response.json()
+                        cmd_value = alt_data.get("js", {}).get("cmd", "")
+                        if cmd_value:
+                            link = cmd_value.split()[-1]
+                            if link.startswith("http"):
+                                logger.debug(f"Got link via alternative POST endpoint: {link}")
+                                return link
+                except Exception as alt_e:
+                    logger.debug(f"Alternative POST endpoint {alt_url} failed: {alt_e}")
+                    continue
         except Exception as e:
             logger.debug(f"POST create_link failed: {e}")
 
@@ -886,7 +906,7 @@ class MacPortalClient:
         if not self.token:
             self.handshake()
         
-        session = self._get_session(use_cloudscraper=True)  # Enable cloudscraper
+        session = self._get_session()
         cookies = self._get_basic_cookies()
         headers = self._get_headers(with_auth=True)
         proxies = self._get_request_proxies()

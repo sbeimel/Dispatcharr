@@ -125,9 +125,12 @@ class StreamProfile(models.Model):
         if self.is_proxy():
             return []
 
+        # Convert UserAgent object to string if needed
+        user_agent_str = str(user_agent) if user_agent else ""
+
         replacements = {
             "{streamUrl}": stream_url,
-            "{userAgent}": user_agent,
+            "{userAgent}": user_agent_str,
         }
 
         # Split the command and iterate through each part to apply replacements
