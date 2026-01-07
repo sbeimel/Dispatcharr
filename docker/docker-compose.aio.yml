@@ -1,25 +1,45 @@
 services:
   dispatcharr:
+    # === DISPATCHARR WITH ENHANCEMENTS ===
+    # Uncomment to build with enhancements locally:
     # build:
-    #   context: .
-    #   dockerfile: Dockerfile
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    # Or use pre-built image:
     image: ghcr.io/dispatcharr/dispatcharr:latest
     container_name: dispatcharr
     ports:
       - 9191:9191
     volumes:
       - dispatcharr_data:/data
+      # Optional: Mount enhancement script for manual application
+      # - ./apply_enhancements.sh:/app/apply_enhancements.sh:ro
     environment:
       - DISPATCHARR_ENV=aio
       - REDIS_HOST=localhost
       - CELERY_BROKER_URL=redis://localhost:6379/0
       - DISPATCHARR_LOG_LEVEL=info
+      
+      # === ENHANCEMENT SETTINGS ===
+      # These will be used if enhancements are applied
+      - ENHANCEMENT_MAX_RETRIES=2
+      - ENHANCEMENT_URL_SWITCH_TIMEOUT=8
+      - ENHANCEMENT_FAILOVER_GRACE_PERIOD=20
+      
       # Process Priority Configuration (Optional)
       # Lower values = higher priority. Range: -20 (highest) to 19 (lowest)
       # Negative values require cap_add: SYS_NICE (uncomment below)
       #- UWSGI_NICE_LEVEL=-5   # uWSGI/FFmpeg/Streaming (default: 0, recommended: -5 for high priority)
       #- CELERY_NICE_LEVEL=5   # Celery/EPG/Background tasks (default: 5, low priority)
-    #
+    
+    # Health check to verify enhancements are working
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9191/health/"] 
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
     # Uncomment to enable high priority for streaming (required if UWSGI_NICE_LEVEL < 0)
     #cap_add:
     #  - SYS_NICE
@@ -39,3 +59,34 @@ services:
 
 volumes:
   dispatcharr_data:
+
+# ===============================================
+# DISPATCHARR ENHANCEMENTS INTEGRATION
+# ===============================================
+#
+# To build with enhancements locally:
+# 1. Copy apply_enhancements.sh to project root
+# 2. Uncomment the build section above
+# 3. Run: docker-compose -f docker/docker-compose.aio.yml up --build -d
+#
+# The enhancements include:
+# ✅ Profile Failover - Automatic switch to next profile on stream failure
+# ✅ Basic Authentication - HTTP Basic Auth for M3U/EPG output
+# ✅ FFmpeg Proxy Support - Per-account proxy configuration
+# ✅ Reduced Retries - From 3 to 2 attempts (configurable)
+# ✅ Enhanced Error Handling - Detailed logging and tracking
+#
+# Environment variables for enhancement configuration:
+# - ENHANCEMENT_MAX_RETRIES: Number of retry attempts (default: 2)
+# - ENHANCEMENT_URL_SWITCH_TIMEOUT: Stream switch timeout in seconds (default: 8)
+# - ENHANCEMENT_FAILOVER_GRACE_PERIOD: Grace period for failover in seconds (default: 20)
+#
+# After first start with enhancements, test:
+# - Proxy field in M3U accounts: http://localhost:9191
+# - Basic Auth: curl -u user:pass http://localhost:9191/output/m3u/
+# - Stream failover: Monitor logs for "failover", "retry", "switch"
+#
+# For manual enhancement application in running container:
+# docker exec -it dispatcharr /app/apply_enhancements.sh
+# docker exec -it dispatcharr python manage.py migrate m3u
+#

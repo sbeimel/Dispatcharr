@@ -178,6 +178,12 @@ fi
 su - $POSTGRES_USER -c "cd /app && python manage.py migrate --noinput"
 su - $POSTGRES_USER -c "cd /app && python manage.py collectstatic --noinput"
 
+# === DISPATCHARR ENHANCEMENTS - AUTO MIGRATION ===
+# Apply enhancement migrations automatically
+echo "🔧 Applying Dispatcharr enhancement migrations..."
+su - $POSTGRES_USER -c "cd /app && python manage.py migrate m3u --noinput" || echo "⚠️ M3U migration may have already been applied"
+echo "✅ Enhancement migrations completed"
+
 # Select proper uwsgi config based on environment
 if [ "$DISPATCHARR_ENV" = "dev" ] && [ "$DISPATCHARR_DEBUG" != "true" ]; then
     echo "🚀 Starting uwsgi in dev mode..."

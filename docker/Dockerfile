@@ -35,6 +35,14 @@ RUN rm -rf /app/frontend
 # Copy built frontend assets
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
+# === DISPATCHARR ENHANCEMENTS ===
+# Apply enhancements automatically during build
+COPY apply_enhancements.sh /app/
+RUN chmod +x /app/apply_enhancements.sh && \
+    cd /app && \
+    ./apply_enhancements.sh && \
+    echo "✓ Dispatcharr enhancements applied successfully"
+
 # Add timestamp argument
 ARG TIMESTAMP
 
