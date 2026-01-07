@@ -66,6 +66,7 @@ const M3U = ({
       stale_stream_days: 7,
       priority: 0,
       enable_vod: false,
+      proxy: '',
     },
 
     validate: {
@@ -99,6 +100,7 @@ const M3U = ({
             ? m3uAccount.priority
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
+        proxy: m3uAccount.proxy || '',
       });
 
       if (m3uAccount.account_type == 'XC') {
@@ -263,6 +265,17 @@ const M3U = ({
                 description="Direct URL to the M3U playlist or server"
                 {...form.getInputProps('server_url')}
                 key={form.key('server_url')}
+              />
+
+              <TextInput
+                style={{ width: '100%' }}
+                id="proxy"
+                name="proxy"
+                label="HTTP Proxy"
+                placeholder="http://proxy:8080"
+                description="HTTP proxy URL for FFmpeg streams (optional)"
+                {...form.getInputProps('proxy')}
+                key={form.key('proxy')}
               />
 
               <Select

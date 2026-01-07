@@ -313,16 +313,18 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
         logger.error(f"Error getting stream info for switch: {e}", exc_info=True)
         return {'error': f'Error: {str(e)}'}
 
-def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None) -> List[dict]:
+def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None, current_profile_id: Optional[int] = None) -> List[dict]:
     """
-    Get alternative streams for a channel when the current stream fails.
+    Get alternative streams/profiles for a channel when the current stream fails.
+    Includes profile failover: returns all available profiles for each stream.
 
     Args:
         channel_id: The UUID of the channel
-        current_stream_id: The currently failing stream ID to exclude
+        current_stream_id: The currently failing stream ID
+        current_profile_id: The currently failing profile ID to exclude
 
     Returns:
-        List[dict]: List of stream information dictionaries with stream_id and profile_id
+        List[dict]: List of stream/profile combinations with stream_id and profile_id
     """
     try:
         from core.utils import RedisClient
@@ -334,7 +336,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
             return []
 
         redis_client = RedisClient.get_client()
-        logger.debug(f"Looking for alternate streams for channel {channel_id}, current stream ID: {current_stream_id}")
+        logger.debug(f"Looking for alternate streams for channel {channel_id}, current stream ID: {current_stream_id}, current profile ID: {current_profile_id}")
 
         # Get all assigned streams for this channel using the correct ordering
         streams = channel.streams.all().order_by('channelstream__order')
@@ -349,11 +351,6 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         # Process each stream in the user-defined order
         for stream in streams:
             logger.debug(f"Checking stream ID {stream.id} ({stream.name}) for channel {channel_id}")
-
-            # Skip the current failing stream
-            if current_stream_id and stream.id == current_stream_id:
-                logger.debug(f"Skipping current stream ID {current_stream_id}")
-                continue
 
             # Find compatible profiles for this stream with connection checking
             try:
@@ -374,8 +371,12 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                 # Check profiles in order with connection availability
                 profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
 
-                selected_profile = None
                 for profile in profiles:
+                    # Skip current stream+profile combination
+                    if current_stream_id and stream.id == current_stream_id and current_profile_id and profile.id == current_profile_id:
+                        logger.debug(f"Skipping current stream/profile combination: {current_stream_id}/{current_profile_id}")
+                        continue
+
                     # Check connection availability
                     if redis_client:
                         profile_connections_key = f"profile_connections:{profile.id}"
@@ -385,44 +386,38 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                         channel_using_profile = False
                         existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
                         if existing_stream_id:
-                            # Decode bytes to string/int for proper Redis key lookup
                             existing_stream_id = existing_stream_id.decode('utf-8')
                             existing_profile_id = redis_client.get(f"stream_profile:{existing_stream_id}")
                             if existing_profile_id and int(existing_profile_id.decode('utf-8')) == profile.id:
                                 channel_using_profile = True
-                                logger.debug(f"Channel {channel.id} already using profile {profile.id}")
 
-                        # Calculate effective connections (subtract 1 if channel already using this profile)
                         effective_connections = current_connections - (1 if channel_using_profile else 0)
 
                         # Check if profile has available slots
                         if profile.max_streams == 0 or effective_connections < profile.max_streams:
-                            selected_profile = profile
-                            logger.debug(f"Found available profile {profile.id} for stream {stream.id}: {effective_connections}/{profile.max_streams} effective (current: {current_connections}, already using: {channel_using_profile})")
-                            break
+                            alternate_streams.append({
+                                'stream_id': stream.id,
+                                'profile_id': profile.id,
+                                'name': stream.name
+                            })
+                            logger.debug(f"Added stream {stream.id} with profile {profile.id}: {effective_connections}/{profile.max_streams}")
                         else:
-                            logger.debug(f"Profile {profile.id} at max connections: {effective_connections}/{profile.max_streams} (current: {current_connections}, already using: {channel_using_profile})")
+                            logger.debug(f"Profile {profile.id} at max connections: {effective_connections}/{profile.max_streams}")
                     else:
-                        # No Redis available, assume first active profile is okay
-                        selected_profile = profile
-                        break
-
-                if selected_profile:
-                    alternate_streams.append({
-                        'stream_id': stream.id,
-                        'profile_id': selected_profile.id,
-                        'name': stream.name
-                    })
-                else:
-                    logger.debug(f"No available profiles for stream ID {stream.id}")
+                        # No Redis available, add all profiles
+                        alternate_streams.append({
+                            'stream_id': stream.id,
+                            'profile_id': profile.id,
+                            'name': stream.name
+                        })
 
             except Exception as inner_e:
                 logger.error(f"Error finding profiles for stream {stream.id}: {inner_e}")
                 continue
 
         if alternate_streams:
-            stream_ids = ', '.join([str(s['stream_id']) for s in alternate_streams])
-            logger.info(f"Found {len(alternate_streams)} alternate streams with available connections for channel {channel_id}: [{stream_ids}]")
+            entries = ', '.join([f"{s['stream_id']}:{s['profile_id']}" for s in alternate_streams])
+            logger.info(f"Found {len(alternate_streams)} alternate stream/profile combinations for channel {channel_id}: [{entries}]")
         else:
             logger.warning(f"No alternate streams with available connections found for channel {channel_id}")
 

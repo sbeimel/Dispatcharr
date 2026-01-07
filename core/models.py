@@ -121,7 +121,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent):
+    def build_command(self, stream_url, user_agent, proxy=None):
         if self.is_proxy():
             return []
 

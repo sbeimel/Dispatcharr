@@ -55,6 +55,18 @@ export const PROXY_SETTINGS_OPTIONS = {
     label: 'Channel Initialization Grace Period',
     description: 'Grace period in seconds during channel initialization',
   },
+  max_retries: {
+    label: 'Max Retries',
+    description: 'Maximum number of retry attempts before switching streams',
+  },
+  url_switch_timeout: {
+    label: 'URL Switch Timeout (seconds)',
+    description: 'Maximum time allowed for stream switching operations',
+  },
+  failover_grace_period: {
+    label: 'Failover Grace Period (seconds)',
+    description: 'Extra time to allow for stream switching before disconnecting clients',
+  },
 };
 
 export const M3U_FILTER_TYPES = [

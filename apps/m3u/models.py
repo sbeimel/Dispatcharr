@@ -99,6 +99,12 @@ class M3UAccount(models.Model):
         default=0,
         help_text="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content.",
     )
+    proxy = models.CharField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="HTTP proxy URL for FFmpeg streams (e.g., http://proxy:8080)",
+    )
 
     def __str__(self):
         return self.name

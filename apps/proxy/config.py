@@ -6,13 +6,20 @@ class BaseConfig:
     DEFAULT_USER_AGENT = 'VLC/3.0.20 LibVLC/3.0.20' # Will only be used if connection to settings fail
     CHUNK_SIZE = 8192
     CLIENT_POLL_INTERVAL = 0.1
-    MAX_RETRIES = 3
+    MAX_RETRIES = 2
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
+
+    # Stream health and recovery settings
+    MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
+    MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
+    MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
+    FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
+    URL_SWITCH_TIMEOUT = 8   # Max time allowed for a stream switch operation
 
     # Cache for proxy settings (class-level, shared across all instances)
     _proxy_settings_cache = None
@@ -32,6 +39,8 @@ class BaseConfig:
             from core.models import CoreSettings
             settings = CoreSettings.get_proxy_settings()
             cls._proxy_settings_cache = settings
+            # Override MAX_RETRIES if configured
+            cls.MAX_RETRIES = settings.get("max_retries", cls.MAX_RETRIES)
             cls._proxy_settings_cache_time = now
             return settings
 
@@ -43,6 +52,8 @@ class BaseConfig:
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 5,
+                "max_retries": 2,
+                "url_switch_timeout": 8,
             }
 
         finally:
@@ -57,6 +68,18 @@ class BaseConfig:
         """Get Redis chunk TTL from database or default"""
         settings = cls.get_proxy_settings()
         return settings.get("redis_chunk_ttl", 60)
+
+    @classmethod
+    def get_max_retries(cls):
+        """Get max retries from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("max_retries", 2)
+
+    @classmethod
+    def get_url_switch_timeout(cls):
+        """Get URL switch timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("url_switch_timeout", 8)
 
     @property
     def REDIS_CHUNK_TTL(self):
@@ -99,6 +122,37 @@ class TSConfig(BaseConfig):
     CLIENT_HEARTBEAT_INTERVAL = 5  # How often to send client heartbeats (seconds)
     GHOST_CLIENT_MULTIPLIER = 6.0  # How many heartbeat intervals before client considered ghost (6 would mean 36 seconds if heartbeat interval is 6)
     CLIENT_WAIT_TIMEOUT = 30  # Seconds to wait for client to connect
+
+    # Database-dependent settings with fallbacks
+    @classmethod
+    def get_channel_shutdown_delay(cls):
+        """Get channel shutdown delay from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_shutdown_delay", 0)
+
+    @classmethod
+    def get_buffering_timeout(cls):
+        """Get buffering timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("buffering_timeout", 15)
+
+    @classmethod
+    def get_buffering_speed(cls):
+        """Get buffering speed threshold from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("buffering_speed", 1.0)
+
+    @classmethod
+    def get_channel_init_grace_period(cls):
+        """Get channel init grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_init_grace_period", 5)
+
+    @classmethod
+    def get_failover_grace_period(cls):
+        """Get failover grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("failover_grace_period", 20)
 
     # Stream health and recovery settings
     MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
@@ -150,6 +204,10 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
+
+    @property
+    def FAILOVER_GRACE_PERIOD(self):
+        return self.get_failover_grace_period()
 
 
 
