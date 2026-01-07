@@ -84,7 +84,8 @@ class ConfigHelper:
     @staticmethod
     def failover_grace_period():
         """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
-        return ConfigHelper.get('FAILOVER_GRACE_PERIOD', 20)  # Default to 20 seconds
+        from apps.proxy.config import TSConfig
+        return TSConfig.get_failover_grace_period()
 
     @staticmethod
     def buffering_timeout():
