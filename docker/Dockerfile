@@ -10,13 +10,13 @@ FROM node:24 AS enhancement-stage
 WORKDIR /app
 # Copy source code and enhancement script
 COPY . /app
-COPY apply_enhancements.sh /app/
+COPY apply_enhancements_v2.sh /app/
 
 # Apply enhancements before frontend build
-RUN chmod +x /app/apply_enhancements.sh && \
+RUN chmod +x /app/apply_enhancements_v2.sh && \
     cd /app && \
-    ./apply_enhancements.sh && \
-    echo "✓ Dispatcharr enhancements applied successfully"
+    ./apply_enhancements_v2.sh && \
+    echo "✓ Dispatcharr enhancements v2 applied successfully"
 
 # --- Build frontend with enhancements ---
 

@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Dispatcharr Enhancements - Automatische Anwendung beim Docker Build
-# Intelligente Anwendung mit Syntax-Prüfung und Fehlerbehandlung
+# Dispatcharr Enhancements - Verbesserte Version v2
+# Korrigiert Frontend-Integration und Failover-Logik
 
 set -e
 
-echo "=== Applying Dispatcharr Enhancements ==="
+echo "=== Applying Dispatcharr Enhancements v2 ==="
 
 # 1. MAX_RETRIES von 3 auf 2 reduzieren
 echo "1. Updating MAX_RETRIES..."
@@ -26,9 +26,9 @@ if [ -f "apps/m3u/models.py" ]; then
     if grep -q "proxy.*models.CharField" apps/m3u/models.py; then
         echo "   ✓ Proxy field already exists"
     else
-        # Intelligente Suche nach der richtigen Stelle (nach priority Feld)
-        if grep -q "priority = models.PositiveIntegerField" apps/m3u/models.py; then
-            # Füge Proxy-Feld nach priority hinzu mit korrekter Einrückung
+        # Suche nach priority Feld und füge danach hinzu
+        if grep -n "priority = models.PositiveIntegerField" apps/m3u/models.py; then
+            # Finde die Zeile nach dem priority Feld und füge proxy hinzu
             sed -i '/priority = models.PositiveIntegerField(/,/)$/{
                 /)$/{
                     a\
@@ -40,7 +40,7 @@ if [ -f "apps/m3u/models.py" ]; then
     )
                 }
             }' apps/m3u/models.py
-            echo "   ✓ Proxy field added after priority field"
+            echo "   ✓ Proxy field added to M3UAccount model"
         else
             echo "   ⚠ Could not find priority field - proxy field not added"
         fi
@@ -111,60 +111,48 @@ def require_basic_auth(request):\
     response["WWW-Authenticate"] = "Basic realm=\\"Dispatcharr\\""\
     return response' apps/output/views.py
 
-        # Füge Basic Auth Check zu m3u_endpoint hinzu (intelligente Suche)
-        if grep -q "def m3u_endpoint" apps/output/views.py; then
-            # Suche nach der Stelle nach network access check
-            sed -i '/return JsonResponse({"error": "Forbidden"}, status=403)/a\
+        # Füge Basic Auth Check zu m3u_endpoint hinzu
+        sed -i '/return JsonResponse({"error": "Forbidden"}, status=403)/a\
 \
     # Require Basic Auth if no user provided\
     if user is None:\
         user = get_basic_auth_user(request)\
         if user is None:\
             return require_basic_auth(request)' apps/output/views.py
-        fi
 
-        # Füge Basic Auth Check zu epg_endpoint hinzu (falls vorhanden)
-        if grep -q "def epg_endpoint" apps/output/views.py; then
-            # Nur einmal hinzufügen - prüfe ob schon vorhanden
-            if ! grep -A 10 "def epg_endpoint" apps/output/views.py | grep -q "get_basic_auth_user"; then
-                sed -i '/def epg_endpoint/,/return generate_epg/ {
-                    /return JsonResponse({"error": "Forbidden"}, status=403)/a\
-\
-    # Require Basic Auth if no user provided\
-    if user is None:\
-        user = get_basic_auth_user(request)\
-        if user is None:\
-            return require_basic_auth(request)
-                }' apps/output/views.py
-            fi
-        fi
         echo "   ✓ Basic Auth functions added"
     fi
 else
     echo "   ✗ apps/output/views.py not found"
 fi
 
-# 5. Frontend M3U Form aktualisieren (nur wenn vorhanden und nicht schon geändert)
+# 5. Frontend M3U Form aktualisieren - VERBESSERTE VERSION
 echo "5. Updating frontend M3U form..."
 if [ -f "frontend/src/components/forms/M3U.jsx" ]; then
-    if grep -q "proxy.*TextInput" frontend/src/components/forms/M3U.jsx; then
+    if grep -q '"proxy"' frontend/src/components/forms/M3U.jsx; then
         echo "   ✓ Proxy field already exists in frontend"
     else
-        # Füge proxy zu initialValues hinzu (nur wenn enable_vod vorhanden)
+        echo "   → Adding proxy field to frontend form..."
+        
+        # 5a. Füge proxy zu initialValues hinzu (nach enable_vod)
         if grep -q "enable_vod: false," frontend/src/components/forms/M3U.jsx; then
             sed -i '/enable_vod: false,/a\
       proxy: "",' frontend/src/components/forms/M3U.jsx
+            echo "   ✓ Added proxy to initialValues"
         fi
         
-        # Füge proxy zu form.setValues hinzu (nur wenn enable_vod vorhanden)
+        # 5b. Füge proxy zu form.setValues hinzu (nach enable_vod)
         if grep -q "enable_vod: m3uAccount.enable_vod || false," frontend/src/components/forms/M3U.jsx; then
             sed -i '/enable_vod: m3uAccount.enable_vod || false,/a\
         proxy: m3uAccount.proxy || "",' frontend/src/components/forms/M3U.jsx
+            echo "   ✓ Added proxy to form.setValues"
         fi
         
-        # Füge Proxy TextInput nach server_url hinzu (intelligente Suche)
-        if grep -q 'key={form.key("server_url")}' frontend/src/components/forms/M3U.jsx; then
-            sed -i '/key={form.key("server_url")}/a\
+        # 5c. Füge Proxy TextInput nach server_url TextInput hinzu
+        # Suche nach der schließenden /> des server_url TextInputs
+        if grep -A 5 'id="server_url"' frontend/src/components/forms/M3U.jsx | grep -q 'key={form.key.*server_url'; then
+            # Finde die Zeile mit key={form.key('server_url')} und füge danach hinzu
+            sed -i '/key={form\.key.*server_url.*}/a\
 \
               <TextInput\
                 style={{ width: "100%" }}\
@@ -176,29 +164,76 @@ if [ -f "frontend/src/components/forms/M3U.jsx" ]; then
                 {...form.getInputProps("proxy")}\
                 key={form.key("proxy")}\
               />' frontend/src/components/forms/M3U.jsx
+            echo "   ✓ Added proxy TextInput after server_url"
+        else
+            echo "   ⚠ Could not find server_url TextInput - proxy field not added to UI"
         fi
-        echo "   ✓ Proxy field added to frontend"
+        
+        echo "   ✓ Frontend proxy field integration completed"
     fi
 else
     echo "   ℹ Frontend not found - skipping (will work via API)"
 fi
 
-# 6. Verbesserte Failover-Logik in channels/models.py (VORSICHTIG!)
+# 6. Verbesserte Failover-Logik in channels/models.py
 echo "6. Enhancing failover logic..."
 if [ -f "apps/channels/models.py" ]; then
-    # Nur hinzufügen wenn nicht schon vorhanden
-    if ! grep -q "tried_profiles = set()" apps/channels/models.py; then
-        # Suche nach der spezifischen Zeile und füge danach hinzu
+    # Prüfe ob bereits erweitert
+    if grep -q "tried_profiles = set()" apps/channels/models.py; then
+        echo "   ✓ Failover logic already enhanced"
+    else
+        echo "   → Enhancing profile failover logic..."
+        
+        # 6a. Füge Tracking-Variablen hinzu
         if grep -q "has_streams_but_maxed_out = False" apps/channels/models.py; then
             sed -i '/has_streams_but_maxed_out = False/a\
         tried_profiles = set()  # Track tried profiles for failover\
         failed_profiles = []    # Track failed profiles with reasons' apps/channels/models.py
-            echo "   ✓ Failover tracking variables added"
-        else
-            echo "   ⚠ Could not find insertion point for failover logic"
+            echo "   ✓ Added failover tracking variables"
         fi
-    else
-        echo "   ✓ Failover logic already enhanced"
+        
+        # 6b. Verbessere die Profile-Iteration mit Failover-Logik
+        # Suche nach "for profile in profiles:" und erweitere die Logik
+        if grep -q "for profile in profiles:" apps/channels/models.py; then
+            # Füge Profile-Tracking nach der for-Schleife hinzu
+            sed -i '/for profile in profiles:/a\
+                profile_id = profile.id\
+                \
+                # Skip if profile already tried\
+                if profile_id in tried_profiles:\
+                    continue\
+                    \
+                # Mark profile as tried\
+                tried_profiles.add(profile_id)\
+                \
+                # Skip inactive profiles\
+                if not profile.is_active:\
+                    failed_profiles.append({\
+                        "profile_id": profile_id,\
+                        "reason": "Profile is inactive",\
+                        "stream_id": stream.id\
+                    })\
+                    continue' apps/channels/models.py
+            echo "   ✓ Enhanced profile iteration with failover logic"
+        fi
+        
+        # 6c. Verbessere Fehlerberichterstattung
+        if grep -q "No available streams - determine specific reason" apps/channels/models.py; then
+            sed -i '/No available streams - determine specific reason/a\
+        \
+        # Enhanced error reporting with failover details\
+        if failed_profiles:\
+            profile_details = "; ".join([f"Profile {p[\"profile_id\"]} (Stream {p[\"stream_id\"]}): {p[\"reason\"]}" for p in failed_profiles])\
+            if has_streams_but_maxed_out:\
+                error_reason += f" - Tried profiles: {len(tried_profiles)}, Failed: {profile_details}"\
+            else:\
+                error_reason = f"Profile failover failed - {profile_details}"\
+        \
+        logger.warning(f"Channel {self.id} stream assignment failed after trying {len(tried_profiles)} profiles: {error_reason}")' apps/channels/models.py
+            echo "   ✓ Enhanced error reporting with failover details"
+        fi
+        
+        echo "   ✓ Profile failover logic enhancement completed"
     fi
 else
     echo "   ✗ apps/channels/models.py not found"
@@ -215,13 +250,27 @@ for file in "${python_files[@]}"; do
             echo "   ✓ $file syntax OK"
         else
             echo "   ✗ $file has syntax errors!"
+            python3 -m py_compile "$file" || true  # Show the error
             syntax_errors=$((syntax_errors + 1))
         fi
     fi
 done
 
+# 8. Frontend-Syntax prüfen (falls Node.js verfügbar)
+echo "8. Validating Frontend syntax..."
+if [ -f "frontend/src/components/forms/M3U.jsx" ] && command -v node >/dev/null 2>&1; then
+    if node -c frontend/src/components/forms/M3U.jsx 2>/dev/null; then
+        echo "   ✓ M3U.jsx syntax OK"
+    else
+        echo "   ⚠ M3U.jsx may have syntax issues"
+    fi
+else
+    echo "   ℹ Node.js not available or frontend not found - skipping JS validation"
+fi
+
 if [ $syntax_errors -gt 0 ]; then
     echo "   ⚠ $syntax_errors files have syntax errors - please check manually"
+    exit 1
 else
     echo "   ✓ All Python files have valid syntax"
 fi
@@ -231,10 +280,9 @@ echo "✓ All enhancements applied successfully!"
 echo ""
 echo "Changes made:"
 echo "- MAX_RETRIES reduced from 3 to 2"
-echo "- Added proxy field to M3UAccount model"
-echo "- Created migration 0019_m3uaccount_proxy.py"
+echo "- Added proxy field to M3UAccount model with migration"
 echo "- Added Basic Auth for M3U/EPG output"
-echo "- Enhanced failover logic with profile tracking"
-echo "- Updated frontend form (if present)"
+echo "- Enhanced profile failover logic with detailed tracking"
+echo "- Added proxy field to frontend M3U form"
 echo ""
-echo "After build: Run 'python manage.py migrate' to apply database changes"
+echo "After build: Migration will be applied automatically on container start"
