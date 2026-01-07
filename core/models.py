@@ -136,6 +136,18 @@ class StreamProfile(models.Model):
             for part in self.parameters.split()
         ]
 
+        # Add proxy support for FFmpeg
+        if proxy and proxy.strip() and self.command.lower() == 'ffmpeg':
+            try:
+                i_index = cmd.index('-i')
+                # Insert -http_proxy parameter before -i
+                cmd.insert(i_index, '-http_proxy')
+                cmd.insert(i_index + 1, proxy.strip())
+            except ValueError:
+                # If -i is not found, add proxy at the beginning after command
+                cmd.insert(1, '-http_proxy')
+                cmd.insert(2, proxy.strip())
+
         return cmd
 
     def _replace_in_part(self, part, replacements):
