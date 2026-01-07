@@ -20,6 +20,33 @@ Einfache Integration der Enhancements in das All-in-One Docker-Setup.
 
 ## 🐳 AIO Integration (Bereits erledigt!)
 
+### **Das Dockerfile ist intelligent umstrukturiert!** ✅
+
+**Neue Build-Reihenfolge für Frontend-Kompatibilität:**
+
+```dockerfile
+# 1. Enhancement-Stage: Enhancements anwenden
+FROM node:24 AS enhancement-stage
+COPY . /app
+COPY apply_enhancements.sh /app/
+RUN ./apply_enhancements.sh
+
+# 2. Frontend-Builder: Mit Enhancements bauen
+FROM node:24 AS frontend-builder
+COPY --from=enhancement-stage /app/frontend /app/frontend
+RUN npm install && npm run build
+
+# 3. Final: Alles zusammenfügen
+FROM ghcr.io/dispatcharr/dispatcharr:base AS final
+COPY --from=enhancement-stage /app /app
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+```
+
+**Das löst das Frontend-Problem:**
+- ✅ Enhancements werden **vor** dem Frontend-Build angewendet
+- ✅ Frontend wird **mit** Proxy-Feld kompiliert
+- ✅ Alle Enhancements sind im finalen Image enthalten
+
 ### **Die AIO docker-compose.yml ist bereits erweitert!** ✅
 
 ```yaml

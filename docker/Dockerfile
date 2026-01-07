@@ -3,12 +3,28 @@ ARG REPO_OWNER=dispatcharr
 ARG REPO_NAME=dispatcharr
 ARG BASE_TAG=base
 
-# --- Build frontend ---
+# --- Apply enhancements first ---
+
+FROM node:24 AS enhancement-stage
+
+WORKDIR /app
+# Copy source code and enhancement script
+COPY . /app
+COPY apply_enhancements.sh /app/
+
+# Apply enhancements before frontend build
+RUN chmod +x /app/apply_enhancements.sh && \
+    cd /app && \
+    ./apply_enhancements.sh && \
+    echo "✓ Dispatcharr enhancements applied successfully"
+
+# --- Build frontend with enhancements ---
 
 FROM node:24 AS frontend-builder
 
 WORKDIR /app/frontend
-COPY ./frontend /app/frontend
+# Copy enhanced frontend source
+COPY --from=enhancement-stage /app/frontend /app/frontend
 # remove any node_modules that may have been copied from the host (x86)
 RUN rm -rf node_modules || true; \
     npm install --no-audit --progress=false;
@@ -26,22 +42,14 @@ ENV VIRTUAL_ENV=/dispatcharrpy
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
-# Copy application code
-COPY . /app
+# Copy enhanced application code
+COPY --from=enhancement-stage /app /app
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder
 RUN rm -rf /app/frontend
-# Copy built frontend assets
+# Copy built frontend assets (with enhancements)
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
-
-# === DISPATCHARR ENHANCEMENTS ===
-# Apply enhancements automatically during build
-COPY apply_enhancements.sh /app/
-RUN chmod +x /app/apply_enhancements.sh && \
-    cd /app && \
-    ./apply_enhancements.sh && \
-    echo "✓ Dispatcharr enhancements applied successfully"
 
 # Add timestamp argument
 ARG TIMESTAMP
