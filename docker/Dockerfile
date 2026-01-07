@@ -3,28 +3,12 @@ ARG REPO_OWNER=dispatcharr
 ARG REPO_NAME=dispatcharr
 ARG BASE_TAG=base
 
-# --- Apply enhancements first ---
-
-FROM node:24 AS enhancement-stage
-
-WORKDIR /app
-# Copy source code and enhancement script
-COPY . /app
-COPY apply_enhancements_simple.sh /app/
-
-# Apply enhancements before frontend build
-RUN chmod +x /app/apply_enhancements_simple.sh && \
-    cd /app && \
-    ./apply_enhancements_simple.sh && \
-    echo "✓ Dispatcharr enhancements (simple) applied successfully"
-
-# --- Build frontend with enhancements ---
+# --- Build frontend ---
 
 FROM node:24 AS frontend-builder
 
 WORKDIR /app/frontend
-# Copy enhanced frontend source
-COPY --from=enhancement-stage /app/frontend /app/frontend
+COPY ./frontend /app/frontend
 # remove any node_modules that may have been copied from the host (x86)
 RUN rm -rf node_modules || true; \
     npm install --no-audit --progress=false;
@@ -42,13 +26,13 @@ ENV VIRTUAL_ENV=/dispatcharrpy
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
-# Copy enhanced application code
-COPY --from=enhancement-stage /app /app
+# Copy application code
+COPY . /app
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
 # Clean out existing frontend folder
 RUN rm -rf /app/frontend
-# Copy built frontend assets (with enhancements)
+# Copy built frontend assets
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 # Add timestamp argument
