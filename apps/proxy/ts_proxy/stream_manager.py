@@ -22,7 +22,7 @@ from .utils import detect_stream_type, get_logger
 from .redis_keys import RedisKeys
 from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, TS_PACKET_SIZE
 from .config_helper import ConfigHelper
-from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
+from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object, get_stream_info_for_profile
 
 logger = get_logger()
 
@@ -1631,9 +1631,9 @@ class StreamManager:
                 # Add to tried combinations
                 self.tried_combinations.add((stream_id, profile_id))
 
-                # Get stream info including URL
+                # Get stream info including URL for specific profile
                 logger.info(f"Trying stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
-                stream_info = get_stream_info_for_switch(self.channel_id, stream_id)
+                stream_info = get_stream_info_for_profile(self.channel_id, stream_id, profile_id)
 
                 if 'error' in stream_info or not stream_info.get('url'):
                     logger.error(f"Error getting info for stream {stream_id} for channel {self.channel_id}: {stream_info.get('error', 'No URL')}")
