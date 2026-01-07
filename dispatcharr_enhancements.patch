@@ -116,6 +116,73 @@
 
 --- a/apps/proxy/ts_proxy/stream_manager.py
 +++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -22,7 +22,7 @@ from .utils import detect_stream_type, get_logger
+ from .redis_keys import RedisKeys
+ from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, TS_PACKET_SIZE
+ from .config_helper import ConfigHelper
+-from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
++from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object, get_stream_info_for_profile
+
+ logger = get_logger()
+
+@@ -65,7 +65,9 @@ class StreamManager:
+         # Add tracking for tried streams and current stream
+         self.current_stream_id = stream_id
++        self.current_profile_id = None
++        self.tried_combinations = set()  # Track (stream_id, profile_id) combinations
+         self.tried_stream_ids = set()  # Keep for backward compatibility
+
+         # IMPROVED LOGGING: Better handle and track stream ID
+         if stream_id:
+@@ -85,6 +87,12 @@ class StreamManager:
+                         self.current_stream_id = int(stream_id_bytes.decode('utf-8'))
+                         self.tried_stream_ids.add(self.current_stream_id)
+                         logger.info(f"Loaded stream ID {self.current_stream_id} from Redis for channel {buffer.channel_id}")
++                    
++                    # Try to get profile_id
++                    profile_id_bytes = buffer.redis_client.hget(metadata_key, "m3u_profile")
++                    if profile_id_bytes:
++                        self.current_profile_id = int(profile_id_bytes.decode('utf-8'))
++                        logger.info(f"Loaded profile ID {self.current_profile_id} from Redis for channel {buffer.channel_id}")
+                     
+                     if not stream_id_bytes:
+                         logger.warning(f"No stream_id found in Redis for channel {channel_id}. "
+@@ -490,7 +498,23 @@ class StreamManager:
+             else:
+                 stream_profile = channel.get_stream_profile()
+
+-            # Build and start transcode command
+-            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
++            # Get proxy from M3U account if available
++            proxy = None
++            try:
++                # Get the channel to find the M3U account
++                from apps.channels.models import Channel
++                channel_obj = Channel.objects.get(uuid=self.channel_id)
++                
++                # Get current stream and its M3U account
++                if hasattr(self, 'current_stream_id') and self.current_stream_id:
++                    from apps.channels.models import Stream
++                    stream = Stream.objects.get(id=self.current_stream_id)
++                    if hasattr(stream, 'm3u_account') and stream.m3u_account:
++                        proxy = stream.m3u_account.proxy
++                        if proxy:
++                            logger.info(f"Using proxy {proxy} for channel {self.channel_id}")
++            except Exception as e:
++                logger.debug(f"Could not get proxy for channel {self.channel_id}: {e}")
++
++            # Build and start transcode command
++            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
++++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -22,7 +22,7 @@ from .utils import detect_stream_type, get_logger
+ from .redis_keys import RedisKeys
+ from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, TS_PACKET_SIZE
+ from .config_helper import ConfigHelper
+-from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
++from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object, get_stream_info_for_profile
+ 
+ logger = get_logger()
+ 
 @@ -65,7 +65,9 @@ class StreamManager:
          # Add tracking for tried streams and current stream
          self.current_stream_id = stream_id
@@ -210,9 +277,9 @@
  
 -                # Get stream info including URL using the profile_id we already have
 -                logger.info(f"Trying next stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
-+                # Get stream info including URL
++                # Get stream info including URL for specific profile
 +                logger.info(f"Trying stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
-                 stream_info = get_stream_info_for_switch(self.channel_id, stream_id)
++                stream_info = get_stream_info_for_profile(self.channel_id, stream_id, profile_id)
  
                  if 'error' in stream_info or not stream_info.get('url'):
                      logger.error(f"Error getting info for stream {stream_id} for channel {self.channel_id}: {stream_info.get('error', 'No URL')}")
@@ -395,6 +462,46 @@
      except Exception as e:
          logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
          return []
++
++def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
++    """
++    Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
++    Return schema compatible with get_stream_info_for_switch(...).
++    """
++    try:
++        channel = get_stream_object(channel_id)
++        if isinstance(channel, Stream):
++            logger.error(f"get_stream_info_for_profile: {channel_id} refers to a Stream, not a Channel")
++            return {"error": "Invalid channel ID"}
++        
++        stream = get_object_or_404(Stream, pk=stream_id)
++        m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
++        
++        m3u_account = m3u_profile.m3u_account
++        
++        # Get the user agent from the M3U account
++        user_agent = m3u_account.get_user_agent().user_agent
++        
++        # Generate URL using the specific profile's transformation
++        input_url = stream.url
++        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
++        
++        # Get transcode info from the channel's stream profile
++        stream_profile = channel.get_stream_profile()
++        transcode = not (stream_profile.is_proxy() or stream_profile is None)
++        profile_value = stream_profile.id
++        
++        return {
++            'url': stream_url,
++            'user_agent': user_agent,
++            'transcode': transcode,
++            'stream_profile': profile_value,
++            'stream_id': stream_id,
++            'm3u_profile_id': m3u_profile_id
++        }
++    except Exception as e:
++        logger.error(f"Error in get_stream_info_for_profile: {e}", exc_info=True)
++        return {'error': f'Error: {str(e)}'}
 
 --- a/apps/output/views.py
 +++ b/apps/output/views.py
@@ -652,18 +759,24 @@
 # SEARCH PATTERNS FOR AUTO-DETECTION:
 # ====================================
 #
-# 1. PROFILE FAILOVER (stream_manager.py):
+# 1. PROFILE FAILOVER (stream_manager.py + url_utils.py):
 #    FIND: "def _try_next_stream(self):"
 #    FIND: "self.current_stream_id = stream_id"
 #    FIND: "self.tried_stream_ids = set()"
 #    ADD:  "self.tried_combinations = set()"
 #    ADD:  "self.current_profile_id = None"
+#    FIND: "from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object"
+#    ADD:  ", get_stream_info_for_profile"
+#    FIND: "get_stream_info_for_switch(self.channel_id, stream_id)"
+#    REPLACE: "get_stream_info_for_profile(self.channel_id, stream_id, profile_id)"
 #
 # 2. PROFILE FAILOVER (url_utils.py):
 #    FIND: "def get_alternate_streams(channel_id: str, current_stream_id:"
 #    MODIFY: Add current_profile_id parameter
 #    FIND: "if current_stream_id and stream.id == current_stream_id:"
 #    MODIFY: Add profile_id exclusion logic
+#    ADD: "def get_stream_info_for_profile(channel_id, stream_id, profile_id)" function
+#    PURPOSE: Generate URL for specific profile (vs automatic profile selection)
 #
 # 3. BASIC AUTH (output/views.py):
 #    FIND: "def m3u_endpoint(request, profile_name=None, user=None):"
@@ -714,6 +827,7 @@
 # KEY CHANGES:
 # - Enhanced _try_next_stream() with tried_combinations tracking
 # - get_alternate_streams() returns all stream/profile combinations  
+# - get_stream_info_for_profile() for specific profile URL generation
 # - Intelligent failover: tries other profiles before switching streams
 # - Runtime switching without client disconnection
 # 
@@ -767,7 +881,9 @@
 #
 # VERIFICATION CHECKLIST:
 # ✓ stream_manager.py has tried_combinations tracking
-# ✓ url_utils.py get_alternate_streams() has profile_id parameter  
+# ✓ stream_manager.py imports get_stream_info_for_profile
+# ✓ url_utils.py get_alternate_streams() has profile_id parameter
+# ✓ url_utils.py has get_stream_info_for_profile() function  
 # ✓ output/views.py has basic auth functions
 # ✓ M3U model has proxy field
 # ✓ M3U serializer includes proxy in fields
