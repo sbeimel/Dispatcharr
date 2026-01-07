@@ -4,7 +4,7 @@ Einfache Integration der Enhancements in das All-in-One Docker-Setup.
 
 ## 📁 Was ist enthalten
 
-- ✅ `apply_enhancements_v2.sh` - **Verbesserte Version** mit korrekter Frontend-Integration
+- ✅ `apply_enhancements_simple.sh` - **Sichere Version** ohne komplexe Failover-Änderungen
 - ✅ `docker/Dockerfile` - **Bereits erweitert** mit Enhancement-Integration
 - ✅ `docker/entrypoint.sh` - **Bereits erweitert** mit automatischer Migration
 - ✅ `docker/docker-compose.aio.yml` - **Bereits erweitert** für AIO-Setup
@@ -68,7 +68,7 @@ environment:
 ### **Option 1: Lokaler Build mit Enhancements**
 ```bash
 # 1. Script ins Projekt-Root kopieren
-cp apply_enhancements_v2.sh /path/to/dispatcharr/
+cp apply_enhancements_simple.sh /path/to/dispatcharr/
 
 # 2. AIO docker-compose.yml bearbeiten - Build-Sektion aktivieren:
 # Uncomment diese Zeilen:
@@ -88,8 +88,8 @@ cd docker
 docker-compose -f docker-compose.aio.yml up -d
 
 # 2. Enhancements manuell anwenden
-docker cp apply_enhancements_v2.sh dispatcharr:/app/
-docker exec -it dispatcharr /app/apply_enhancements_v2.sh
+docker cp apply_enhancements_simple.sh dispatcharr:/app/
+docker exec -it dispatcharr /app/apply_enhancements_simple.sh
 docker exec -it dispatcharr python manage.py migrate m3u
 docker-compose restart
 ```
