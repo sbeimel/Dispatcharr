@@ -23,7 +23,7 @@ class ChannelService:
     """Service class for channel operations"""
 
     @staticmethod
-    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
+    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None, proxy=None):
         """
         Initialize a channel with the given parameters.
 
@@ -35,6 +35,7 @@ class ChannelService:
             stream_profile_value: Stream profile value to store in metadata
             stream_id: ID of the stream being used
             m3u_profile_id: ID of the M3U profile being used
+            proxy: HTTP proxy URL for FFmpeg streams
 
         Returns:
             bool: Success status
@@ -66,7 +67,7 @@ class ChannelService:
                 logger.error(f"Failed to set stream_id {stream_id} in Redis before initialization")
 
         # Now proceed with channel initialization
-        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id)
+        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id, proxy)
 
         # Store additional metadata if initialization was successful
         if success and proxy_server.redis_client:
@@ -78,6 +79,8 @@ class ChannelService:
                 update_data[ChannelMetadataField.STREAM_ID] = str(stream_id)
             if m3u_profile_id:
                 update_data[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
+            if proxy:
+                update_data[ChannelMetadataField.PROXY] = proxy
 
             if update_data:
                 proxy_server.redis_client.hset(metadata_key, mapping=update_data)

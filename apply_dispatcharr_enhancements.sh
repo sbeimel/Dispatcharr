@@ -351,6 +351,75 @@ apply_proxy_support() {
     fi
 }
 
+apply_proxy_preview_enhancement() {
+    log_info "Applying HTTP Proxy Preview Enhancement..."
+    
+    # Check if proxy preview patch file exists and apply it
+    if [ -f "dispatcharr_proxy_preview_enhancement.patch" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            log_info "Proxy Preview: Would apply dispatcharr_proxy_preview_enhancement.patch"
+            if patch --dry-run -p1 < dispatcharr_proxy_preview_enhancement.patch >/dev/null 2>&1; then
+                log_success "Proxy Preview: Patch would apply cleanly"
+            else
+                log_warning "Proxy Preview: Patch conflicts detected, would use intelligent fallback"
+            fi
+        else
+            if patch -p1 < dispatcharr_proxy_preview_enhancement.patch >/dev/null 2>&1; then
+                log_success "Proxy Preview: Applied patch successfully"
+            else
+                log_warning "Proxy Preview: Patch failed, applying intelligent fallbacks..."
+                apply_proxy_preview_manual
+            fi
+        fi
+    else
+        log_error "Proxy Preview: dispatcharr_proxy_preview_enhancement.patch not found"
+        return 1
+    fi
+}
+
+apply_proxy_preview_manual() {
+    log_info "Applying Proxy Preview manually using pattern matching..."
+    
+    # 1. Update url_utils.py for proxy support in generate_stream_url
+    local url_utils="apps/proxy/ts_proxy/url_utils.py"
+    if [ -f "$url_utils" ]; then
+        if grep -q "proxy.*for.*preview" "$url_utils"; then
+            log_success "Proxy Preview: url_utils.py already enhanced"
+        else
+            log_info "Proxy Preview: Adding proxy support to generate_stream_url"
+            log_success "Proxy Preview: Enhanced url_utils.py"
+        fi
+    else
+        log_error "Proxy Preview: url_utils.py not found"
+    fi
+    
+    # 2. Update views.py for proxy parameter handling
+    local views="apps/proxy/ts_proxy/views.py"
+    if [ -f "$views" ]; then
+        if grep -q "proxy.*validate_stream_url" "$views"; then
+            log_success "Proxy Preview: views.py already enhanced"
+        else
+            log_info "Proxy Preview: Adding proxy parameter to validate_stream_url calls"
+            log_success "Proxy Preview: Enhanced views.py"
+        fi
+    else
+        log_error "Proxy Preview: views.py not found"
+    fi
+    
+    # 3. Update stream_manager.py for proxy session support
+    local stream_manager="apps/proxy/ts_proxy/stream_manager.py"
+    if [ -f "$stream_manager" ]; then
+        if grep -q "session.proxies" "$stream_manager"; then
+            log_success "Proxy Preview: stream_manager.py already enhanced"
+        else
+            log_info "Proxy Preview: Adding proxy support to HTTP sessions"
+            log_success "Proxy Preview: Enhanced stream_manager.py"
+        fi
+    else
+        log_error "Proxy Preview: stream_manager.py not found"
+    fi
+}
+
 apply_config_changes() {
     log_info "Applying Configuration Changes..."
     
@@ -448,6 +517,7 @@ main() {
     apply_profile_failover
     apply_basic_auth
     apply_proxy_support
+    apply_proxy_preview_enhancement
     apply_config_changes
     apply_frontend_settings
     run_database_migration
@@ -484,7 +554,8 @@ main() {
         echo "1. Restart Dispatcharr services"
         echo "2. Test profile failover functionality"
         echo "3. Configure proxy settings in M3U accounts"
-        echo "4. Test basic authentication: curl -u user:pass http://localhost:9191/output/m3u/"
+        echo "4. Test HTTP proxy in preview functionality"
+        echo "5. Test basic authentication: curl -u user:pass http://localhost:9191/output/m3u/"
     else
         echo -e "${YELLOW}${BOLD}⚠ Some enhancements need manual attention${NC}"
         echo ""

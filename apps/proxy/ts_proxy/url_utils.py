@@ -24,7 +24,7 @@ def get_stream_object(id: str):
         logger.info(f"Fetching stream hash {id}")
         return get_object_or_404(Stream, stream_hash=id)
 
-def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]:
+def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int], Optional[str]]:
     """
     Generate the appropriate stream URL for a channel or stream based on its profile settings.
 
@@ -32,7 +32,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
         channel_id: The UUID of the channel or stream hash
 
     Returns:
-        Tuple[str, str, bool, Optional[int]]: (stream_url, user_agent, transcode_flag, profile_id)
+        Tuple[str, str, bool, Optional[int], Optional[str]]: (stream_url, user_agent, transcode_flag, profile_id, proxy)
     """
     try:
         channel_or_stream = get_stream_object(channel_id)
@@ -95,6 +95,11 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
                 stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
+            # Get proxy from M3U account
+            proxy = m3u_account.proxy
+            if proxy:
+                logger.info(f"Using proxy {proxy} for stream preview: {stream.id}")
+
             # Get stream URL with the selected profile's URL transformation
             stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
 
@@ -116,7 +121,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 
             stream_profile_id = stream_profile.id
 
-            return stream_url, stream_user_agent, transcode, stream_profile_id
+            return stream_url, stream_user_agent, transcode, stream_profile_id, proxy
 
         # Handle channel preview (existing logic)
         channel = channel_or_stream
@@ -148,6 +153,11 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
             stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
             logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
 
+        # Get proxy from M3U account
+        proxy = m3u_account.proxy
+        if proxy:
+            logger.info(f"Using proxy {proxy} for channel preview: {channel_id}")
+
         # Generate stream URL based on the selected profile
         input_url = stream.url
         stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
@@ -161,10 +171,10 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 
         stream_profile_id = stream_profile.id
 
-        return stream_url, stream_user_agent, transcode, stream_profile_id
+        return stream_url, stream_user_agent, transcode, stream_profile_id, proxy
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")
-        return None, None, False, None
+        return None, None, False, None, None
 
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
     """
@@ -293,6 +303,9 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
         # Get the user agent from the M3U account
         user_agent = m3u_account.get_user_agent().user_agent
 
+        # Get proxy from M3U account
+        proxy = m3u_account.proxy
+
         # Generate URL using the transform function directly
         stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern)
 
@@ -304,6 +317,7 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
         return {
             'url': stream_url,
             'user_agent': user_agent,
+            'proxy': proxy,
             'transcode': transcode,
             'stream_profile': profile_value,
             'stream_id': stream_id,
@@ -426,7 +440,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
         return []
 
-def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
+def validate_stream_url(url, user_agent=None, proxy=None, timeout=(5, 5)):
     """
     Validate if a stream URL is accessible without downloading the full content.
 
@@ -436,6 +450,7 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
     Args:
         url (str): The URL to validate
         user_agent (str): User agent to use for the request
+        proxy (str): HTTP proxy URL (e.g., http://proxy:8080)
         timeout (tuple): Connection and read timeout in seconds
 
     Returns:
@@ -455,6 +470,16 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
             'Connection': 'close'  # Don't keep connection alive
         }
         session.headers.update(headers)
+
+        # Configure proxy if provided
+        proxies = {}
+        if proxy and proxy.strip():
+            proxies = {
+                'http': proxy.strip(),
+                'https': proxy.strip()
+            }
+            logger.info(f"Using proxy for stream validation: {proxy}")
+            session.proxies.update(proxies)
 
         # Make HEAD request first as it's faster and doesn't download content
         head_request_success = True
@@ -571,6 +596,9 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
         # Get the user agent from the M3U account
         user_agent = m3u_account.get_user_agent().user_agent
         
+        # Get proxy from M3U account
+        proxy = m3u_account.proxy
+        
         # Generate URL using the specific profile's transformation
         input_url = stream.url
         stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
@@ -583,6 +611,7 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
         return {
             'url': stream_url,
             'user_agent': user_agent,
+            'proxy': proxy,
             'transcode': transcode,
             'stream_profile': profile_value,
             'stream_id': stream_id,

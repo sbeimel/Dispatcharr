@@ -165,7 +165,7 @@ def stream_ts(request, channel_id):
             # Try to get a stream with fixed interval retries
             while should_retry and time.time() - wait_start_time < retry_timeout:
                 attempt += 1
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, transcode, profile_value, proxy = (
                     generate_stream_url(channel_id)
                 )
 
@@ -210,7 +210,7 @@ def stream_ts(request, channel_id):
                 logger.info(
                     f"[{client_id}] Making final attempt {attempt} at timeout boundary"
                 )
-                stream_url, stream_user_agent, transcode, profile_value = (
+                stream_url, stream_user_agent, transcode, profile_value, proxy = (
                     generate_stream_url(channel_id)
                 )
                 if stream_url is not None:
@@ -256,7 +256,7 @@ def stream_ts(request, channel_id):
                 # Try initial URL
                 logger.info(f"[{client_id}] Validating redirect URL: {stream_url}")
                 is_valid, final_url, status_code, message = validate_stream_url(
-                    stream_url, user_agent=stream_user_agent, timeout=(5, 5)
+                    stream_url, user_agent=stream_user_agent, proxy=proxy, timeout=(5, 5)
                 )
 
                 # If first URL doesn't validate, try alternates
@@ -295,6 +295,7 @@ def stream_ts(request, channel_id):
                         is_valid, final_url, status_code, message = validate_stream_url(
                             alt_info["url"],
                             user_agent=alt_info["user_agent"],
+                            proxy=alt_info.get("proxy"),
                             timeout=(5, 5),
                         )
 
@@ -341,6 +342,7 @@ def stream_ts(request, channel_id):
                 profile_value,
                 stream_id,
                 m3u_profile_id,
+                proxy,
             )
 
             if not success:

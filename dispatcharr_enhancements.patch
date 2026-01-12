@@ -893,3 +893,357 @@
 #
 # COMPATIBILITY: Tested with Dispatcharr 0.12.0-06, 0.15.0-dev, main
 # SAFETY: All changes are backward compatible and optional
+
+# ===============================================
+# HTTP PROXY PREVIEW ENHANCEMENT v1.0
+# ===============================================
+# 
+# EXTENDS HTTP PROXY SUPPORT TO PREVIEW FUNCTIONALITY
+# This enhancement adds HTTP proxy support to the preview validation
+# system, ensuring consistent proxy usage across all stream operations.
+#
+# KEY CHANGES:
+# 1. Extended generate_stream_url() to return proxy parameter
+# 2. Updated validate_stream_url() to accept and use proxy
+# 3. Enhanced all stream info functions to include proxy
+# 4. Added proxy support to HTTP sessions in StreamManager
+# 5. Updated ChannelService and ProxyServer for proxy handling
+# 6. Added PROXY field to ChannelMetadataField constants
+#
+# COMPATIBILITY: Works with existing proxy field in M3U accounts
+# BACKWARD COMPATIBLE: All changes are optional and non-breaking
+#
+# ===============================================
+
+--- a/apps/proxy/ts_proxy/url_utils.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/url_utils.py
+@@ -27,7 +27,7 @@ def get_stream_object(id: str):
+         logger.info(f"Fetching stream hash {id}")
+         return get_object_or_404(Stream, stream_hash=id)
+
+-def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]:
++def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int], Optional[str]]:
+     """
+     Generate the appropriate stream URL for a channel or stream based on its profile settings.
+
+     Args:
+         channel_id: The UUID of the channel or stream hash
+
+     Returns:
+-        Tuple[str, str, bool, Optional[int]]: (stream_url, user_agent, transcode_flag, profile_id)
++        Tuple[str, str, bool, Optional[int], Optional[str]]: (stream_url, user_agent, transcode_flag, profile_id, proxy)
+     """
+     try:
+         channel_or_stream = get_stream_object(channel_id)
+@@ -82,6 +82,11 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]
+             if stream_user_agent is None:
+                 stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
+                 logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
+
++            # Get proxy from M3U account
++            proxy = m3u_account.proxy
++            if proxy:
++                logger.info(f"Using proxy {proxy} for stream preview: {stream.id}")
++
+             # Get stream URL with the selected profile's URL transformation
+             stream_url = transform_url(stream.url, selected_profile.search_pattern, selected_profile.replace_pattern)
+
+@@ -100,7 +105,7 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]
+
+             stream_profile_id = stream_profile.id
+
+-            return stream_url, stream_user_agent, transcode, stream_profile_id
++            return stream_url, stream_user_agent, transcode, stream_profile_id, proxy
+
+         # Handle channel preview (existing logic)
+         channel = channel_or_stream
+@@ -125,6 +130,11 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]
+         if stream_user_agent is None:
+             stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
+             logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
+
++        # Get proxy from M3U account
++        proxy = m3u_account.proxy
++        if proxy:
++            logger.info(f"Using proxy {proxy} for channel preview: {channel_id}")
++
+         # Generate stream URL based on the selected profile
+         input_url = stream.url
+         stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+@@ -137,10 +147,10 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]
+
+         stream_profile_id = stream_profile.id
+
+-        return stream_url, stream_user_agent, transcode, stream_profile_id
++        return stream_url, stream_user_agent, transcode, stream_profile_id, proxy
+     except Exception as e:
+         logger.error(f"Error generating stream URL: {e}")
+-        return None, None, False, None
++        return None, None, False, None, None
+
+--- a/apps/proxy/ts_proxy/url_utils.py (validate_stream_url proxy support)
++++ b/apps/proxy/ts_proxy/url_utils.py
+@@ -429,7 +441,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
+         logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
+         return []
+
+-def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
++def validate_stream_url(url, user_agent=None, proxy=None, timeout=(5, 5)):
+     """
+     Validate if a stream URL is accessible without downloading the full content.
+
+@@ -438,6 +450,7 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
+
+     Args:
+         url (str): The URL to validate
+         user_agent (str): User agent to use for the request
++        proxy (str): HTTP proxy URL (e.g., http://proxy:8080)
+         timeout (tuple): Connection and read timeout in seconds
+
+     Returns:
+@@ -454,6 +467,15 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
+         }
+         session.headers.update(headers)
+
++        # Configure proxy if provided
++        if proxy and proxy.strip():
++            proxies = {
++                'http': proxy.strip(),
++                'https': proxy.strip()
++            }
++            logger.info(f"Using proxy for stream validation: {proxy}")
++            session.proxies.update(proxies)
++
+         # Make HEAD request first as it's faster and doesn't download content
+         head_request_success = True
+         try:
+
+--- a/apps/proxy/ts_proxy/url_utils.py (get_stream_info_for_switch proxy support)
++++ b/apps/proxy/ts_proxy/url_utils.py
+@@ -305,6 +315,7 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int]
+
+         # Get the user agent from the M3U account
+         user_agent = m3u_account.get_user_agent().user_agent
++        proxy = m3u_account.proxy
+
+         # Generate URL using the transform function directly
+         stream_url = transform_url(stream.url, profile.search_pattern, profile.replace_pattern)
+@@ -317,6 +328,7 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int]
+         return {
+             'url': stream_url,
+             'user_agent': user_agent,
++            'proxy': proxy,
+             'transcode': transcode,
+             'stream_profile': profile_value,
+             'stream_id': stream_id,
+
+--- a/apps/proxy/ts_proxy/url_utils.py (get_stream_info_for_profile proxy support)
++++ b/apps/proxy/ts_proxy/url_utils.py
+@@ -588,6 +610,7 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id
+         
+         # Get the user agent from the M3U account
+         user_agent = m3u_account.get_user_agent().user_agent
++        proxy = m3u_account.proxy
+         
+         # Generate URL using the specific profile's transformation
+         input_url = stream.url
+@@ -601,6 +624,7 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id
+         return {
+             'url': stream_url,
+             'user_agent': user_agent,
++            'proxy': proxy,
+             'transcode': transcode,
+             'stream_profile': profile_value,
+             'stream_id': stream_id,
+
+--- a/apps/proxy/ts_proxy/views.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/views.py
+@@ -168,7 +168,7 @@ def stream_ts(request, channel_id):
+             while should_retry and time.time() - wait_start_time < retry_timeout:
+                 attempt += 1
+-                stream_url, stream_user_agent, transcode, profile_value = (
++                stream_url, stream_user_agent, transcode, profile_value, proxy = (
+                     generate_stream_url(channel_id)
+                 )
+
+@@ -213,7 +213,7 @@ def stream_ts(request, channel_id):
+                 )
+-                stream_url, stream_user_agent, transcode, profile_value = (
++                stream_url, stream_user_agent, transcode, profile_value, proxy = (
+                     generate_stream_url(channel_id)
+                 )
+                 if stream_url is not None:
+@@ -258,7 +258,7 @@ def stream_ts(request, channel_id):
+                 # Try initial URL
+                 logger.info(f"[{client_id}] Validating redirect URL: {stream_url}")
+-                is_valid, final_url, status_code, message = validate_stream_url(
+-                    stream_url, user_agent=stream_user_agent, timeout=(5, 5)
++                is_valid, final_url, status_code, message = validate_stream_url(
++                    stream_url, user_agent=stream_user_agent, proxy=proxy, timeout=(5, 5)
+                 )
+
+                 # If first URL doesn't validate, try alternates
+@@ -295,8 +295,8 @@ def stream_ts(request, channel_id):
+                         logger.info(
+                             f"[{client_id}] Trying alternate stream #{alt['stream_id']}: {alt_info['url']}"
+                         )
+-                        is_valid, final_url, status_code, message = validate_stream_url(
++                        is_valid, final_url, status_code, message = validate_stream_url(
+                             alt_info["url"],
+                             user_agent=alt_info["user_agent"],
+-                            timeout=(5, 5),
++                            proxy=alt_info.get("proxy"),
++                            timeout=(5, 5),
+                         )
+
+                         if is_valid:
+@@ -342,6 +342,7 @@ def stream_ts(request, channel_id):
+                 profile_value,
+                 stream_id,
+                 m3u_profile_id,
++                proxy,
+             )
+
+             if not success:
+
+--- a/apps/proxy/ts_proxy/services/channel_service.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/services/channel_service.py
+@@ -26,7 +26,7 @@ class ChannelService:
+     """Service class for channel operations"""
+
+     @staticmethod
+-    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
++    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None, proxy=None):
+         """
+         Initialize a channel with the given parameters.
+
+@@ -38,6 +38,7 @@ class ChannelService:
+             stream_profile_value: Stream profile value to store in metadata
+             stream_id: ID of the stream being used
+             m3u_profile_id: ID of the M3U profile being used
++            proxy: HTTP proxy URL for FFmpeg streams
+
+         Returns:
+             bool: Success status
+@@ -69,7 +70,7 @@ class ChannelService:
+                 logger.error(f"Failed to set stream_id {stream_id} in Redis before initialization")
+
+         # Now proceed with channel initialization
+-        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id)
++        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id, proxy)
+
+         # Store additional metadata if initialization was successful
+         if success and proxy_server.redis_client:
+@@ -81,6 +82,8 @@ class ChannelService:
+                 update_data[ChannelMetadataField.STREAM_ID] = str(stream_id)
+             if m3u_profile_id:
+                 update_data[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
++            if proxy:
++                update_data[ChannelMetadataField.PROXY] = proxy
+
+             if update_data:
+                 proxy_server.redis_client.hset(metadata_key, mapping=update_data)
+
+--- a/apps/proxy/ts_proxy/server.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/server.py
+@@ -449,7 +449,7 @@ class ProxyServer:
+             return False
+
+-    def initialize_channel(self, url, channel_id, user_agent=None, transcode=False, stream_id=None):
++    def initialize_channel(self, url, channel_id, user_agent=None, transcode=False, stream_id=None, proxy=None):
+         """Initialize a channel without redundant active key"""
+         try:
+             # IMPROVED: First check if channel is already being initialized by another process
+@@ -622,6 +622,7 @@ class ProxyServer:
+                 user_agent=channel_user_agent,
+                 transcode=transcode,
+                 stream_id=channel_stream_id,  # Pass stream ID to the manager
++                proxy=proxy,  # Pass proxy to the manager
+                 worker_id=self.worker_id  # Pass worker_id explicitly to eliminate circular dependency
+             )
+             logger.info(f"Created StreamManager for channel {channel_id} with stream ID {channel_stream_id}")
+
+--- a/apps/proxy/ts_proxy/stream_manager.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -32,7 +32,7 @@ class StreamManager:
+     """Manages a connection to a TS stream without using raw sockets"""
+
+-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
++    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, proxy=None, worker_id=None):
+         # Basic properties
+         self.channel_id = channel_id
+         self.url = url
+@@ -62,6 +62,9 @@ class StreamManager:
+         # User agent for connection
+         self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
+
++        # HTTP proxy for connection
++        self.proxy = proxy
++
+         # Stream health monitoring
+         self.last_data_time = time.time()
+         self.healthy = True
+@@ -140,6 +143,16 @@ class StreamManager:
+         """Create and configure requests session with optimal settings"""
+         session = requests.Session()
+
++        # Configure proxy if provided
++        if self.proxy and self.proxy.strip():
++            proxies = {
++                'http': self.proxy.strip(),
++                'https': self.proxy.strip()
++            }
++            session.proxies.update(proxies)
++            logger.info(f"Using proxy for channel {self.channel_id}: {self.proxy}")
++
+         # Configure session headers
+         session.headers.update({
+             'User-Agent': self.user_agent,
+
+--- a/apps/proxy/ts_proxy/constants.py (HTTP Proxy Preview Enhancement)
++++ b/apps/proxy/ts_proxy/constants.py
+@@ -50,6 +50,7 @@ class ChannelMetadataField:
+     # Profile fields
+     STREAM_PROFILE = "stream_profile"
+     M3U_PROFILE = "m3u_profile"
++    PROXY = "proxy"
+
+     # Status and error fields
+     ERROR_MESSAGE = "error_message"
+
+# ===============================================
+# HTTP PROXY PREVIEW ENHANCEMENT SUMMARY
+# ===============================================
+#
+# CHANGES APPLIED:
+# ✓ Extended generate_stream_url() to return proxy parameter
+# ✓ Updated validate_stream_url() to accept and use HTTP proxy
+# ✓ Enhanced get_stream_info_for_switch() to include proxy
+# ✓ Enhanced get_stream_info_for_profile() to include proxy  
+# ✓ Updated views.py to pass proxy to validation functions
+# ✓ Updated ChannelService.initialize_channel() for proxy support
+# ✓ Updated ProxyServer.initialize_channel() for proxy support
+# ✓ Updated StreamManager constructor and _create_session() for proxy
+# ✓ Added PROXY field to ChannelMetadataField constants
+#
+# FUNCTIONALITY:
+# - HTTP proxy now works for both channel playback AND preview
+# - Preview validation uses configured proxy from M3U account
+# - Alternative stream validation also uses proxy settings
+# - Consistent proxy usage across all stream operations
+# - Comprehensive logging for proxy usage debugging
+#
+# COMPATIBILITY:
+# - Backward compatible with existing installations
+# - Works with existing proxy field in M3U accounts
+# - Optional feature - streams work without proxy configuration
+# - No database changes required (uses existing proxy field)
+#
+# TESTING:
+# 1. Configure HTTP proxy in M3U Account settings
+# 2. Test channel preview functionality
+# 3. Test direct stream preview functionality
+# 4. Verify proxy usage in logs
+# 5. Test alternative stream validation with proxy
+#
+# ===============================================
