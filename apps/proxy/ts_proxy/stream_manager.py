@@ -144,14 +144,23 @@ class StreamManager:
 
         # QUICK FIX: Auto-detect and use proxy from M3U account for HTTP sessions
         try:
+            logger.debug(f"Checking proxy for channel {self.channel_id}, current_stream_id: {getattr(self, 'current_stream_id', 'None')}")
             if hasattr(self, 'current_stream_id') and self.current_stream_id:
                 from apps.channels.models import Stream
                 stream = Stream.objects.get(id=self.current_stream_id)
+                logger.debug(f"Found stream {stream.id} ({stream.name}), M3U account: {stream.m3u_account.name if stream.m3u_account else 'None'}")
                 if hasattr(stream, 'm3u_account') and stream.m3u_account and stream.m3u_account.proxy:
                     proxy = stream.m3u_account.proxy.strip()
+                    logger.debug(f"M3U account proxy field: {repr(proxy)}")
                     if proxy:
                         session.proxies = {'http': proxy, 'https': proxy}
                         logger.info(f"Using proxy for channel {self.channel_id}: {proxy}")
+                    else:
+                        logger.debug(f"Proxy field is empty for channel {self.channel_id}")
+                else:
+                    logger.debug(f"No proxy configured for M3U account of channel {self.channel_id}")
+            else:
+                logger.debug(f"No current_stream_id for channel {self.channel_id}")
         except Exception as e:
             logger.debug(f"Could not auto-detect proxy for channel {self.channel_id}: {e}")
             # Continue without proxy - not critical
