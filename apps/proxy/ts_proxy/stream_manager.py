@@ -29,7 +29,7 @@ logger = get_logger()
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, proxy=None, worker_id=None):
+    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
         # Basic properties
         self.channel_id = channel_id
         self.url = url
@@ -57,9 +57,6 @@ class StreamManager:
 
         # User agent for connection
         self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
-
-        # HTTP proxy for connection
-        self.proxy = proxy
 
         # Stream health monitoring
         self.last_data_time = time.time()
@@ -144,15 +141,6 @@ class StreamManager:
             'User-Agent': self.user_agent,
             'Connection': 'keep-alive'
         })
-
-        # Configure proxy if provided
-        if self.proxy and self.proxy.strip():
-            proxies = {
-                'http': self.proxy.strip(),
-                'https': self.proxy.strip()
-            }
-            session.proxies.update(proxies)
-            logger.info(f"Using proxy for channel {self.channel_id}: {self.proxy}")
 
         # Set up connection pooling for better performance
         adapter = requests.adapters.HTTPAdapter(

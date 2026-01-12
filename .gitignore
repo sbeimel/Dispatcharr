@@ -19,14 +19,3 @@ debugpy*
 uwsgi.sock
 package-lock.json
 models
-apply_dispatcharr_enhancements.sh
-apps/proxy/ts_proxy/constants.py
-apps/proxy/ts_proxy/server.py
-apps/proxy/ts_proxy/services/channel_service.py
-apps/proxy/ts_proxy/stream_manager.py
-apps/proxy/ts_proxy/url_utils.py
-apps/proxy/ts_proxy/views.py
-dispatcharr_enhancements.patch
-dispatcharr_proxy_preview_enhancement.patch
-docs/HTTP_PROXY_SUPPORT.md
-PROXY_PREVIEW_ENHANCEMENT_SUMMARY.md
