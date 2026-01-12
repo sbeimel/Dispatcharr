@@ -30,11 +30,12 @@ except Exception as e:
     # Continue without proxy - not critical
 ```
 
-## 📁 Erstellte Dateien
+## 📁 Aktualisierte Dateien
 
-- **`proxy_preview_quickfix.patch`** - Minimaler Patch (nur 20 Zeilen)
-- **`apply_proxy_preview_quickfix.sh`** - Einfaches Installationsskript
-- **Aktualisierte Dokumentation** - Fokus auf die einfache Lösung
+- **`dispatcharr_enhancements.patch`** - Erweitert um HTTP Proxy Preview Quick Fix
+- **`apply_dispatcharr_enhancements.sh`** - Neue Funktion `apply_proxy_preview_quickfix()` hinzugefügt
+- **`docs/HTTP_PROXY_SUPPORT.md`** - Aktualisiert für Quick-Fix-Ansatz
+- **`apps/proxy/ts_proxy/url_utils.py`** - ~15 Zeilen Code in `validate_stream_url()` hinzugefügt
 
 ## 🎯 Wie es funktioniert
 
@@ -59,12 +60,12 @@ except Exception as e:
 
 ### Automatisch
 ```bash
-./apply_proxy_preview_quickfix.sh
+./apply_dispatcharr_enhancements.sh
 ```
 
 ### Manuell
 ```bash
-patch -p1 < proxy_preview_quickfix.patch
+patch -p1 < dispatcharr_enhancements.patch
 ```
 
 ## ✨ Warum das ausreicht
