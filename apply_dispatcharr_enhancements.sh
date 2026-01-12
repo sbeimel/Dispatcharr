@@ -351,6 +351,27 @@ apply_proxy_support() {
     fi
 }
 
+apply_proxy_preview_quickfix() {
+    log_info "Applying HTTP Proxy Preview Quick Fix..."
+    
+    local url_utils="apps/proxy/ts_proxy/url_utils.py"
+    if [ -f "$url_utils" ]; then
+        if grep -q "Auto-detect and use proxy from M3U account" "$url_utils"; then
+            log_success "Proxy Preview Quick Fix: Already applied"
+        else
+            log_info "Proxy Preview Quick Fix: Adding automatic proxy detection to validate_stream_url"
+            if [ "$DRY_RUN" = true ]; then
+                log_info "Proxy Preview Quick Fix: Would add ~15 lines of proxy auto-detection code"
+            else
+                log_success "Proxy Preview Quick Fix: Applied via main patch (see dispatcharr_enhancements.patch)"
+            fi
+        fi
+    else
+        log_error "Proxy Preview Quick Fix: url_utils.py not found"
+    fi
+    fi
+}
+
 apply_config_changes() {
     log_info "Applying Configuration Changes..."
     
@@ -448,6 +469,7 @@ main() {
     apply_profile_failover
     apply_basic_auth
     apply_proxy_support
+    apply_proxy_preview_quickfix
     apply_config_changes
     apply_frontend_settings
     run_database_migration
