@@ -1,0 +1,88 @@
+--- a/apps/proxy/ts_proxy/views.py
++++ b/apps/proxy/ts_proxy/views.py
+@@ -60,6 +60,15 @@ def stream_ts(request, channel_id):
+         client_ip = get_client_ip(request)
+         logger.info(f"[{client_id}] Requested stream for channel {channel_id}")
+
++        # QUICK FIX: Detect if this is a preview/API call
++        is_preview_call = False
++        if client_user_agent:
++            ua_lower = client_user_agent.lower()
++            # If it's NOT a known media player, treat as preview/API call
++            media_players = ['vlc', 'mpv', 'kodi', 'plex', 'jellyfin', 'emby']
++            if not any(player in ua_lower for player in media_players):
++                is_preview_call = True
++                logger.info(f"[{client_id}] Detected preview/API call: {client_user_agent}")
++
+         # Extract client user agent early
+         for header in ["HTTP_USER_AGENT", "User-Agent", "user-agent"]:
+             if header in request.META:
+
+--- a/apps/proxy/ts_proxy/stream_manager.py
++++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -33,7 +33,7 @@ class StreamManager:
+     """Manages a connection to a TS stream without using raw sockets"""
+
+-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
++    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None, is_preview_call=False):
+         # Basic properties
+         self.channel_id = channel_id
+         self.url = url
+@@ -50,6 +50,7 @@ class StreamManager:
+         self.buffering_start_time = None
+         # Store worker_id for ownership checks
+         self.worker_id = worker_id
++        self.is_preview_call = is_preview_call
+
+         # Sockets used for transcode jobs
+         self.socket = None
+
+@@ -495,7 +496,8 @@ class StreamManager:
+             else:
+                 stream_profile = channel.get_stream_profile()
+
+-            # Get proxy from M3U account if available
++            # Get proxy from M3U account if available - ONLY for preview/API calls
+             proxy = None
++            if self.is_preview_call:
+             try:
+                 # Get the channel to find the M3U account
+                 from apps.channels.models import Channel
+@@ -507,9 +509,12 @@ class StreamManager:
+                     if hasattr(stream, 'm3u_account') and stream.m3u_account:
+                         proxy = stream.m3u_account.proxy
+                         if proxy:
+-                            logger.info(f"Using proxy {proxy} for channel {self.channel_id}")
++                            logger.info(f"Using proxy {proxy} for preview/API call on channel {self.channel_id}")
+             except Exception as e:
+-                logger.debug(f"Could not get proxy for channel {self.channel_id}: {e}")
++                logger.debug(f"Could not get proxy for preview call on channel {self.channel_id}: {e}")
++            else:
++                logger.debug(f"Normal playback - no proxy used for channel {self.channel_id}")
+
+             # Build and start transcode command
+             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
+
+--- a/apps/proxy/ts_proxy/server.py
++++ b/apps/proxy/ts_proxy/server.py
+@@ -449,7 +449,7 @@ class ProxyServer:
+             return False
+
+-    def initialize_channel(self, url, channel_id, user_agent=None, transcode=False, stream_id=None):
++    def initialize_channel(self, url, channel_id, user_agent=None, transcode=False, stream_id=None, is_preview_call=False):
+         """Initialize a channel without redundant active key"""
+         try:
+             # IMPROVED: First check if channel is already being initialized by another process
+@@ -613,7 +613,8 @@ class ProxyServer:
+             # Only the owner worker creates the actual stream manager
+             stream_manager = StreamManager(
+                 channel_id,
+                 channel_url,
+                 buffer,
+                 user_agent=channel_user_agent,
+                 transcode=transcode,
+                 stream_id=channel_stream_id,  # Pass stream ID to the manager
+-                worker_id=self.worker_id  # Pass worker_id explicitly to eliminate circular dependency
++                worker_id=self.worker_id,  # Pass worker_id explicitly to eliminate circular dependency
++                is_preview_call=is_preview_call  # Pass preview flag for proxy usage
+             )
