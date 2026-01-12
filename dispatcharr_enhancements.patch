@@ -969,3 +969,27 @@
 #
 # This covers 90% of use cases with minimal complexity!
 # ===============================================
+--- a/apps/proxy/ts_proxy/stream_manager.py (HTTP Proxy for Stream Sessions)
++++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -143,6 +143,19 @@ class StreamManager:
+         session.headers.update({
+             'User-Agent': self.user_agent,
+             'Connection': 'keep-alive'
+         })
+
++        # QUICK FIX: Auto-detect and use proxy from M3U account for HTTP sessions
++        try:
++            if hasattr(self, 'current_stream_id') and self.current_stream_id:
++                from apps.channels.models import Stream
++                stream = Stream.objects.get(id=self.current_stream_id)
++                if hasattr(stream, 'm3u_account') and stream.m3u_account and stream.m3u_account.proxy:
++                    proxy = stream.m3u_account.proxy.strip()
++                    if proxy:
++                        session.proxies = {'http': proxy, 'https': proxy}
++                        logger.info(f"Using proxy for channel {self.channel_id}: {proxy}")
++        except Exception as e:
++            logger.debug(f"Could not auto-detect proxy for channel {self.channel_id}: {e}")
++            # Continue without proxy - not critical
++
+         # Set up connection pooling for better performance
+         adapter = requests.adapters.HTTPAdapter(
