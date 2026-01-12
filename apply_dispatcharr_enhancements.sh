@@ -354,21 +354,38 @@ apply_proxy_support() {
 apply_proxy_preview_quickfix() {
     log_info "Applying HTTP Proxy Preview Quick Fix..."
     
-    local url_utils="apps/proxy/ts_proxy/url_utils.py"
-    if [ -f "$url_utils" ]; then
-        if grep -q "Auto-detect and use proxy from M3U account" "$url_utils"; then
+    # Check if StreamManager has is_preview_call parameter
+    local stream_manager="apps/proxy/ts_proxy/stream_manager.py"
+    if [ -f "$stream_manager" ]; then
+        if grep -q "is_preview_call" "$stream_manager"; then
             log_success "Proxy Preview Quick Fix: Already applied"
         else
-            log_info "Proxy Preview Quick Fix: Adding automatic proxy detection to validate_stream_url"
+            log_info "Proxy Preview Quick Fix: Adding preview call detection for proxy usage"
             if [ "$DRY_RUN" = true ]; then
-                log_info "Proxy Preview Quick Fix: Would add ~15 lines of proxy auto-detection code"
+                log_info "Proxy Preview Quick Fix: Would add preview call detection and proxy logic"
             else
                 log_success "Proxy Preview Quick Fix: Applied via main patch (see dispatcharr_enhancements.patch)"
             fi
         fi
     else
-        log_error "Proxy Preview Quick Fix: url_utils.py not found"
+        log_error "Proxy Preview Quick Fix: stream_manager.py not found"
     fi
+    
+    # Check if views.py has preview detection logic
+    local views_file="apps/proxy/ts_proxy/views.py"
+    if [ -f "$views_file" ]; then
+        if grep -q "media_player_agents" "$views_file"; then
+            log_success "Proxy Preview Quick Fix: Preview detection already applied"
+        else
+            log_info "Proxy Preview Quick Fix: Adding user agent based preview detection"
+            if [ "$DRY_RUN" = true ]; then
+                log_info "Proxy Preview Quick Fix: Would add user agent detection for preview calls"
+            else
+                log_success "Proxy Preview Quick Fix: Preview detection applied via main patch"
+            fi
+        fi
+    else
+        log_error "Proxy Preview Quick Fix: views.py not found"
     fi
 }
 

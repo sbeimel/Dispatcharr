@@ -23,7 +23,7 @@ class ChannelService:
     """Service class for channel operations"""
 
     @staticmethod
-    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None):
+    def initialize_channel(channel_id, stream_url, user_agent, transcode=False, stream_profile_value=None, stream_id=None, m3u_profile_id=None, is_preview_call=False):
         """
         Initialize a channel with the given parameters.
 
@@ -66,7 +66,7 @@ class ChannelService:
                 logger.error(f"Failed to set stream_id {stream_id} in Redis before initialization")
 
         # Now proceed with channel initialization
-        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id)
+        success = proxy_server.initialize_channel(stream_url, channel_id, user_agent, transcode, stream_id, is_preview_call)
 
         # Store additional metadata if initialization was successful
         if success and proxy_server.redis_client:

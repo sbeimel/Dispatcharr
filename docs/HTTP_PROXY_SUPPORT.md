@@ -1,53 +1,64 @@
-# HTTP Proxy Support in Dispatcharr - Quick Fix
+# HTTP Proxy Support for Preview Functionality - Quick Fix Implementation
 
 ## Overview
 
-This is a **simple 5-minute solution** to add HTTP proxy support to the preview functionality in Dispatcharr. Instead of complex changes across multiple files, this quick fix adds just ~15 lines of code to automatically detect and use proxy settings from M3U accounts.
+This is a **completed quick fix solution** that adds HTTP proxy support specifically for preview functionality in Dispatcharr. The implementation uses a smart detection system to distinguish between preview/API calls and normal media player streaming, ensuring proxy is only used when appropriate.
 
 ## What It Does
 
-- **Automatically detects** proxy settings from M3U accounts during preview validation
-- **Uses existing infrastructure** - no new database fields or complex changes needed
+- **Automatically detects preview/API calls** vs normal media player streaming
+- **Uses proxy ONLY for preview calls** - normal playback remains unaffected
+- **Integrates with existing M3U account proxy settings** - no new configuration needed
+- **Works with both HTTP sessions and FFmpeg transcoding** for complete coverage
 - **Fails gracefully** - if proxy detection fails, preview works normally without proxy
-- **Minimal code change** - only modifies the `validate_stream_url()` function
 
 ## How It Works
 
-When validating a stream URL for preview:
+### Preview Call Detection
+The system detects preview calls by analyzing the user agent:
 
-1. **Parse the stream URL** to extract the hostname
-2. **Find matching streams** in the database by hostname
-3. **Check if the stream has an M3U account** with proxy configured
-4. **Apply the proxy** to the HTTP session for validation
-5. **Continue normally** if no proxy found or if detection fails
+1. **Media Player Detection**: Identifies common media players (VLC, MPV, Kodi, etc.)
+2. **Browser/API Detection**: Identifies browsers and API clients (Chrome, Firefox, curl, etc.)
+3. **Empty User Agent**: Treats missing user agents as API calls
+
+### Proxy Application
+When a preview call is detected:
+
+1. **HTTP Sessions**: Proxy is applied to requests sessions for URL validation
+2. **FFmpeg Transcoding**: Proxy is passed via `-http_proxy` parameter to FFmpeg
+3. **M3U Account Integration**: Automatically retrieves proxy from the stream's M3U account
+
+### Normal Playback Protection
+- Media players (VLC, Kodi, etc.) stream normally **without proxy**
+- Only preview/API calls use the proxy configuration
+- Ensures compatibility with existing streaming setups
 
 ## Installation
 
-### Quick Install
+### Automatic Install
 ```bash
-./apply_proxy_preview_quickfix.sh
+./apply_dispatcharr_enhancements.sh
 ```
 
 ### Manual Install
 ```bash
-patch -p1 < proxy_preview_quickfix.patch
+patch -p1 < dispatcharr_enhancements.patch
 ```
 
-### Manual Code Change
-Add this code to `apps/proxy/ts_proxy/url_utils.py` in the `validate_stream_url()` function, right after `session.headers.update(headers)`:
+## Technical Implementation
 
-```python
-# QUICK FIX: Auto-detect and use proxy from M3U account
-try:
-    from apps.channels.models import Stream
-    from urllib.parse import urlparse
-    
-    # Try to find stream by URL and get proxy from M3U account
-    parsed_url = urlparse(url)
-    if parsed_url.netloc:
-        streams = Stream.objects.filter(url__icontains=parsed_url.netloc)
-        if streams.exists():
-            stream = streams.first()
+### Files Modified
+- `apps/proxy/ts_proxy/stream_manager.py` - Added `is_preview_call` parameter and proxy logic
+- `apps/proxy/ts_proxy/server.py` - Updated to pass preview flag to StreamManager
+- `apps/proxy/ts_proxy/services/channel_service.py` - Added preview parameter support
+- `apps/proxy/ts_proxy/views.py` - Added user agent based preview detection
+- `apps/m3u/serializers.py` - Exposed proxy field in API
+
+### Key Features
+1. **Preview Detection Logic**: Smart user agent analysis
+2. **Conditional Proxy Usage**: Only applies proxy for preview/API calls
+3. **FFmpeg Integration**: Passes proxy to transcoding processes
+4. **HTTP Session Support**: Applies proxy to validation requests
             if hasattr(stream, 'm3u_account') and stream.m3u_account and stream.m3u_account.proxy:
                 proxy = stream.m3u_account.proxy.strip()
                 if proxy:

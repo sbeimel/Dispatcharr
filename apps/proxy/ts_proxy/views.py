@@ -332,6 +332,35 @@ def stream_ts(request, channel_id):
                         {"error": "All available streams failed validation"}, status=502
                     )  # 502 Bad Gateway
 
+            # Detect if this is a preview/API call vs normal playback
+            # Preview calls are typically direct API calls to the stream endpoint
+            # We can detect this by checking the request path or user agent patterns
+            is_preview_call = False
+            
+            # Check if this is a direct API call (not from a media player)
+            user_agent_lower = (client_user_agent or '').lower()
+            
+            # Common media player user agents that indicate normal playback
+            media_player_agents = [
+                'vlc', 'mpv', 'ffmpeg', 'gstreamer', 'kodi', 'plex', 
+                'jellyfin', 'emby', 'mpc-hc', 'potplayer', 'windows media player'
+            ]
+            
+            # Check if it's NOT a media player (likely a preview/API call)
+            if not any(agent in user_agent_lower for agent in media_player_agents):
+                # Additional checks for common browsers/API clients that indicate preview
+                browser_api_agents = [
+                    'mozilla', 'chrome', 'safari', 'edge', 'firefox', 'opera',
+                    'curl', 'wget', 'python', 'requests', 'postman', 'insomnia'
+                ]
+                if any(agent in user_agent_lower for agent in browser_api_agents):
+                    is_preview_call = True
+                    logger.info(f"[{client_id}] Detected preview/API call from user agent: {client_user_agent}")
+                elif not user_agent_lower.strip():
+                    # Empty or missing user agent often indicates API calls
+                    is_preview_call = True
+                    logger.info(f"[{client_id}] Detected preview/API call (empty user agent)")
+
             # Initialize channel with the stream's user agent (not the client's)
             success = ChannelService.initialize_channel(
                 channel_id,
@@ -341,6 +370,7 @@ def stream_ts(request, channel_id):
                 profile_value,
                 stream_id,
                 m3u_profile_id,
+                is_preview_call,
             )
 
             if not success:
@@ -471,9 +501,30 @@ def stream_ts(request, channel_id):
                         f"No profile found in Redis for channel {channel_id}, defaulting to transcode={use_transcode}"
                     )
 
+            # Detect if this is a preview/API call (same logic as above)
+            is_preview_call = False
+            user_agent_lower = (client_user_agent or '').lower()
+            
+            media_player_agents = [
+                'vlc', 'mpv', 'ffmpeg', 'gstreamer', 'kodi', 'plex', 
+                'jellyfin', 'emby', 'mpc-hc', 'potplayer', 'windows media player'
+            ]
+            
+            if not any(agent in user_agent_lower for agent in media_player_agents):
+                browser_api_agents = [
+                    'mozilla', 'chrome', 'safari', 'edge', 'firefox', 'opera',
+                    'curl', 'wget', 'python', 'requests', 'postman', 'insomnia'
+                ]
+                if any(agent in user_agent_lower for agent in browser_api_agents):
+                    is_preview_call = True
+                    logger.info(f"[{client_id}] Detected preview/API call from user agent: {client_user_agent}")
+                elif not user_agent_lower.strip():
+                    is_preview_call = True
+                    logger.info(f"[{client_id}] Detected preview/API call (empty user agent)")
+
             # Use client_user_agent as fallback if stream_user_agent is None
             success = proxy_server.initialize_channel(
-                url, channel_id, stream_user_agent or client_user_agent, use_transcode
+                url, channel_id, stream_user_agent or client_user_agent, use_transcode, None, is_preview_call
             )
             if not success:
                 logger.error(

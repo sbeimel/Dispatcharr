@@ -29,7 +29,7 @@ logger = get_logger()
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
+    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None, is_preview_call=False):
         # Basic properties
         self.channel_id = channel_id
         self.url = url
@@ -49,6 +49,9 @@ class StreamManager:
         self.buffering_start_time = None
         # Store worker_id for ownership checks
         self.worker_id = worker_id
+        
+        # Store preview call flag for proxy usage
+        self.is_preview_call = is_preview_call
 
         # Sockets used for transcode jobs
         self.socket = None
@@ -142,25 +145,30 @@ class StreamManager:
             'Connection': 'keep-alive'
         })
 
-        # QUICK FIX: Auto-detect and use proxy from M3U account for HTTP sessions
+        # QUICK FIX: Auto-detect and use proxy from M3U account for HTTP sessions - ONLY for preview/API calls
         try:
-            logger.debug(f"Checking proxy for channel {self.channel_id}, current_stream_id: {getattr(self, 'current_stream_id', 'None')}")
-            if hasattr(self, 'current_stream_id') and self.current_stream_id:
-                from apps.channels.models import Stream
-                stream = Stream.objects.get(id=self.current_stream_id)
-                logger.debug(f"Found stream {stream.id} ({stream.name}), M3U account: {stream.m3u_account.name if stream.m3u_account else 'None'}")
-                if hasattr(stream, 'm3u_account') and stream.m3u_account and stream.m3u_account.proxy:
-                    proxy = stream.m3u_account.proxy.strip()
-                    logger.debug(f"M3U account proxy field: {repr(proxy)}")
-                    if proxy:
-                        session.proxies = {'http': proxy, 'https': proxy}
-                        logger.info(f"Using proxy for channel {self.channel_id}: {proxy}")
+            logger.debug(f"Checking proxy for channel {self.channel_id}, current_stream_id: {getattr(self, 'current_stream_id', 'None')}, is_preview_call: {getattr(self, 'is_preview_call', False)}")
+            
+            # Only use proxy for preview/API calls, not normal playback
+            if getattr(self, 'is_preview_call', False):
+                if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                    from apps.channels.models import Stream
+                    stream = Stream.objects.get(id=self.current_stream_id)
+                    logger.debug(f"Found stream {stream.id} ({stream.name}), M3U account: {stream.m3u_account.name if stream.m3u_account else 'None'}")
+                    if hasattr(stream, 'm3u_account') and stream.m3u_account and stream.m3u_account.proxy:
+                        proxy = stream.m3u_account.proxy.strip()
+                        logger.debug(f"M3U account proxy field: {repr(proxy)}")
+                        if proxy:
+                            session.proxies = {'http': proxy, 'https': proxy}
+                            logger.info(f"Using proxy for preview/API call on channel {self.channel_id}: {proxy}")
+                        else:
+                            logger.debug(f"Proxy field is empty for channel {self.channel_id}")
                     else:
-                        logger.debug(f"Proxy field is empty for channel {self.channel_id}")
+                        logger.debug(f"No proxy configured for M3U account of channel {self.channel_id}")
                 else:
-                    logger.debug(f"No proxy configured for M3U account of channel {self.channel_id}")
+                    logger.debug(f"No current_stream_id for channel {self.channel_id}")
             else:
-                logger.debug(f"No current_stream_id for channel {self.channel_id}")
+                logger.debug(f"Normal playback - no proxy used for channel {self.channel_id}")
         except Exception as e:
             logger.debug(f"Could not auto-detect proxy for channel {self.channel_id}: {e}")
             # Continue without proxy - not critical
@@ -509,23 +517,30 @@ class StreamManager:
             else:
                 stream_profile = channel.get_stream_profile()
 
-            # Get proxy from M3U account if available
+            # Get proxy from M3U account if available - ONLY for preview/API calls
             proxy = None
-            try:
-                # Get the channel to find the M3U account
-                from apps.channels.models import Channel
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
-                
-                # Get current stream and its M3U account
-                if hasattr(self, 'current_stream_id') and self.current_stream_id:
-                    from apps.channels.models import Stream
-                    stream = Stream.objects.get(id=self.current_stream_id)
-                    if hasattr(stream, 'm3u_account') and stream.m3u_account:
-                        proxy = stream.m3u_account.proxy
-                        if proxy:
-                            logger.info(f"Using proxy {proxy} for channel {self.channel_id}")
-            except Exception as e:
-                logger.debug(f"Could not get proxy for channel {self.channel_id}: {e}")
+            # Check if this is a preview/API call (not normal playback)
+            # We can detect this by checking if it's a direct API call or preview
+            is_preview_call = self.is_preview_call
+            
+            if is_preview_call:
+                try:
+                    # Get the channel to find the M3U account
+                    from apps.channels.models import Channel
+                    channel_obj = Channel.objects.get(uuid=self.channel_id)
+                    
+                    # Get current stream and its M3U account
+                    if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                        from apps.channels.models import Stream
+                        stream = Stream.objects.get(id=self.current_stream_id)
+                        if hasattr(stream, 'm3u_account') and stream.m3u_account:
+                            proxy = stream.m3u_account.proxy
+                            if proxy:
+                                logger.info(f"Using proxy {proxy} for preview/API call on channel {self.channel_id}")
+                except Exception as e:
+                    logger.debug(f"Could not get proxy for preview call on channel {self.channel_id}: {e}")
+            else:
+                logger.debug(f"Normal playback - no proxy used for channel {self.channel_id}")
 
             # Build and start transcode command
             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
