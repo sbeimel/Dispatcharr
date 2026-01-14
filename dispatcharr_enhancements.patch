@@ -119,6 +119,46 @@
      def __str__(self):
          return self.name
 
+--- a/core/models.py
++++ b/core/models.py
+@@ -127,7 +127,7 @@ class StreamProfile(models.Model):
+         return False
+ 
+-    def build_command(self, stream_url, user_agent):
++    def build_command(self, stream_url, user_agent, proxy=None):
+         if self.is_proxy():
+             return []
+ 
+         replacements = {
+             "{streamUrl}": stream_url,
+             "{userAgent}": user_agent,
+         }
++        
++        # Add proxy to replacements if provided
++        if proxy:
++            replacements["{proxy}"] = proxy
+ 
+         # Split the command and iterate through each part to apply replacements
+         cmd = [self.command] + [
+             self._replace_in_part(part, replacements)
+             for part in shlex_split(self.parameters) # use shlex to handle quoted strings
+         ]
++        
++        # Add proxy parameters to ffmpeg if proxy is provided and not already in parameters
++        if proxy and self.command == "ffmpeg" and "-http_proxy" not in self.parameters:
++            # Insert proxy parameter after ffmpeg command but before input
++            # Find the position of -i (input) parameter
++            try:
++                i_index = cmd.index("-i")
++                # Insert proxy parameters before -i
++                cmd.insert(i_index, proxy)
++                cmd.insert(i_index, "-http_proxy")
++            except ValueError:
++                # If -i not found, append at the end (before input URL)
++                cmd.extend(["-http_proxy", proxy])
+ 
+         return cmd
+
 --- a/apps/m3u/serializers.py
 +++ b/apps/m3u/serializers.py
 @@ -169,6 +169,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
