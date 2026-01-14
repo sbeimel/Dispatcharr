@@ -102,6 +102,23 @@
      def CHANNEL_INIT_GRACE_PERIOD(self):
          return self.get_channel_init_grace_period()
 
+--- a/apps/m3u/models.py
++++ b/apps/m3u/models.py
+@@ -99,6 +99,12 @@ class M3UAccount(models.Model):
+     priority = models.PositiveIntegerField(
+         default=0,
+         help_text="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content.",
+     )
++    proxy = models.CharField(
++        max_length=500,
++        blank=True,
++        null=True,
++        help_text="HTTP proxy URL for FFmpeg streams (e.g., http://proxy:8080)",
++    )
+ 
+     def __str__(self):
+         return self.name
+
 --- a/apps/m3u/serializers.py
 +++ b/apps/m3u/serializers.py
 @@ -169,6 +169,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
@@ -749,9 +766,14 @@
 +        return TSConfig.get_failover_grace_period()
 
 # ===============================================
-# DISPATCHARR ENHANCEMENTS PATCH v2.0
+# DISPATCHARR ENHANCEMENTS PATCH v2.1
 # ===============================================
 # 
+# CHANGELOG v2.1:
+# - Added proxy field to M3UAccount model (apps/m3u/models.py)
+# - This was missing in v2.0 and caused migration issues
+# - Fixed: Model field is now included in the patch
+#
 # INTELLIGENT AUTO-APPLICATION SYSTEM
 # This patch uses pattern matching to automatically find and modify
 # the correct locations in any Dispatcharr version.

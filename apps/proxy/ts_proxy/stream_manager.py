@@ -110,9 +110,6 @@ class StreamManager:
             else:
                 logger.warning(f"Unable to get stream ID for channel {channel_id}. "
                              f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
-            else:
-                logger.warning(f"Unable to get stream ID for channel {channel_id}. "
-                             f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
 
         logger.info(f"Initialized stream manager for channel {buffer.channel_id}")
 
