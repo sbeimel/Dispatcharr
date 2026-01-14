@@ -123,37 +123,6 @@ class TSConfig(BaseConfig):
     GHOST_CLIENT_MULTIPLIER = 6.0  # How many heartbeat intervals before client considered ghost (6 would mean 36 seconds if heartbeat interval is 6)
     CLIENT_WAIT_TIMEOUT = 30  # Seconds to wait for client to connect
 
-    # Database-dependent settings with fallbacks
-    @classmethod
-    def get_channel_shutdown_delay(cls):
-        """Get channel shutdown delay from database or default"""
-        settings = cls.get_proxy_settings()
-        return settings.get("channel_shutdown_delay", 0)
-
-    @classmethod
-    def get_buffering_timeout(cls):
-        """Get buffering timeout from database or default"""
-        settings = cls.get_proxy_settings()
-        return settings.get("buffering_timeout", 15)
-
-    @classmethod
-    def get_buffering_speed(cls):
-        """Get buffering speed threshold from database or default"""
-        settings = cls.get_proxy_settings()
-        return settings.get("buffering_speed", 1.0)
-
-    @classmethod
-    def get_channel_init_grace_period(cls):
-        """Get channel init grace period from database or default"""
-        settings = cls.get_proxy_settings()
-        return settings.get("channel_init_grace_period", 5)
-
-    @classmethod
-    def get_failover_grace_period(cls):
-        """Get failover grace period from database or default"""
-        settings = cls.get_proxy_settings()
-        return settings.get("failover_grace_period", 20)
-
     # Stream health and recovery settings
     MAX_HEALTH_RECOVERY_ATTEMPTS = 2     # Maximum times to attempt recovery for a single stream
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
@@ -205,9 +174,53 @@ class TSConfig(BaseConfig):
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
 
+
+
+
+    # Database-dependent settings with fallbacks
+    @classmethod
+    def get_channel_shutdown_delay(cls):
+        """Get channel shutdown delay from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_shutdown_delay", 0)
+
+    @classmethod
+    def get_buffering_timeout(cls):
+        """Get buffering timeout from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("buffering_timeout", 15)
+
+    @classmethod
+    def get_buffering_speed(cls):
+        """Get buffering speed threshold from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("buffering_speed", 1.0)
+
+    @classmethod
+    def get_channel_init_grace_period(cls):
+        """Get channel init grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_init_grace_period", 5)
+
+    @classmethod
+    def get_failover_grace_period(cls):
+        """Get failover grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("failover_grace_period", 20)
+
+    # Dynamic property access for these settings
     @property
-    def FAILOVER_GRACE_PERIOD(self):
-        return self.get_failover_grace_period()
+    def CHANNEL_SHUTDOWN_DELAY(self):
+        return self.get_channel_shutdown_delay()
 
+    @property
+    def BUFFERING_TIMEOUT(self):
+        return self.get_buffering_timeout()
 
+    @property
+    def BUFFERING_SPEED(self):
+        return self.get_buffering_speed()
 
+    @property
+    def CHANNEL_INIT_GRACE_PERIOD(self):
+        return self.get_channel_init_grace_period()

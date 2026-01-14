@@ -320,7 +320,7 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
 
     Args:
         channel_id: The UUID of the channel
-        current_stream_id: The currently failing stream ID
+        current_stream_id: The currently failing stream ID to exclude
         current_profile_id: The currently failing profile ID to exclude
 
     Returns:
@@ -386,11 +386,14 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                         channel_using_profile = False
                         existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
                         if existing_stream_id:
+                            # Decode bytes to string/int for proper Redis key lookup
                             existing_stream_id = existing_stream_id.decode('utf-8')
                             existing_profile_id = redis_client.get(f"stream_profile:{existing_stream_id}")
                             if existing_profile_id and int(existing_profile_id.decode('utf-8')) == profile.id:
                                 channel_using_profile = True
+                                logger.debug(f"Channel {channel.id} already using profile {profile.id}")
 
+                        # Calculate effective connections (subtract 1 if channel already using this profile)
                         effective_connections = current_connections - (1 if channel_using_profile else 0)
 
                         # Check if profile has available slots
@@ -552,46 +555,6 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
         if 'session' in locals():
             session.close()
 
-def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
-    """
-    Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
-    Return schema compatible with get_stream_info_for_switch(...).
-    """
-    try:
-        channel = get_stream_object(channel_id)
-        if isinstance(channel, Stream):
-            logger.error(f"get_stream_info_for_profile: {channel_id} refers to a Stream, not a Channel")
-            return {"error": "Invalid channel ID"}
-        
-        stream = get_object_or_404(Stream, pk=stream_id)
-        m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
-        
-        m3u_account = m3u_profile.m3u_account
-        
-        # Get the user agent from the M3U account
-        user_agent = m3u_account.get_user_agent().user_agent
-        
-        # Generate URL using the specific profile's transformation
-        input_url = stream.url
-        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
-        
-        # Get transcode info from the channel's stream profile
-        stream_profile = channel.get_stream_profile()
-        transcode = not (stream_profile.is_proxy() or stream_profile is None)
-        profile_value = stream_profile.id
-        
-        return {
-            'url': stream_url,
-            'user_agent': user_agent,
-            'transcode': transcode,
-            'stream_profile': profile_value,
-            'stream_id': stream_id,
-            'm3u_profile_id': m3u_profile_id
-        }
-    except Exception as e:
-        logger.error(f"Error in get_stream_info_for_profile: {e}", exc_info=True)
-        return {'error': f'Error: {str(e)}'}
-
 def get_connections_left(m3u_profile_id: int) -> int:
     """
     Get the number of available connections left for an M3U profile.
@@ -635,3 +598,44 @@ def get_connections_left(m3u_profile_id: int) -> int:
     except Exception as e:
         logger.error(f"Error getting connections left for M3U profile {m3u_profile_id}: {e}")
         return 0
+
+
+def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id: int) -> dict:
+    """
+    Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
+    Return schema compatible with get_stream_info_for_switch(...).
+    """
+    try:
+        channel = get_stream_object(channel_id)
+        if isinstance(channel, Stream):
+            logger.error(f"get_stream_info_for_profile: {channel_id} refers to a Stream, not a Channel")
+            return {"error": "Invalid channel ID"}
+        
+        stream = get_object_or_404(Stream, pk=stream_id)
+        m3u_profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
+        
+        m3u_account = m3u_profile.m3u_account
+        
+        # Get the user agent from the M3U account
+        user_agent = m3u_account.get_user_agent().user_agent
+        
+        # Generate URL using the specific profile's transformation
+        input_url = stream.url
+        stream_url = transform_url(input_url, m3u_profile.search_pattern, m3u_profile.replace_pattern)
+        
+        # Get transcode info from the channel's stream profile
+        stream_profile = channel.get_stream_profile()
+        transcode = not (stream_profile.is_proxy() or stream_profile is None)
+        profile_value = stream_profile.id
+        
+        return {
+            'url': stream_url,
+            'user_agent': user_agent,
+            'transcode': transcode,
+            'stream_profile': profile_value,
+            'stream_id': stream_id,
+            'm3u_profile_id': m3u_profile_id
+        }
+    except Exception as e:
+        logger.error(f"Error in get_stream_info_for_profile: {e}", exc_info=True)
+        return {'error': f'Error: {str(e)}'}
