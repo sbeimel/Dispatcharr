@@ -171,7 +171,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "auto_enable_new_groups_vod",
             "auto_enable_new_groups_series",
             "proxy",
-            "is_adult",
+            # TODO: Add "is_adult" after migration 0020 is applied
         ]
         extra_kwargs = {
             "password": {
