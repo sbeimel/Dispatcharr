@@ -82,7 +82,7 @@ buffering_timeout: {
 'buffering_timeout',
 
 // Mit konfigurierbaren Max-Werten
-max_stream_switches: 50,
+max_stream_switches: 200,
 connection_timeout: 60,
 buffering_timeout: 300,
 ```

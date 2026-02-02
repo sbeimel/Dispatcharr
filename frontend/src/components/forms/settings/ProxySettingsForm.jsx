@@ -47,7 +47,7 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
             : key === 'url_switch_timeout'
               ? 60
               : key === 'max_stream_switches'
-                ? 50
+                ? 200
                 : key === 'connection_timeout'
                   ? 60
                   : key === 'buffering_timeout'
