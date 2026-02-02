@@ -39,7 +39,14 @@ COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 RUN chmod +x /app/docker/entrypoint.sh /app/docker/entrypoint.aio.sh
 
 # Install missing dependencies that might not be in base image
-RUN $VIRTUAL_ENV/bin/pip install --no-cache-dir drf-yasg gunicorn
+# Try different pip paths depending on the base image
+RUN if [ -f "/dispatcharrpy/bin/pip" ]; then \
+        /dispatcharrpy/bin/pip install --no-cache-dir drf-yasg gunicorn; \
+    elif [ -f "/usr/local/bin/pip" ]; then \
+        /usr/local/bin/pip install --no-cache-dir drf-yasg gunicorn; \
+    else \
+        pip install --no-cache-dir drf-yasg gunicorn; \
+    fi
 
 # Add timestamp argument
 ARG TIMESTAMP
