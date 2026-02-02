@@ -187,8 +187,9 @@ else
 fi
 
 # Run Django commands as non-root user to prevent permission issues
-su - $POSTGRES_USER -c "cd /app && python manage.py migrate --noinput"
-su - $POSTGRES_USER -c "cd /app && python manage.py collectstatic --noinput"
+# Use su without - to preserve environment variables
+su $POSTGRES_USER -c "cd /app && python manage.py migrate --noinput"
+su $POSTGRES_USER -c "cd /app && python manage.py collectstatic --noinput"
 
 # Select proper uwsgi config based on environment
 if [ "$DISPATCHARR_ENV" = "dev" ] && [ "$DISPATCHARR_DEBUG" != "true" ]; then
