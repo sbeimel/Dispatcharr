@@ -56,13 +56,13 @@ class StreamManager:
         self.transcode_process = None
 
         # User agent for connection
-        self.user_agent = user_agent or TSConfig.DEFAULT_USER_AGENT
+        self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
 
         # Stream health monitoring
         self.last_data_time = time.time()
         self.healthy = True
         self.health_check_interval = 5  # Fixed value, not configurable
-        self.chunk_size = TSConfig.CHUNK_SIZE
+        self.chunk_size = Config.CHUNK_SIZE
 
         # Add to your __init__ method
         self._buffer_check_timers = []

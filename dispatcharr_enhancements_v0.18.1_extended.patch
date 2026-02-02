@@ -1136,7 +1136,7 @@
  
          # User agent for connection
 -        self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
-+        self.user_agent = user_agent or TSConfig.DEFAULT_USER_AGENT
++        self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
  
          # Stream health monitoring
          self.last_data_time = time.time()
@@ -1144,7 +1144,7 @@
 -        self.health_check_interval = ConfigHelper.get('HEALTH_CHECK_INTERVAL', 5)
 -        self.chunk_size = ConfigHelper.chunk_size()
 +        self.health_check_interval = 5  # Fixed value, not configurable
-+        self.chunk_size = TSConfig.CHUNK_SIZE
++        self.chunk_size = Config.CHUNK_SIZE
 
 --- a/apps/proxy/ts_proxy/config_helper.py
 +++ b/apps/proxy/ts_proxy/config_helper.py
@@ -1163,7 +1163,7 @@
  
          self._write_buffer = bytearray()
 -        self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
-+        self.target_chunk_size = TSConfig.BUFFER_CHUNK_SIZE  # Use fixed config value
++        self.target_chunk_size = Config.BUFFER_CHUNK_SIZE  # Use fixed config value
  
          # Track timers for proper cleanup
          self._cleanup_timers = []
