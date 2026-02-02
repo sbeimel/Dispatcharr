@@ -1853,11 +1853,15 @@ class LogoViewSet(viewsets.ModelViewSet):
                     # Fallback to hardcoded if default not found
                     user_agent = 'Dispatcharr/1.0'
 
-                # Add proper timeouts to prevent hanging
+                # Add proper timeouts to prevent hanging - use configurable values
+                from django.conf import settings
+                connect_timeout = getattr(settings, 'LOGO_CONNECT_TIMEOUT', 10)
+                read_timeout = getattr(settings, 'LOGO_READ_TIMEOUT', 20)
+                
                 remote_response = requests.get(
                     logo_url,
                     stream=True,
-                    timeout=(3, 5),  # (connect_timeout, read_timeout)
+                    timeout=(connect_timeout, read_timeout),  # Configurable timeouts
                     headers={'User-Agent': user_agent}
                 )
                 if remote_response.status_code == 200:

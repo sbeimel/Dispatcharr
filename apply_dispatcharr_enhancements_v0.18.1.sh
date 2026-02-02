@@ -137,6 +137,13 @@ else
     echo "❌ Configuration: MAX_RETRIES not updated"
 fi
 
+# Check Logo Timeout Fix
+if grep -q "LOGO_CONNECT_TIMEOUT" dispatcharr/settings.py; then
+    echo "✅ Logo Timeout Fix: Configurable timeouts added"
+else
+    echo "❌ Logo Timeout Fix: Configurable timeouts missing"
+fi
+
 # Check Extended Timeout Settings
 if grep -q "max_stream_switches.*label" frontend/src/constants.js; then
     echo "✅ Extended Config: Frontend timeout settings found"
@@ -166,6 +173,7 @@ echo "   ✅ Extended Timeout Configuration (all settings via frontend)"
 echo "   ✅ Ghost-Client Fix (automatic cleanup without stats click)"
 echo "   ✅ Database Schema Fix (is_adult fields + SECRET_KEY handling)"
 echo "   ✅ Docker Entrypoint Fix (environment variable preservation)"
+echo "   ✅ Logo Timeout Fix (increased timeouts for external logo servers)"
 echo ""
 echo "🚀 NEXT STEPS:"
 echo "   1. Restart Dispatcharr service"
@@ -196,6 +204,7 @@ echo "   • Database Schema: is_adult fields for M3U accounts"
 echo "   • Docker Environment: SECRET_KEY properly passed to migrations"
 echo "   • Stream Timeout: Connection attempt time reset on stream switches"
 echo "   • Ghost Clients: Automatic cleanup without manual intervention"
+echo "   • Logo Timeouts: Increased from 3s/5s to 10s/20s for external servers"
 echo ""
 echo "🐛 GHOST-CLIENT FIX:"
 echo "   • Automatic cleanup every 5-10 seconds"

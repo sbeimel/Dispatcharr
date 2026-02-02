@@ -796,7 +796,55 @@
 +        ),
 +    ]
 +
-+--- a/docker/entrypoint.sh
++--- a/dispatcharr/settings.py
++++ b/dispatcharr/settings.py
+@@ -82,6 +82,8 @@ CACHES = {
+ 
+ # Timeouts for external connections
+ REQUESTS_TIMEOUT = 30  # Seconds for external API requests
++LOGO_CONNECT_TIMEOUT = 10  # Seconds for logo server connection
++LOGO_READ_TIMEOUT = 20     # Seconds for logo download
+ 
+ MIDDLEWARE = [
+     "django.middleware.security.SecurityMiddleware",
+
+--- a/apps/channels/api_views.py
++++ b/apps/channels/api_views.py
+@@ -1855,10 +1855,13 @@ class ChannelLogoViewSet(viewsets.ModelViewSet):
+                     # Fallback to hardcoded if default not found
+                     user_agent = 'Dispatcharr/1.0'
+ 
+-                # Add proper timeouts to prevent hanging
++                # Add proper timeouts to prevent hanging - use configurable values
++                from django.conf import settings
++                connect_timeout = getattr(settings, 'LOGO_CONNECT_TIMEOUT', 10)
++                read_timeout = getattr(settings, 'LOGO_READ_TIMEOUT', 20)
++                
+                 remote_response = requests.get(
+                     logo_url,
+                     stream=True,
+-                    timeout=(3, 5),  # (connect_timeout, read_timeout)
++                    timeout=(connect_timeout, read_timeout),  # Configurable timeouts
+                     headers={'User-Agent': user_agent}
+                 )
+
+--- a/apps/vod/api_views.py
++++ b/apps/vod/api_views.py
+@@ -825,7 +825,11 @@ class VODLogoViewSet(viewsets.ModelViewSet):
+         else:
+             # It's a remote URL - proxy it
+             try:
+-                response = requests.get(logo.url, stream=True, timeout=10)
++                # Use configurable timeouts
++                from django.conf import settings
++                logo_timeout = getattr(settings, 'REQUESTS_TIMEOUT', 30)
++                
++                response = requests.get(logo.url, stream=True, timeout=logo_timeout)
+                 response.raise_for_status()
+ 
+                 return StreamingHttpResponse(
+
+--- a/docker/entrypoint.sh
 ++++ b/docker/entrypoint.sh
 +@@ -187,8 +187,8 @@ else
 + fi

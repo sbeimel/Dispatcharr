@@ -824,7 +824,11 @@ class VODLogoViewSet(viewsets.ModelViewSet):
         else:
             # It's a remote URL - proxy it
             try:
-                response = requests.get(logo.url, stream=True, timeout=10)
+                # Use configurable timeouts
+                from django.conf import settings
+                logo_timeout = getattr(settings, 'REQUESTS_TIMEOUT', 30)
+                
+                response = requests.get(logo.url, stream=True, timeout=logo_timeout)
                 response.raise_for_status()
 
                 content_type = response.headers.get('Content-Type', 'image/png')
