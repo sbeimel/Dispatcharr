@@ -124,7 +124,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent, proxy=None):
+    def build_command(self, stream_url, user_agent):
         if self.is_proxy():
             return []
 
@@ -132,29 +132,12 @@ class StreamProfile(models.Model):
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
         }
-        
-        # Add proxy to replacements if provided
-        if proxy:
-            replacements["{proxy}"] = proxy
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [
             self._replace_in_part(part, replacements)
             for part in shlex_split(self.parameters) # use shlex to handle quoted strings
         ]
-        
-        # Add proxy parameters to ffmpeg if proxy is provided and not already in parameters
-        if proxy and self.command == "ffmpeg" and "-http_proxy" not in self.parameters:
-            # Insert proxy parameter after ffmpeg command but before input
-            # Find the position of -i (input) parameter
-            try:
-                i_index = cmd.index("-i")
-                # Insert proxy parameters before -i
-                cmd.insert(i_index, proxy)
-                cmd.insert(i_index, "-http_proxy")
-            except ValueError:
-                # If -i not found, append at the end (before input URL)
-                cmd.extend(["-http_proxy", proxy])
 
         return cmd
 

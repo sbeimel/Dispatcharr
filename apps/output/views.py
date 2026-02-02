@@ -27,55 +27,6 @@ import hashlib
 
 logger = logging.getLogger(__name__)
 
-def get_basic_auth_user(request):
-    """
-    Extract and validate user from HTTP Basic Authentication header.
-    
-    Returns:
-        User object if authentication successful, None otherwise
-    """
-    auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-    
-    if not auth_header.startswith('Basic '):
-        return None
-    
-    try:
-        # Decode Base64 credentials
-        encoded_credentials = auth_header[6:]  # Remove 'Basic ' prefix
-        decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
-        username, password = decoded_credentials.split(':', 1)
-        
-        # Get user from database
-        try:
-            user = User.objects.get(username=username)
-        except User.DoesNotExist:
-            logger.warning(f"Basic Auth failed: User '{username}' not found")
-            return None
-        
-        # Check password
-        if not user.check_password(password):
-            logger.warning(f"Basic Auth failed: Invalid password for user '{username}'")
-            return None
-        
-        # Check if user is active
-        if not user.is_active:
-            logger.warning(f"Basic Auth failed: User '{username}' is inactive")
-            return None
-        
-        return user
-        
-    except (ValueError, UnicodeDecodeError) as e:
-        logger.warning(f"Basic Auth failed: Invalid credentials format - {e}")
-        return None
-
-def require_basic_auth(request):
-    """
-    Return a 401 response requesting Basic Authentication.
-    """
-    response = HttpResponse('Authentication required', status=401)
-    response['WWW-Authenticate'] = 'Basic realm="Dispatcharr"'
-    return response
-
 def get_client_identifier(request):
     """Get client information including IP, user agent, and a unique hash identifier
 
@@ -114,12 +65,6 @@ def m3u_endpoint(request, profile_name=None, user=None):
         )
         return JsonResponse({"error": "Forbidden"}, status=403)
 
-    # Require Basic Auth if no user provided
-    if user is None:
-        user = get_basic_auth_user(request)
-        if user is None:
-            return require_basic_auth(request)
-
     # Handle HEAD requests efficiently without generating content
     if request.method == "HEAD":
         logger.debug("Handling HEAD request for M3U")
@@ -144,12 +89,6 @@ def epg_endpoint(request, profile_name=None, user=None):
             user_agent=user_agent,
         )
         return JsonResponse({"error": "Forbidden"}, status=403)
-
-    # Require Basic Auth if no user provided
-    if user is None:
-        user = get_basic_auth_user(request)
-        if user is None:
-            return require_basic_auth(request)
 
     # Handle HEAD requests efficiently without generating content
     if request.method == "HEAD":

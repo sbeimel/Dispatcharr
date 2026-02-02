@@ -24,12 +24,6 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
       'redis_chunk_ttl',
       'channel_shutdown_delay',
       'channel_init_grace_period',
-      'max_retries',
-      'url_switch_timeout',
-      'failover_grace_period',
-      'max_stream_switches',
-      'connection_timeout',
-      'buffering_timeout',
     ].includes(key);
   };
   const isFloatField = (key) => {
@@ -42,17 +36,7 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
         ? 3600
         : key === 'channel_shutdown_delay'
           ? 300
-          : key === 'max_retries'
-            ? 10
-            : key === 'url_switch_timeout'
-              ? 60
-              : key === 'max_stream_switches'
-                ? 50
-                : key === 'connection_timeout'
-                  ? 60
-                  : key === 'buffering_timeout'
-                    ? 300
-                    : 60;
+          : 60;
   };
   return (
     <>
