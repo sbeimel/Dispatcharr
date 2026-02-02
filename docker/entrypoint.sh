@@ -187,9 +187,9 @@ else
 fi
 
 # Run Django commands as non-root user to prevent permission issues
-# Use su without - to preserve environment variables
-su $POSTGRES_USER -c "cd /app && python manage.py migrate --noinput"
-su $POSTGRES_USER -c "cd /app && python manage.py collectstatic --noinput"
+# Explicitly pass required environment variables to preserve them in login shell
+su - $POSTGRES_USER -c "export DJANGO_SECRET_KEY='$DJANGO_SECRET_KEY' && export POSTGRES_DB='$POSTGRES_DB' && export POSTGRES_USER='$POSTGRES_USER' && export POSTGRES_PASSWORD='$POSTGRES_PASSWORD' && export POSTGRES_HOST='$POSTGRES_HOST' && export POSTGRES_PORT='$POSTGRES_PORT' && export REDIS_HOST='$REDIS_HOST' && export REDIS_DB='$REDIS_DB' && cd /app && python manage.py migrate --noinput"
+su - $POSTGRES_USER -c "export DJANGO_SECRET_KEY='$DJANGO_SECRET_KEY' && export POSTGRES_DB='$POSTGRES_DB' && export POSTGRES_USER='$POSTGRES_USER' && export POSTGRES_PASSWORD='$POSTGRES_PASSWORD' && export POSTGRES_HOST='$POSTGRES_HOST' && export POSTGRES_PORT='$POSTGRES_PORT' && export REDIS_HOST='$REDIS_HOST' && export REDIS_DB='$REDIS_DB' && cd /app && python manage.py collectstatic --noinput"
 
 # Select proper uwsgi config based on environment
 if [ "$DISPATCHARR_ENV" = "dev" ] && [ "$DISPATCHARR_DEBUG" != "true" ]; then
