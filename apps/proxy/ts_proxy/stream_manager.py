@@ -1122,6 +1122,18 @@ class StreamManager:
         self.url_switching = True
         self.url_switch_start_time = time.time()
 
+        # Reset connection attempt time in Redis to restart grace period
+        try:
+            from .redis_keys import RedisKeys
+            from core.utils import RedisClient
+            redis_client = RedisClient.get_client()
+            if redis_client:
+                attempt_key = RedisKeys.connection_attempt(self.channel_id)
+                redis_client.setex(attempt_key, 60, str(time.time()))
+                logger.debug(f"Reset connection attempt time for channel {self.channel_id} during stream switch")
+        except Exception as e:
+            logger.warning(f"Could not reset connection attempt time for channel {self.channel_id}: {e}")
+
         try:
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:

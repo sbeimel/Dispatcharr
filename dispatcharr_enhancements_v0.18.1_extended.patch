@@ -216,9 +216,11 @@
 +                    if profile_id_bytes:
 +                        self.current_profile_id = int(profile_id_bytes.decode('utf-8'))
 +                        logger.info(f"Loaded profile ID {self.current_profile_id} from Redis for channel {buffer.channel_id}")
++                    else:
++                        logger.warning(f"No profile_id found in Redis for channel {channel_id}.")
                      
 -                    if not stream_id_bytes:
-+                    else:
++                    if not stream_id_bytes:
                          logger.warning(f"No stream_id found in Redis for channel {channel_id}. "
                                       f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
                  except Exception as e:
