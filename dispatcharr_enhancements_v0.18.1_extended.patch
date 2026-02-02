@@ -1167,3 +1167,45 @@
  
          # Track timers for proper cleanup
          self._cleanup_timers = []
+--- a/apps/m3u/serializers.py
++++ b/apps/m3u/serializers.py
+@@ -171,6 +171,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
+             "auto_enable_new_groups_vod",
+             "auto_enable_new_groups_series",
+             "proxy",
++            "is_adult",
+         ]
+         extra_kwargs = {
+             "password": {
+
+--- a/frontend/src/components/forms/M3U.jsx
++++ b/frontend/src/components/forms/M3U.jsx
+@@ -67,6 +67,7 @@ const M3U = ({
+       priority: 0,
+       enable_vod: false,
+       proxy: '',
++      is_adult: false,
+     },
+ 
+     validate: {
+@@ -103,6 +104,7 @@ const M3U = ({
+         enable_vod: m3uAccount.enable_vod || false,
+         proxy: m3uAccount.proxy || '',
++        is_adult: m3uAccount.is_adult || false,
+       });
+ 
+       if (m3uAccount.account_type == 'XC') {
+@@ -430,6 +432,12 @@ const M3U = ({
+                 key={form.key('is_active')}
+               />
+ 
++              <Checkbox
++                label="Adult Content"
++                description="Mark this M3U account as containing adult content"
++                {...form.getInputProps('is_adult', { type: 'checkbox' })}
++                key={form.key('is_adult')}
++              />
++
+             </Stack>
+           </form>
+         </Modal.Body>

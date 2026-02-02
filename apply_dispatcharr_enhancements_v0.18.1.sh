@@ -158,6 +158,20 @@ else
     echo "❌ Backend Config Usage: Still using hardcoded values"
 fi
 
+# Check M3U is_adult Field
+if grep -q "is_adult.*fields" apps/m3u/serializers.py; then
+    echo "✅ M3U is_adult Field: Added to serializer fields"
+else
+    echo "❌ M3U is_adult Field: Missing from serializer fields"
+fi
+
+# Check M3U Frontend Form
+if grep -q "Adult Content.*Checkbox" frontend/src/components/forms/M3U.jsx; then
+    echo "✅ M3U Frontend Form: is_adult checkbox added"
+else
+    echo "❌ M3U Frontend Form: is_adult checkbox missing"
+fi
+
 # Check Extended Timeout Settings
 if grep -q "max_stream_switches.*label" frontend/src/constants.js; then
     echo "✅ Extended Config: Frontend timeout settings found"
@@ -189,6 +203,7 @@ echo "   ✅ Database Schema Fix (is_adult fields + SECRET_KEY handling)"
 echo "   ✅ Docker Entrypoint Fix (environment variable preservation)"
 echo "   ✅ Logo Timeout Fix (increased timeouts for external logo servers)"
 echo "   ✅ Frontend/Backend Sync Fix (settings properly used from database)"
+echo "   ✅ M3U is_adult Field Fix (serializer and frontend form updated)"
 echo ""
 echo "🚀 NEXT STEPS:"
 echo "   1. Restart Dispatcharr service"
@@ -222,6 +237,7 @@ echo "   • Ghost Clients: Automatic cleanup without manual intervention"
 echo "   • Logo Timeouts: Increased from 3s/5s to 10s/20s for external servers"
 echo "   • Frontend Defaults: Removed duplicate buffering_timeout entry"
 echo "   • Backend Config: Fixed hardcoded values to use database settings"
+echo "   • M3U is_adult Field: Added to serializer and frontend form"
 echo ""
 echo "🐛 GHOST-CLIENT FIX:"
 echo "   • Automatic cleanup every 5-10 seconds"
