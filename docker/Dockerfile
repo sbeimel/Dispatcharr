@@ -35,6 +35,9 @@ RUN rm -rf /app/frontend
 # Copy built frontend assets
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
+# Make entrypoint scripts executable
+RUN chmod +x /app/docker/entrypoint.sh /app/docker/entrypoint.aio.sh
+
 # Add timestamp argument
 ARG TIMESTAMP
 
