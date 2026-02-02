@@ -32,7 +32,7 @@ INSTALLED_APPS = [
     "apps.vod.apps.VODConfig",
     "core",
     "daphne",
-    "drf_yasg",
+    # "drf_yasg",  # Temporarily disabled - not installed
     "channels",
     "django.contrib.admin",
     "django.contrib.auth",
