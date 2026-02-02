@@ -12,6 +12,7 @@ yt-dlp
 gevent==25.9.1
 daphne
 uwsgi
+gunicorn
 django-cors-headers
 djangorestframework-simplejwt
 m3u8
