@@ -773,28 +773,6 @@
 +        """Get connection timeout in seconds"""
 +        from apps.proxy.config import BaseConfig
 +        return BaseConfig.get_connection_timeout()
-
---- /dev/null
-+++ b/apps/m3u/migrations/0020_add_is_adult_field.py
-@@ -0,0 +1,18 @@
-+# Generated manually to add missing is_adult field
-+
-+from django.db import migrations, models
-+
-+
-+class Migration(migrations.Migration):
-+
-+    dependencies = [
-+        ('m3u', '0019_m3uaccount_proxy'),
-+    ]
-+
-+    operations = [
-+        migrations.AddField(
-+            model_name='m3uaccount',
-+            name='is_adult',
-+            field=models.BooleanField(default=False, help_text='Mark M3U account as containing adult content'),
-+        ),
-+    ]
 +
 +--- a/dispatcharr/settings.py
 +++ b/dispatcharr/settings.py
@@ -1163,7 +1141,7 @@
  
          self._write_buffer = bytearray()
 -        self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
-+        self.target_chunk_size = Config.BUFFER_CHUNK_SIZE  # Use fixed config value
++        self.target_chunk_size = TSConfig.BUFFER_CHUNK_SIZE  # Use fixed config value
  
          # Track timers for proper cleanup
          self._cleanup_timers = []
