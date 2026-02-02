@@ -38,6 +38,9 @@ COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 # Make entrypoint scripts executable
 RUN chmod +x /app/docker/entrypoint.sh /app/docker/entrypoint.aio.sh
 
+# Install missing dependencies that might not be in base image
+RUN $VIRTUAL_ENV/bin/pip install --no-cache-dir drf-yasg gunicorn
+
 # Add timestamp argument
 ARG TIMESTAMP
 
