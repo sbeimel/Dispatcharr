@@ -1136,6 +1136,15 @@
 
 --- a/apps/proxy/ts_proxy/stream_buffer.py
 +++ b/apps/proxy/ts_proxy/stream_buffer.py
+@@ -5,7 +5,7 @@ import time
+ from collections import deque
+ from typing import Optional, Deque
+ import random
+-from apps.proxy.config import TSConfig as Config
++from apps.proxy.config import TSConfig
+ from .redis_keys import RedisKeys
+ from .config_helper import ConfigHelper
+ from .constants import TS_PACKET_SIZE
 @@ -44,7 +44,7 @@ class StreamBuffer:
          self.index = 0
  

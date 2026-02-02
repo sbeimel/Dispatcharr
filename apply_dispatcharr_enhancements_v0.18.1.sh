@@ -76,7 +76,15 @@ echo ""
 
 # Create and apply migration
 echo "🗄️  Creating and applying database migration..."
-echo "   Creating migration for proxy and is_adult fields..."
+
+# Remove problematic migration file if it exists
+if [ -f "apps/m3u/migrations/0020_add_is_adult_field.py" ]; then
+    echo "   Removing problematic migration file..."
+    rm -f "apps/m3u/migrations/0020_add_is_adult_field.py"
+    echo "✅ Problematic migration file removed"
+fi
+
+echo "   Creating migration for proxy field..."
 if python manage.py makemigrations m3u; then
     echo "✅ Migration created successfully!"
 else
@@ -156,6 +164,20 @@ if grep -q "BaseConfig.get_max_retries()" apps/proxy/ts_proxy/config_helper.py; 
     echo "✅ Backend Config Usage: Database values properly used"
 else
     echo "❌ Backend Config Usage: Still using hardcoded values"
+fi
+
+# Check TSConfig Import Fix
+if grep -q "from apps.proxy.config import TSConfig$" apps/proxy/ts_proxy/stream_buffer.py; then
+    echo "✅ TSConfig Import Fix: Import corrected"
+else
+    echo "❌ TSConfig Import Fix: Import still incorrect"
+fi
+
+# Check TSConfig Usage Fix
+if grep -q "TSConfig.BUFFER_CHUNK_SIZE" apps/proxy/ts_proxy/stream_buffer.py; then
+    echo "✅ TSConfig Usage Fix: TSConfig properly used"
+else
+    echo "❌ TSConfig Usage Fix: TSConfig not properly used"
 fi
 
 # Check M3U is_adult Field
@@ -238,6 +260,7 @@ echo "   • Logo Timeouts: Increased from 3s/5s to 10s/20s for external servers
 echo "   • Frontend Defaults: Removed duplicate buffering_timeout entry"
 echo "   • Backend Config: Fixed hardcoded values to use database settings"
 echo "   • M3U is_adult Field: Added to serializer and frontend form"
+echo "   • TSConfig Import: Fixed 'TSConfig' is not defined error"
 echo ""
 echo "🐛 GHOST-CLIENT FIX:"
 echo "   • Automatic cleanup every 5-10 seconds"
