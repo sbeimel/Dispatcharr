@@ -1096,3 +1096,74 @@
 +                chunk_size=self.chunk_size,
 +                proxy=proxy  # Pass proxy to HTTPStreamReader
              )
+--- a/apps/proxy/ts_proxy/config_helper.py
++++ b/apps/proxy/ts_proxy/config_helper.py
+@@ -81,7 +81,8 @@ class ConfigHelper:
+ 
+     @staticmethod
+     def url_switch_timeout():
+         """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
+-        return ConfigHelper.get('URL_SWITCH_TIMEOUT', 20)  # Default to 20 seconds
++        from apps.proxy.config import BaseConfig
++        return BaseConfig.get_url_switch_timeout()
+ 
+     @staticmethod
+     def max_stream_switches():
+--- a/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
++++ b/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
+@@ -10,11 +10,10 @@ export const getProxySettingsFormInitialValues = () => {
+ 
+ export const getProxySettingDefaults = () => {
+   return {
+     buffering_timeout: 15,
+     buffering_speed: 1.0,
+     redis_chunk_ttl: 60,
+     channel_shutdown_delay: 0,
+     channel_init_grace_period: 5,
+     max_retries: 2,
+     url_switch_timeout: 8,
+     failover_grace_period: 20,
+     max_stream_switches: 10,
+     connection_timeout: 10,
+-    buffering_timeout: 15,
+   };
+ };
+
+--- a/apps/proxy/ts_proxy/stream_manager.py
++++ b/apps/proxy/ts_proxy/stream_manager.py
+@@ -58,11 +58,11 @@ class StreamManager:
+         self.transcode_process = None
+ 
+         # User agent for connection
+-        self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
++        self.user_agent = user_agent or TSConfig.DEFAULT_USER_AGENT
+ 
+         # Stream health monitoring
+         self.last_data_time = time.time()
+         self.healthy = True
+-        self.health_check_interval = ConfigHelper.get('HEALTH_CHECK_INTERVAL', 5)
+-        self.chunk_size = ConfigHelper.chunk_size()
++        self.health_check_interval = 5  # Fixed value, not configurable
++        self.chunk_size = TSConfig.CHUNK_SIZE
+
+--- a/apps/proxy/ts_proxy/config_helper.py
++++ b/apps/proxy/ts_proxy/config_helper.py
+@@ -65,7 +65,8 @@ class ConfigHelper:
+     @staticmethod
+     def max_retries():
+         """Get maximum retry attempts"""
+-        return ConfigHelper.get('MAX_RETRIES', 3)
++        from apps.proxy.config import BaseConfig
++        return BaseConfig.get_max_retries()
+
+--- a/apps/proxy/ts_proxy/stream_buffer.py
++++ b/apps/proxy/ts_proxy/stream_buffer.py
+@@ -44,7 +44,7 @@ class StreamBuffer:
+         self.index = 0
+ 
+         self._write_buffer = bytearray()
+-        self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
++        self.target_chunk_size = TSConfig.BUFFER_CHUNK_SIZE  # Use fixed config value
+ 
+         # Track timers for proper cleanup
+         self._cleanup_timers = []

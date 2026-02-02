@@ -43,7 +43,7 @@ class StreamBuffer:
                 logger.error(f"Error initializing buffer from Redis: {e}")
 
         self._write_buffer = bytearray()
-        self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
+        self.target_chunk_size = TSConfig.BUFFER_CHUNK_SIZE  # Use fixed config value
 
         # Track timers for proper cleanup
         self.stopping = False

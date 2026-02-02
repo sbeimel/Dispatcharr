@@ -65,7 +65,8 @@ class ConfigHelper:
     @staticmethod
     def max_retries():
         """Get maximum retry attempts"""
-        return ConfigHelper.get('MAX_RETRIES', 3)
+        from apps.proxy.config import BaseConfig
+        return BaseConfig.get_max_retries()
 
     @staticmethod
     def max_stream_switches():
@@ -81,7 +82,8 @@ class ConfigHelper:
     @staticmethod
     def url_switch_timeout():
         """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
-        return ConfigHelper.get('URL_SWITCH_TIMEOUT', 20)  # Default to 20 seconds
+        from apps.proxy.config import BaseConfig
+        return BaseConfig.get_url_switch_timeout()
 
     @staticmethod
     def failover_grace_period():

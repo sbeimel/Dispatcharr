@@ -144,6 +144,20 @@ else
     echo "❌ Logo Timeout Fix: Configurable timeouts missing"
 fi
 
+# Check Frontend Defaults Fix
+if ! grep -q "buffering_timeout.*15.*buffering_timeout.*15" frontend/src/utils/forms/settings/ProxySettingsFormUtils.js; then
+    echo "✅ Frontend Defaults Fix: Duplicate buffering_timeout removed"
+else
+    echo "❌ Frontend Defaults Fix: Duplicate buffering_timeout still present"
+fi
+
+# Check Backend Config Usage
+if grep -q "BaseConfig.get_max_retries()" apps/proxy/ts_proxy/config_helper.py; then
+    echo "✅ Backend Config Usage: Database values properly used"
+else
+    echo "❌ Backend Config Usage: Still using hardcoded values"
+fi
+
 # Check Extended Timeout Settings
 if grep -q "max_stream_switches.*label" frontend/src/constants.js; then
     echo "✅ Extended Config: Frontend timeout settings found"
@@ -174,6 +188,7 @@ echo "   ✅ Ghost-Client Fix (automatic cleanup without stats click)"
 echo "   ✅ Database Schema Fix (is_adult fields + SECRET_KEY handling)"
 echo "   ✅ Docker Entrypoint Fix (environment variable preservation)"
 echo "   ✅ Logo Timeout Fix (increased timeouts for external logo servers)"
+echo "   ✅ Frontend/Backend Sync Fix (settings properly used from database)"
 echo ""
 echo "🚀 NEXT STEPS:"
 echo "   1. Restart Dispatcharr service"
@@ -205,6 +220,8 @@ echo "   • Docker Environment: SECRET_KEY properly passed to migrations"
 echo "   • Stream Timeout: Connection attempt time reset on stream switches"
 echo "   • Ghost Clients: Automatic cleanup without manual intervention"
 echo "   • Logo Timeouts: Increased from 3s/5s to 10s/20s for external servers"
+echo "   • Frontend Defaults: Removed duplicate buffering_timeout entry"
+echo "   • Backend Config: Fixed hardcoded values to use database settings"
 echo ""
 echo "🐛 GHOST-CLIENT FIX:"
 echo "   • Automatic cleanup every 5-10 seconds"

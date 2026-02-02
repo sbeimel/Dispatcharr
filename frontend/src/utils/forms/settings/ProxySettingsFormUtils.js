@@ -19,6 +19,5 @@ export const getProxySettingDefaults = () => {
     failover_grace_period: 20,
     max_stream_switches: 10,
     connection_timeout: 10,
-    buffering_timeout: 15,
   };
 };
