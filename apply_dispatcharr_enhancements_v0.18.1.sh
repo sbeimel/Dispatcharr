@@ -76,7 +76,7 @@ echo ""
 
 # Create and apply migration
 echo "🗄️  Creating and applying database migration..."
-echo "   Creating migration for proxy field..."
+echo "   Creating migration for proxy and is_adult fields..."
 if python manage.py makemigrations m3u; then
     echo "✅ Migration created successfully!"
 else
@@ -89,6 +89,7 @@ if python manage.py migrate; then
     echo "✅ Migration applied successfully!"
 else
     echo "❌ ERROR: Migration application failed!"
+    echo "   Note: If SECRET_KEY error occurs, the entrypoint.sh fix will resolve it in Docker"
     exit 1
 fi
 echo ""
@@ -163,6 +164,8 @@ echo "   ✅ Basic Authentication (for M3U/EPG endpoints)"
 echo "   ✅ Configuration Enhancements (optimized retries & timeouts)"
 echo "   ✅ Extended Timeout Configuration (all settings via frontend)"
 echo "   ✅ Ghost-Client Fix (automatic cleanup without stats click)"
+echo "   ✅ Database Schema Fix (is_adult fields + SECRET_KEY handling)"
+echo "   ✅ Docker Entrypoint Fix (environment variable preservation)"
 echo ""
 echo "🚀 NEXT STEPS:"
 echo "   1. Restart Dispatcharr service"
@@ -187,6 +190,12 @@ echo "   • Max Stream Switches (default: 10)"
 echo "   • Connection Timeout (default: 10s)"
 echo "   • Buffering Timeout (default: 15s)"
 echo "   • Failover Grace Period (default: 20s)"
+echo ""
+echo "🐛 FIXES INCLUDED:"
+echo "   • Database Schema: is_adult fields for M3U accounts"
+echo "   • Docker Environment: SECRET_KEY properly passed to migrations"
+echo "   • Stream Timeout: Connection attempt time reset on stream switches"
+echo "   • Ghost Clients: Automatic cleanup without manual intervention"
 echo ""
 echo "🐛 GHOST-CLIENT FIX:"
 echo "   • Automatic cleanup every 5-10 seconds"
