@@ -110,6 +110,32 @@ class ClientManager:
                         # IMPROVED GHOST DETECTION: Check for stale clients before sending heartbeats
                         current_time = time.time()
                         clients_to_remove = set()
+                        ghost_clients_in_set = set()
+
+                        # GHOST FIX: Check Redis set for orphaned entries
+                        try:
+                            redis_client_ids = self.redis_client.smembers(self.client_set_key)
+                            if redis_client_ids:
+                                redis_client_ids = [cid.decode('utf-8') if isinstance(cid, bytes) else cid for cid in redis_client_ids]
+                                
+                                # Check each client in set for existence
+                                for client_id in redis_client_ids:
+                                    client_key = f"ts_proxy:channel:{self.channel_id}:clients:{client_id}"
+                                    
+                                    # If client is in set but individual key doesn't exist = GHOST!
+                                    if not self.redis_client.exists(client_key):
+                                        ghost_clients_in_set.add(client_id)
+                                        logger.debug(f"Found ghost client {client_id} in set but no individual key")
+                        except Exception as e:
+                            logger.warning(f"Failed to check Redis set for ghosts: {e}")
+
+                        # Remove ghost clients from set immediately (atomic operation)
+                        if ghost_clients_in_set:
+                            pipe = self.redis_client.pipeline()
+                            for ghost_id in ghost_clients_in_set:
+                                pipe.srem(self.client_set_key, ghost_id)
+                            pipe.execute()
+                            logger.info(f"Removed {len(ghost_clients_in_set)} ghost clients from Redis set for channel {self.channel_id}")
 
                         # First identify clients that should be removed
                         for client_id in self.clients:
@@ -136,8 +162,12 @@ class ClientManager:
                         for client_id in clients_to_remove:
                             self.remove_client(client_id)
 
-                        if clients_to_remove:
-                            logger.info(f"Removed {len(clients_to_remove)} ghost clients from channel {self.channel_id}")
+                        # Log total cleanup summary
+                        total_cleaned = len(ghost_clients_in_set) + len(clients_to_remove)
+                        if total_cleaned > 0:
+                            logger.info(f"Client cleanup for channel {self.channel_id}: {total_cleaned} total ({len(ghost_clients_in_set)} set ghosts, {len(clients_to_remove)} inactive)")
+                        elif ghost_clients_in_set or clients_to_remove:
+                            logger.info(f"Removed {len(clients_to_remove)} inactive clients from channel {self.channel_id}")
 
                         # Now send heartbeats only for remaining clients
                         pipe = self.redis_client.pipeline()
@@ -382,13 +412,41 @@ class ClientManager:
             return len(self.clients)
 
     def get_total_client_count(self):
-        """Get total client count across all workers"""
+        """Get total client count across all workers with automatic ghost cleanup"""
         if not self.redis_client:
             return len(self.clients)
 
         try:
-            # Count members in the client set
-            return self.redis_client.scard(self.client_set_key) or 0
+            # Get all client IDs from set
+            client_ids = self.redis_client.smembers(self.client_set_key)
+            if not client_ids:
+                return 0
+                
+            # Convert bytes to strings if needed
+            client_ids = [cid.decode('utf-8') if isinstance(cid, bytes) else cid for cid in client_ids]
+            
+            # Count valid clients and clean up ghosts
+            valid_clients = []
+            ghosts_to_remove = []
+            
+            for client_id in client_ids:
+                client_key = f"ts_proxy:channel:{self.channel_id}:clients:{client_id}"
+                if self.redis_client.exists(client_key):
+                    valid_clients.append(client_id)
+                else:
+                    # Found a ghost - client in set but no individual key
+                    ghosts_to_remove.append(client_id)
+            
+            # Remove ghosts from set atomically
+            if ghosts_to_remove:
+                pipe = self.redis_client.pipeline()
+                for ghost_id in ghosts_to_remove:
+                    pipe.srem(self.client_set_key, ghost_id)
+                pipe.execute()
+                logger.debug(f"Auto-cleaned {len(ghosts_to_remove)} ghost clients from set during count for channel {self.channel_id}")
+            
+            return len(valid_clients)
+            
         except Exception as e:
             logger.error(f"Error getting total client count: {e}")
             return len(self.clients)  # Fall back to local count

@@ -19,7 +19,8 @@ class ConfigHelper:
     @staticmethod
     def connection_timeout():
         """Get connection timeout in seconds"""
-        return ConfigHelper.get('CONNECTION_TIMEOUT', 10)
+        from apps.proxy.config import BaseConfig
+        return BaseConfig.get_connection_timeout()
 
     @staticmethod
     def client_wait_timeout():
@@ -69,7 +70,8 @@ class ConfigHelper:
     @staticmethod
     def max_stream_switches():
         """Get maximum number of stream switch attempts"""
-        return ConfigHelper.get('MAX_STREAM_SWITCHES', 10)
+        from apps.proxy.config import BaseConfig
+        return BaseConfig.get_max_stream_switches()
 
     @staticmethod
     def retry_wait_interval():
@@ -84,7 +86,8 @@ class ConfigHelper:
     @staticmethod
     def failover_grace_period():
         """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
-        return ConfigHelper.get('FAILOVER_GRACE_PERIOD', 20)  # Default to 20 seconds
+        from apps.proxy.config import TSConfig
+        return TSConfig.get_failover_grace_period()
 
     @staticmethod
     def buffering_timeout():
