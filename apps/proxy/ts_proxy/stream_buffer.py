@@ -6,7 +6,7 @@ import time
 from collections import deque
 from typing import Optional, Deque
 import random
-from apps.proxy.config import TSConfig
+from apps.proxy.config import TSConfig as Config
 from .redis_keys import RedisKeys
 from .config_helper import ConfigHelper
 from .constants import TS_PACKET_SIZE
@@ -43,7 +43,7 @@ class StreamBuffer:
                 logger.error(f"Error initializing buffer from Redis: {e}")
 
         self._write_buffer = bytearray()
-        self.target_chunk_size = TSConfig.BUFFER_CHUNK_SIZE  # Use fixed config value
+        self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
 
         # Track timers for proper cleanup
         self.stopping = False

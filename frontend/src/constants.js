@@ -63,10 +63,6 @@ export const PROXY_SETTINGS_OPTIONS = {
     label: 'URL Switch Timeout (seconds)',
     description: 'Maximum time allowed for stream switching operations',
   },
-  failover_grace_period: {
-    label: 'Failover Grace Period (seconds)',
-    description: 'Extra time to allow for stream switching before disconnecting clients',
-  },
   max_stream_switches: {
     label: 'Max Stream Switches',
     description: 'Maximum number of stream/profile combinations to try before giving up',
@@ -75,9 +71,9 @@ export const PROXY_SETTINGS_OPTIONS = {
     label: 'Connection Timeout (seconds)',
     description: 'Maximum time to wait for initial connection to a stream',
   },
-  buffering_timeout: {
-    label: 'Buffering Timeout (seconds)',
-    description: 'Maximum time to wait for buffering before switching streams',
+  failover_grace_period: {
+    label: 'Failover Grace Period (seconds)',
+    description: 'Extra time to allow for stream switching before disconnecting clients',
   },
 };
 
@@ -350,22 +346,31 @@ export const REGION_CHOICES = [
 
 export const VOD_TYPES = {
   MOVIE: 'movie',
-  EPISODE: 'episode'
+  EPISODE: 'episode',
 };
 
 export const VOD_FILTERS = {
   ALL: 'all',
   MOVIES: 'movies',
-  SERIES: 'series'
+  SERIES: 'series',
 };
 
 export const VOD_SORT_OPTIONS = [
   { value: 'name', label: 'Name' },
   { value: 'year', label: 'Year' },
   { value: 'created_at', label: 'Date Added' },
-  { value: 'rating', label: 'Rating' }
+  { value: 'rating', label: 'Rating' },
 ];
 
 export const CONTAINER_EXTENSIONS = [
-  'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'm4v', 'ts', 'mpg'
+  'mp4',
+  'mkv',
+  'avi',
+  'mov',
+  'wmv',
+  'flv',
+  'webm',
+  'm4v',
+  'ts',
+  'mpg',
 ];

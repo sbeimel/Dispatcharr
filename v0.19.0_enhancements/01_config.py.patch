@@ -1,0 +1,65 @@
+--- a/Dispatcharr-0.19.0/apps/proxy/config.py
++++ b/Dispatcharr-0.19.0/apps/proxy/config.py
+@@ -8,7 +8,7 @@ class BaseConfig:
+     CHUNK_SIZE = 8192
+     CLIENT_POLL_INTERVAL = 0.1
+-    MAX_RETRIES = 3
++    MAX_RETRIES = 2
+     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
+     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
+-    MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
++    MAX_STREAM_SWITCHES = 200  # Maximum number of stream/profile combinations to try before giving up
+     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
+     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
+     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
+@@ -32,6 +32,8 @@ class BaseConfig:
+             from core.models import CoreSettings
+             settings = CoreSettings.get_proxy_settings()
+             cls._proxy_settings_cache = settings
++            # Override MAX_RETRIES and MAX_STREAM_SWITCHES if configured
++            cls.MAX_RETRIES = settings.get("max_retries", cls.MAX_RETRIES)
++            cls.MAX_STREAM_SWITCHES = settings.get("max_stream_switches", cls.MAX_STREAM_SWITCHES)
+             cls._proxy_settings_cache_time = now
+             return settings
+@@ -42,6 +44,10 @@ class BaseConfig:
+                 "redis_chunk_ttl": 60,
+                 "channel_shutdown_delay": 0,
+                 "channel_init_grace_period": 5,
++                "max_retries": 2,
++                "url_switch_timeout": 20,
++                "max_stream_switches": 200,
++                "connection_timeout": 10,
+             }
+ 
+         finally:
+@@ -55,6 +61,26 @@ class BaseConfig:
+         """Get Redis chunk TTL from database or default"""
+         settings = cls.get_proxy_settings()
+         return settings.get("redis_chunk_ttl", 60)
++
++    @classmethod
++    def get_max_retries(cls):
++        """Get max retries from database or default"""
++        settings = cls.get_proxy_settings()
++        return settings.get("max_retries", 2)
++
++    @classmethod
++    def get_url_switch_timeout(cls):
++        """Get URL switch timeout from database or default"""
++        settings = cls.get_proxy_settings()
++        return settings.get("url_switch_timeout", 20)
++
++    @classmethod
++    def get_max_stream_switches(cls):
++        """Get max stream switches from database or default"""
++        settings = cls.get_proxy_settings()
++        return settings.get("max_stream_switches", 200)
++
++    @classmethod
++    def get_connection_timeout(cls):
++        """Get connection timeout from database or default"""
++        settings = cls.get_proxy_settings()
++        return settings.get("connection_timeout", 10)
+ 
+     @property
+     def REDIS_CHUNK_TTL(self):

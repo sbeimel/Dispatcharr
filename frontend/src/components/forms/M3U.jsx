@@ -67,7 +67,6 @@ const M3U = ({
       priority: 0,
       enable_vod: false,
       proxy: '',
-      // is_adult: false,  // TODO: Enable after migration
     },
 
     validate: {
@@ -102,7 +101,6 @@ const M3U = ({
             : 0,
         enable_vod: m3uAccount.enable_vod || false,
         proxy: m3uAccount.proxy || '',
-        // is_adult: m3uAccount.is_adult || false,  // TODO: Enable after migration
       });
 
       if (m3uAccount.account_type == 'XC') {
@@ -275,7 +273,7 @@ const M3U = ({
                 name="proxy"
                 label="HTTP Proxy"
                 placeholder="http://proxy:8080"
-                description="HTTP proxy URL for FFmpeg streams (optional)"
+                description="HTTP proxy URL for streams (optional)"
                 {...form.getInputProps('proxy')}
                 key={form.key('proxy')}
               />
@@ -428,15 +426,6 @@ const M3U = ({
                 {...form.getInputProps('is_active', { type: 'checkbox' })}
                 key={form.key('is_active')}
               />
-
-              {/* TODO: Enable after migration 0020 is applied
-              <Checkbox
-                label="Adult Content"
-                description="Mark this M3U account as containing adult content"
-                {...form.getInputProps('is_adult', { type: 'checkbox' })}
-                key={form.key('is_adult')}
-              />
-              */}
             </Stack>
           </Group>
 

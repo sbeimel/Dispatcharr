@@ -1,0 +1,32 @@
+# PATCH UPDATE - failover_grace_period hinzugefügt
+
+Die folgenden Änderungen wurden NACH der Erstellung des ursprünglichen Patches vorgenommen:
+
+## Backend-Änderungen:
+
+### 1. apps/proxy/config.py
+- Zeile 49: "failover_grace_period": 20 zu defaults hinzugefügt
+- Zeile 87-91: BaseConfig.get_failover_grace_period() Methode hinzugefügt
+- Zeile 171-175: TSConfig.get_failover_grace_period() Methode hinzugefügt
+
+### 2. apps/proxy/ts_proxy/config_helper.py
+- Zeile 88-91: failover_grace_period() aktualisiert, nutzt jetzt TSConfig.get_failover_grace_period()
+
+## Frontend-Änderungen:
+
+### 3. frontend/src/constants.js
+- Zeile 79-82: failover_grace_period zu PROXY_SETTINGS_OPTIONS hinzugefügt
+
+### 4. frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
+- Zeile 21: failover_grace_period: 20 zu defaults hinzugefügt
+
+### 5. frontend/src/components/forms/settings/ProxySettingsForm.jsx
+- Zeile 32: 'failover_grace_period' zu isNumericField() hinzugefügt
+- Zeile 49-50: failover_grace_period max value (60) hinzugefügt
+
+## Grund:
+Das Setting war in v0.18.1 vorhanden, wurde aber initial nicht nach v0.19.0 portiert.
+Jetzt ist es vollständig implementiert.
+
+## Status:
+✅ ALLE 10 Settings von v0.18.1 sind jetzt in v0.19.0 vorhanden

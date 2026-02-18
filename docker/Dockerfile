@@ -30,23 +30,16 @@ WORKDIR /app
 COPY . /app
 # Copy nginx configuration
 COPY ./docker/nginx.conf /etc/nginx/sites-enabled/default
+# Fix line endings and make entrypoint scripts executable
+RUN for f in /app/docker/entrypoint*.sh; do \
+        if [ -f "$f" ]; then \
+            sed -i 's/\r$//' "$f" && chmod +x "$f"; \
+        fi; \
+    done
 # Clean out existing frontend folder
 RUN rm -rf /app/frontend
 # Copy built frontend assets
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
-
-# Make entrypoint scripts executable
-RUN chmod +x /app/docker/entrypoint.sh /app/docker/entrypoint.aio.sh
-
-# Install missing dependencies that might not be in base image
-# Try different pip paths depending on the base image
-RUN if [ -f "/dispatcharrpy/bin/pip" ]; then \
-        /dispatcharrpy/bin/pip install --no-cache-dir drf-yasg gunicorn; \
-    elif [ -f "/usr/local/bin/pip" ]; then \
-        /usr/local/bin/pip install --no-cache-dir drf-yasg gunicorn; \
-    else \
-        pip install --no-cache-dir drf-yasg gunicorn; \
-    fi
 
 # Add timestamp argument
 ARG TIMESTAMP

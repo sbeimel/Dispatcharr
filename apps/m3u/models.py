@@ -103,7 +103,7 @@ class M3UAccount(models.Model):
         max_length=500,
         blank=True,
         null=True,
-        help_text="HTTP proxy URL for FFmpeg streams (e.g., http://proxy:8080)",
+        help_text="HTTP proxy URL for streams (e.g., http://proxy:8080)",
     )
 
     def __str__(self):

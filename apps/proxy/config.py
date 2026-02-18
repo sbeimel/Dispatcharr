@@ -9,7 +9,7 @@ class BaseConfig:
     MAX_RETRIES = 2
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
-    MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
+    MAX_STREAM_SWITCHES = 200  # Maximum number of stream/profile combinations to try before giving up
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
@@ -32,8 +32,9 @@ class BaseConfig:
             from core.models import CoreSettings
             settings = CoreSettings.get_proxy_settings()
             cls._proxy_settings_cache = settings
-            # Override MAX_RETRIES if configured
+            # Override class-level constants if configured in database
             cls.MAX_RETRIES = settings.get("max_retries", cls.MAX_RETRIES)
+            cls.MAX_STREAM_SWITCHES = settings.get("max_stream_switches", cls.MAX_STREAM_SWITCHES)
             cls._proxy_settings_cache_time = now
             return settings
 
@@ -46,10 +47,10 @@ class BaseConfig:
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 5,
                 "max_retries": 2,
-                "url_switch_timeout": 8,
-                "max_stream_switches": 10,
-                "buffering_timeout": 15,
+                "url_switch_timeout": 20,
+                "max_stream_switches": 200,
                 "connection_timeout": 10,
+                "failover_grace_period": 20,
             }
 
         finally:
@@ -75,19 +76,25 @@ class BaseConfig:
     def get_url_switch_timeout(cls):
         """Get URL switch timeout from database or default"""
         settings = cls.get_proxy_settings()
-        return settings.get("url_switch_timeout", 8)
+        return settings.get("url_switch_timeout", 20)
 
     @classmethod
     def get_max_stream_switches(cls):
         """Get max stream switches from database or default"""
         settings = cls.get_proxy_settings()
-        return settings.get("max_stream_switches", 10)
+        return settings.get("max_stream_switches", 200)
 
     @classmethod
     def get_connection_timeout(cls):
         """Get connection timeout from database or default"""
         settings = cls.get_proxy_settings()
         return settings.get("connection_timeout", 10)
+
+    @classmethod
+    def get_failover_grace_period(cls):
+        """Get failover grace period from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("failover_grace_period", 20)
 
     @property
     def REDIS_CHUNK_TTL(self):
@@ -136,7 +143,7 @@ class TSConfig(BaseConfig):
     MAX_RECONNECT_ATTEMPTS = 3           # Maximum reconnects to try before switching streams
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
-    URL_SWITCH_TIMEOUT = 8   # Max time allowed for a stream switch operation
+    URL_SWITCH_TIMEOUT = 20   # Max time allowed for a stream switch operation
 
 
 

@@ -22,7 +22,7 @@ from .utils import detect_stream_type, get_logger
 from .redis_keys import RedisKeys
 from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, TS_PACKET_SIZE
 from .config_helper import ConfigHelper
-from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object, get_stream_info_for_profile
+from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_stream_object
 
 logger = get_logger()
 
@@ -61,8 +61,8 @@ class StreamManager:
         # Stream health monitoring
         self.last_data_time = time.time()
         self.healthy = True
-        self.health_check_interval = 5  # Fixed value, not configurable
-        self.chunk_size = Config.CHUNK_SIZE
+        self.health_check_interval = ConfigHelper.get('HEALTH_CHECK_INTERVAL', 5)
+        self.chunk_size = ConfigHelper.chunk_size()
 
         # Add to your __init__ method
         self._buffer_check_timers = []
@@ -101,8 +101,10 @@ class StreamManager:
                     if profile_id_bytes:
                         self.current_profile_id = int(profile_id_bytes.decode('utf-8'))
                         logger.info(f"Loaded profile ID {self.current_profile_id} from Redis for channel {buffer.channel_id}")
-                    
                     else:
+                        logger.warning(f"No profile_id found in Redis for channel {channel_id}.")
+                    
+                    if not stream_id_bytes:
                         logger.warning(f"No stream_id found in Redis for channel {channel_id}. "
                                      f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
                 except Exception as e:
@@ -1122,18 +1124,6 @@ class StreamManager:
         self.url_switching = True
         self.url_switch_start_time = time.time()
 
-        # Reset connection attempt time in Redis to restart grace period
-        try:
-            from .redis_keys import RedisKeys
-            from core.utils import RedisClient
-            redis_client = RedisClient.get_client()
-            if redis_client:
-                attempt_key = RedisKeys.connection_attempt(self.channel_id)
-                redis_client.setex(attempt_key, 60, str(time.time()))
-                logger.debug(f"Reset connection attempt time for channel {self.channel_id} during stream switch")
-        except Exception as e:
-            logger.warning(f"Could not reset connection attempt time for channel {self.channel_id}: {e}")
-
         try:
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:
@@ -1155,6 +1145,16 @@ class StreamManager:
                 # Add stream ID to tried streams for proper tracking
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
+            
+            # Update profile ID if provided
+            if m3u_profile_id:
+                old_profile_id = self.current_profile_id
+                self.current_profile_id = m3u_profile_id
+                logger.info(f"Updated profile ID from {old_profile_id} to {m3u_profile_id} for channel {self.channel_id}")
+                
+                # Add combination to tried_combinations
+                if stream_id and m3u_profile_id:
+                    self.tried_combinations.add((stream_id, m3u_profile_id))
 
             # Reset retry counter to allow immediate reconnect
             self.retry_count = 0
@@ -1682,6 +1682,9 @@ class StreamManager:
 
                 # Get stream info including URL for specific profile
                 logger.info(f"Trying stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
+                
+                # Import the new function
+                from .url_utils import get_stream_info_for_profile
                 stream_info = get_stream_info_for_profile(self.channel_id, stream_id, profile_id)
 
                 if 'error' in stream_info or not stream_info.get('url'):
@@ -1728,6 +1731,46 @@ class StreamManager:
                 return True
 
             logger.error(f"Tried {len(untried)} alternate combinations but none were suitable for channel {self.channel_id}")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error trying next stream for channel {self.channel_id}: {e}", exc_info=True)
+            return False
+
+                # IMPORTANT: Just update the URL, don't stop the channel or release resources
+                switch_result = self.update_url(new_url, stream_id, profile_id)
+                if not switch_result:
+                    logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
+                    continue  # Try next stream
+
+                # Update stream ID tracking
+                self.current_stream_id = stream_id
+
+                # Store the new user agent and transcode settings
+                self.user_agent = new_user_agent
+                self.transcode = new_transcode
+
+                # Update stream metadata in Redis - use the profile_id we got from get_alternate_streams
+                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                    self.buffer.redis_client.hset(metadata_key, mapping={
+                        ChannelMetadataField.URL: new_url,
+                        ChannelMetadataField.USER_AGENT: new_user_agent,
+                        ChannelMetadataField.STREAM_PROFILE: stream_info['stream_profile'],
+                        ChannelMetadataField.M3U_PROFILE: str(profile_id),  # Use the profile_id from get_alternate_streams
+                        ChannelMetadataField.STREAM_ID: str(stream_id),
+                        ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
+                        ChannelMetadataField.STREAM_SWITCH_REASON: "max_retries_exceeded"
+                    })
+
+                    # Log the switch
+                    logger.info(f"Stream metadata updated for channel {self.channel_id} to stream ID {stream_id} with M3U profile {profile_id}")
+
+                logger.info(f"Successfully switched to stream ID {stream_id} with URL {new_url} for channel {self.channel_id}")
+                return True
+
+            # If we get here, we tried all streams but none worked
+            logger.error(f"Tried {len(untried_streams)} alternate streams but none were suitable for channel {self.channel_id}")
             return False
 
         except Exception as e:
