@@ -1,0 +1,20 @@
+--- a/core/models.py
++++ b/core/models.py
+@@ -340,11 +340,16 @@ class CoreSettings(models.Model):
+     @classmethod
+     def get_proxy_settings(cls):
+         """Get proxy settings."""
+         return cls._get_group(PROXY_SETTINGS_KEY, {
+             "buffering_timeout": 15,
+             "buffering_speed": 1.0,
+             "redis_chunk_ttl": 60,
+             "channel_shutdown_delay": 0,
+             "channel_init_grace_period": 5,
++            "max_retries": 2,
++            "url_switch_timeout": 20,
++            "max_stream_switches": 200,
++            "connection_timeout": 10,
++            "failover_grace_period": 20,
+         })
+ 
+     # System Settings
