@@ -1737,46 +1737,6 @@ class StreamManager:
             logger.error(f"Error trying next stream for channel {self.channel_id}: {e}", exc_info=True)
             return False
 
-                # IMPORTANT: Just update the URL, don't stop the channel or release resources
-                switch_result = self.update_url(new_url, stream_id, profile_id)
-                if not switch_result:
-                    logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
-                    continue  # Try next stream
-
-                # Update stream ID tracking
-                self.current_stream_id = stream_id
-
-                # Store the new user agent and transcode settings
-                self.user_agent = new_user_agent
-                self.transcode = new_transcode
-
-                # Update stream metadata in Redis - use the profile_id we got from get_alternate_streams
-                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                    self.buffer.redis_client.hset(metadata_key, mapping={
-                        ChannelMetadataField.URL: new_url,
-                        ChannelMetadataField.USER_AGENT: new_user_agent,
-                        ChannelMetadataField.STREAM_PROFILE: stream_info['stream_profile'],
-                        ChannelMetadataField.M3U_PROFILE: str(profile_id),  # Use the profile_id from get_alternate_streams
-                        ChannelMetadataField.STREAM_ID: str(stream_id),
-                        ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
-                        ChannelMetadataField.STREAM_SWITCH_REASON: "max_retries_exceeded"
-                    })
-
-                    # Log the switch
-                    logger.info(f"Stream metadata updated for channel {self.channel_id} to stream ID {stream_id} with M3U profile {profile_id}")
-
-                logger.info(f"Successfully switched to stream ID {stream_id} with URL {new_url} for channel {self.channel_id}")
-                return True
-
-            # If we get here, we tried all streams but none worked
-            logger.error(f"Tried {len(untried_streams)} alternate streams but none were suitable for channel {self.channel_id}")
-            return False
-
-        except Exception as e:
-            logger.error(f"Error trying next stream for channel {self.channel_id}: {e}", exc_info=True)
-            return False
-
     # Add a new helper method to safely reset the URL switching state
     def _reset_url_switching_state(self):
         """Safely reset the URL switching state if it gets stuck"""

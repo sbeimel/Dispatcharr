@@ -68,16 +68,14 @@
 | `max_stream_switches` | 10 | 200 | ✅ **IMPLEMENTIERT** (erhöht) |
 | `connection_timeout` | 10s | 10s | ✅ **IMPLEMENTIERT** |
 | `buffering_timeout` | 15s | 15s | ✅ **BEREITS VORHANDEN** |
-| `failover_grace_period` | 20s | - | ⚠️ **NICHT PORTIERT** |
-
-**Hinweis:** `failover_grace_period` wurde NICHT portiert, da es in v0.19.0 nicht benötigt wird (andere Architektur).
+| `failover_grace_period` | 20s | 20s | ✅ **IMPLEMENTIERT** |
 
 **Verifiziert in:**
-- `Dispatcharr-0.19.0/apps/proxy/config.py` (Zeilen 10, 13, 35-36, 48-51, 70-91)
-- `Dispatcharr-0.19.0/apps/proxy/ts_proxy/config_helper.py` (Zeilen 68-111)
-- `Dispatcharr-0.19.0/frontend/src/constants.js` (Zeilen 66-77)
-- `Dispatcharr-0.19.0/frontend/src/components/forms/settings/ProxySettingsForm.jsx` (Zeilen 28-53)
-- `Dispatcharr-0.19.0/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js` (Zeilen 17-20)
+- `Dispatcharr-0.19.0/apps/proxy/config.py` (Zeilen 10, 13, 35-36, 48-51, 70-96)
+- `Dispatcharr-0.19.0/apps/proxy/ts_proxy/config_helper.py` (Zeilen 68-116)
+- `Dispatcharr-0.19.0/frontend/src/constants.js` (Zeilen 66-82)
+- `Dispatcharr-0.19.0/frontend/src/components/forms/settings/ProxySettingsForm.jsx` (Zeilen 28-58)
+- `Dispatcharr-0.19.0/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js` (Zeilen 17-21)
 
 ---
 
@@ -152,18 +150,32 @@
 
 ---
 
-## ⚠️ NICHT PORTIERTE FEATURES
+## ⚠️ ARCHITEKTUR-UNTERSCHIEDE
 
-### failover_grace_period
+### failover_grace_period vs url_switch_timeout
 
-**Status:** NICHT PORTIERT  
-**Grund:** In v0.19.0 nicht benötigt (andere Failover-Architektur)  
-**Auswirkung:** KEINE - Feature ist in v0.19.0 nicht erforderlich
+**WICHTIG:** Diese beiden Settings haben unterschiedliche Zwecke und sind BEIDE erforderlich!
 
-**Erklärung:**
-- v0.18.1 nutzte `failover_grace_period` für zusätzliche Zeit beim Stream-Wechsel
-- v0.19.0 hat eine verbesserte Failover-Logik, die diese Einstellung nicht benötigt
-- Die Funktionalität ist durch `url_switch_timeout` (20s) abgedeckt
+**`url_switch_timeout` (20s):**
+- Timeout für den Stream-Wechsel-PROZESS
+- Verhindert dass der Manager im "switching" Zustand stecken bleibt
+- Nutzer: Stream Manager
+
+**`failover_grace_period` (20s):**
+- EXTRA Zeit für Clients während Stream-Wechsel
+- Verhindert dass Clients disconnecten während der Manager noch wechselt
+- Nutzer: Stream Generator (Client-Seite)
+
+**Beispiel:**
+```
+Stream failed → 20s timeout (stream_timeout)
+              + 20s grace (failover_grace_period)
+              = 40s total für Clients
+              
+Manager wechselt in 15s → Client bleibt connected ✓
+```
+
+**Beide Settings sind in v0.19.0 vollständig implementiert!**
 
 ---
 
@@ -176,7 +188,6 @@
 
 ### Features
 - **5 Haupt-Features** vollständig portiert
-- **1 Feature** (failover_grace_period) nicht benötigt
 - **100% Funktionalität** erhalten
 
 ### Dateien
@@ -194,7 +205,7 @@
 1. ✅ **Profile Failover System** - VOLLSTÄNDIG (343 Kombinationen)
 2. ✅ **Universal HTTP Proxy Support** - VOLLSTÄNDIG (FFmpeg + Proxy)
 3. ✅ **Basic Authentication** - VOLLSTÄNDIG (M3U + EPG)
-4. ✅ **Extended Timeout Configuration** - VOLLSTÄNDIG (5 von 6 Settings)
+4. ✅ **Extended Timeout Configuration** - VOLLSTÄNDIG (6 von 6 Settings)
 5. ✅ **Ghost-Client Auto-Cleanup** - VOLLSTÄNDIG (Atomic Operations)
 
 ### Architektur-Anpassungen:
@@ -203,11 +214,13 @@
 - ✅ ConfigHelper nutzt Datenbankwerte
 - ✅ MAX_STREAM_SWITCHES auf 200 erhöht
 - ✅ URL_SWITCH_TIMEOUT auf 20s erhöht
+- ✅ FAILOVER_GRACE_PERIOD implementiert (20s)
 - ✅ Alle Getter-Methoden angepasst
 
-### Nicht portiert (nicht benötigt):
+### Alle Settings implementiert:
 
-- ⚠️ `failover_grace_period` - In v0.19.0 nicht erforderlich
+- ✅ Alle 6 Timeout-Settings vollständig implementiert
+- ✅ Keine fehlenden Features
 
 ---
 

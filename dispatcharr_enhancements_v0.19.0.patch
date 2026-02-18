@@ -61,7 +61,7 @@
              cls._proxy_settings_cache_time = now
              return settings
  
-@@ -42,6 +45,10 @@ class BaseConfig:
+@@ -42,6 +45,11 @@ class BaseConfig:
                  "redis_chunk_ttl": 60,
                  "channel_shutdown_delay": 0,
                  "channel_init_grace_period": 5,
@@ -69,10 +69,11 @@
 +                "url_switch_timeout": 20,
 +                "max_stream_switches": 200,
 +                "connection_timeout": 10,
++                "failover_grace_period": 20,
              }
  
          finally:
-@@ -55,6 +62,31 @@ class BaseConfig:
+@@ -55,6 +62,36 @@ class BaseConfig:
          """Get Redis chunk TTL from database or default"""
          settings = cls.get_proxy_settings()
          return settings.get("redis_chunk_ttl", 60)
@@ -100,6 +101,12 @@
 +        """Get connection timeout from database or default"""
 +        settings = cls.get_proxy_settings()
 +        return settings.get("connection_timeout", 10)
++
++    @classmethod
++    def get_failover_grace_period(cls):
++        """Get failover grace period from database or default"""
++        settings = cls.get_proxy_settings()
++        return settings.get("failover_grace_period", 20)
  
      @property
      def REDIS_CHUNK_TTL(self):
@@ -173,9 +180,7 @@
 
 --- a/apps/proxy/ts_proxy/config_helper.py
 +++ b/apps/proxy/ts_proxy/config_helper.py
-@@ -63,9 +63,11 @@ class ConfigHelper:
-         return ConfigHelper.get('CHUNK_SIZE', 8192)
- 
+@@ -68,7 +68,8 @@ class ConfigHelper:
      @staticmethod
      def max_retries():
          """Get maximum retry attempts"""
@@ -192,7 +197,7 @@
  
      @staticmethod
      def retry_wait_interval():
-@@ -75,7 +77,8 @@ class ConfigHelper:
+@@ -77,7 +78,8 @@ class ConfigHelper:
      @staticmethod
      def url_switch_timeout():
          """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
@@ -202,7 +207,14 @@
  
      @staticmethod
      def failover_grace_period():
-@@ -99,3 +102,9 @@ class ConfigHelper:
+         """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
+-        return ConfigHelper.get('FAILOVER_GRACE_PERIOD', 20)  # Default to 20 seconds
++        from apps.proxy.config import BaseConfig
++        return BaseConfig.get_failover_grace_period()
+ 
+     @staticmethod
+     def buffering_timeout():
+@@ -102,3 +104,9 @@ class ConfigHelper:
          Set this higher (e.g., 30s) for slow providers that may have intermittent delays.
          """
          return ConfigHelper.get('CHUNK_TIMEOUT', 5)  # Default 5 seconds
@@ -367,7 +379,7 @@
 
 --- a/frontend/src/constants.js
 +++ b/frontend/src/constants.js
-@@ -57,6 +57,26 @@ export const PROXY_SETTINGS_OPTIONS = {
+@@ -57,6 +57,31 @@ export const PROXY_SETTINGS_OPTIONS = {
      label: 'Channel Initialization Grace Period',
      description: 'Grace period in seconds during channel initialization',
    },
@@ -387,13 +399,17 @@
 +    label: 'Connection Timeout (seconds)',
 +    description: 'Maximum time to wait for initial connection to a stream',
 +  },
++  failover_grace_period: {
++    label: 'Failover Grace Period (seconds)',
++    description: 'Extra time to allow for stream switching before disconnecting clients',
++  },
  };
  
  export const M3U_FILTER_TYPES = [
 
 --- a/frontend/src/components/forms/settings/ProxySettingsForm.jsx
 +++ b/frontend/src/components/forms/settings/ProxySettingsForm.jsx
-@@ -25,6 +25,10 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
+@@ -25,6 +25,11 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
        'redis_chunk_ttl',
        'channel_shutdown_delay',
        'channel_init_grace_period',
@@ -401,10 +417,11 @@
 +      'url_switch_timeout',
 +      'max_stream_switches',
 +      'connection_timeout',
++      'failover_grace_period',
      ].includes(key);
    };
    const isFloatField = (key) => {
-@@ -37,7 +41,17 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
+@@ -37,7 +42,22 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
          ? 3600
          : key === 'channel_shutdown_delay'
            ? 300
@@ -417,14 +434,16 @@
 +                ? 500
 +                : key === 'connection_timeout'
 +                  ? 60
-+                  : 60;
++                  : key === 'failover_grace_period'
++                    ? 60
++                    : 60;
    };
    return (
      <>
 
 --- a/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
 +++ b/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
-@@ -14,5 +14,9 @@ export const getProxySettingDefaults = () => {
+@@ -14,5 +14,10 @@ export const getProxySettingDefaults = () => {
      redis_chunk_ttl: 60,
      channel_shutdown_delay: 0,
      channel_init_grace_period: 5,
@@ -432,6 +451,7 @@
 +    url_switch_timeout: 20,
 +    max_stream_switches: 200,
 +    connection_timeout: 10,
++    failover_grace_period: 20,
    };
  };
 

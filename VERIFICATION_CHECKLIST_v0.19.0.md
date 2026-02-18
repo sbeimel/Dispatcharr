@@ -134,6 +134,7 @@ if user is None:
 - ✅ `url_switch_timeout` (default: 20s, max: 60s)
 - ✅ `max_stream_switches` (default: 200, max: 500)
 - ✅ `connection_timeout` (default: 10s, max: 60s)
+- ✅ `failover_grace_period` (default: 20s, max: 60s)
 - ✅ Alle Settings über Frontend konfigurierbar
 - ✅ Backend nutzt Datenbankwerte statt Hardcoded
 
@@ -144,24 +145,25 @@ if user is None:
    - Zeile 13: MAX_STREAM_SWITCHES = 200
    - Zeile 35-36: cls.MAX_RETRIES = settings.get("max_retries", cls.MAX_RETRIES)
    - Zeile 36: cls.MAX_STREAM_SWITCHES = settings.get("max_stream_switches", cls.MAX_STREAM_SWITCHES)
-   - Zeile 48-51: Defaults in get_proxy_settings()
-   - Zeile 70-91: Getter-Methoden für alle neuen Settings
+   - Zeile 48-52: Defaults in get_proxy_settings()
+   - Zeile 70-96: Getter-Methoden für alle 5 neuen Settings (inkl. failover_grace_period)
 
 ✅ Dispatcharr-0.19.0/apps/proxy/ts_proxy/config_helper.py
    - Zeile 68-70: max_retries() nutzt BaseConfig.get_max_retries()
    - Zeile 73-76: max_stream_switches() nutzt BaseConfig.get_max_stream_switches()
    - Zeile 83-86: url_switch_timeout() nutzt BaseConfig.get_url_switch_timeout()
+   - Zeile 88-91: failover_grace_period() nutzt BaseConfig.get_failover_grace_period()
    - Zeile 108-111: connection_timeout() nutzt BaseConfig.get_connection_timeout()
 
 ✅ Dispatcharr-0.19.0/frontend/src/constants.js
-   - Zeile 66-77: Alle 4 neuen Settings mit Beschreibungen
+   - Zeile 66-82: Alle 5 neuen Settings mit Beschreibungen (inkl. failover_grace_period)
 
 ✅ Dispatcharr-0.19.0/frontend/src/components/forms/settings/ProxySettingsForm.jsx
-   - Zeile 28-31: Alle 4 neuen Settings in isNumericField()
-   - Zeile 44-53: Max-Werte für alle neuen Settings
+   - Zeile 28-32: Alle 5 neuen Settings in isNumericField()
+   - Zeile 44-58: Max-Werte für alle neuen Settings
 
 ✅ Dispatcharr-0.19.0/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
-   - Zeile 17-20: Defaults für alle 4 neuen Settings
+   - Zeile 17-21: Defaults für alle 5 neuen Settings (inkl. failover_grace_period: 20)
 ```
 
 **Status: ✅ VOLLSTÄNDIG IMPLEMENTIERT**
@@ -241,11 +243,16 @@ if user is None:
 1. ✅ Profile Failover System - **VOLLSTÄNDIG** (343 Kombinationen)
 2. ✅ Universal HTTP Proxy Support - **VOLLSTÄNDIG** (FFmpeg + Proxy)
 3. ✅ Basic Authentication - **VOLLSTÄNDIG** (M3U + EPG)
-4. ✅ Extended Timeout Configuration - **VOLLSTÄNDIG** (5 von 6 Settings)
+4. ✅ Extended Timeout Configuration - **VOLLSTÄNDIG** (6 von 6 Settings)
 5. ✅ Ghost-Client Auto-Cleanup - **VOLLSTÄNDIG** (Atomic Operations)
 
-### Nicht portiert (nicht benötigt):
-- ⚠️ `failover_grace_period` - In v0.19.0 nicht erforderlich (andere Architektur)
+### Alle Settings implementiert:
+- ✅ `max_retries`
+- ✅ `url_switch_timeout`
+- ✅ `max_stream_switches`
+- ✅ `connection_timeout`
+- ✅ `failover_grace_period`
+- ✅ `buffering_timeout` (bereits vorhanden)
 
 ### Dateien geändert:
 - ✅ 10 Backend-Dateien
@@ -273,11 +280,9 @@ if user is None:
 ✅ Keine fehlenden Dateien
 ✅ Keine fehlenden Funktionen
 ✅ Alle Anpassungen für v0.19.0 Architektur durchgeführt
-✅ `failover_grace_period` nicht portiert (in v0.19.0 nicht benötigt)
+✅ Alle 6 Timeout-Settings vollständig implementiert
 
 **Status: 100% FEATURE-PARITY ERREICHT** 🎉
-
-**Hinweis:** Das einzige nicht portierte Setting (`failover_grace_period`) wird in v0.19.0 nicht benötigt, da die Failover-Architektur verbessert wurde und durch `url_switch_timeout` (20s) abgedeckt ist.
 
 ---
 
