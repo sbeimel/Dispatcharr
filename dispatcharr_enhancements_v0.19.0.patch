@@ -440,10 +440,39 @@
    };
    return (
      <>
++
++@@ -110,9 +130,15 @@ const ProxySettingsForm = React.memo(({ active }) => {
++   useEffect(() => {
++     if (settings) {
++       if (settings['proxy_settings']?.value) {
++-        proxySettingsForm.setValues(settings['proxy_settings'].value);
+++        // Merge API values with defaults to ensure all fields have values
+++        const defaults = getProxySettingDefaults();
+++        const mergedValues = { ...defaults, ...settings['proxy_settings'].value };
+++        proxySettingsForm.setValues(mergedValues);
+++      } else {
+++        // If no settings from API, use defaults
+++        proxySettingsForm.setValues(getProxySettingDefaults());
++       }
++     }
++   }, [settings]);
+
 
 --- a/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
 +++ b/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
-@@ -14,5 +14,10 @@ export const getProxySettingDefaults = () => {
+@@ -1,10 +1,8 @@ import { PROXY_SETTINGS_OPTIONS } from '../../../constants.js';
+ 
+ export const getProxySettingsFormInitialValues = () => {
+-  return Object.keys(PROXY_SETTINGS_OPTIONS).reduce((acc, key) => {
+-    acc[key] = '';
+-    return acc;
+-  }, {});
++  // Use defaults instead of empty strings
++  return getProxySettingDefaults();
+ };
+ 
+ export const getProxySettingDefaults = () => {
+@@ -14,5 +12,10 @@ export const getProxySettingDefaults = () => {
      redis_chunk_ttl: 60,
      channel_shutdown_delay: 0,
      channel_init_grace_period: 5,

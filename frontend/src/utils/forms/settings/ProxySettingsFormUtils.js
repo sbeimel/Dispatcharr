@@ -1,10 +1,8 @@
 import { PROXY_SETTINGS_OPTIONS } from '../../../constants.js';
 
 export const getProxySettingsFormInitialValues = () => {
-  return Object.keys(PROXY_SETTINGS_OPTIONS).reduce((acc, key) => {
-    acc[key] = '';
-    return acc;
-  }, {});
+  // Use defaults instead of empty strings
+  return getProxySettingDefaults();
 };
 
 export const getProxySettingDefaults = () => {

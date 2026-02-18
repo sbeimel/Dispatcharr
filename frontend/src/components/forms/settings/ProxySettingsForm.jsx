@@ -112,7 +112,13 @@ const ProxySettingsForm = React.memo(({ active }) => {
   useEffect(() => {
     if (settings) {
       if (settings['proxy_settings']?.value) {
-        proxySettingsForm.setValues(settings['proxy_settings'].value);
+        // Merge API values with defaults to ensure all fields have values
+        const defaults = getProxySettingDefaults();
+        const mergedValues = { ...defaults, ...settings['proxy_settings'].value };
+        proxySettingsForm.setValues(mergedValues);
+      } else {
+        // If no settings from API, use defaults
+        proxySettingsForm.setValues(getProxySettingDefaults());
       }
     }
   }, [settings]);
