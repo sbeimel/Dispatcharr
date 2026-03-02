@@ -2,7 +2,7 @@
 
 **Version:** v0.20.1  
 **Datum:** 2026-03-02  
-**Features:** Alle v0.19.0 Features + Bugfixes
+**Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
 ---
 
@@ -16,12 +16,13 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 5. Ghost-Client Auto-Cleanup (bereits vorhanden)
 6. Migration für Proxy Feld
 7. Alle Frontend-Änderungen
+8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 3 kritische Bugfixes
+**Zusätzlich:** 4 kritische Bugfixes
 
 ---
 
-## GEÄNDERTE DATEIEN (13)
+## GEÄNDERTE DATEIEN (14)
 
 ### Backend (8 Dateien)
 
@@ -44,6 +45,10 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 ### Migration (1 Datei)
 
 13. `apps/m3u/migrations/0019_add_proxy_field.py` - ✅ NEU
+
+### Docker (1 Datei)
+
+14. `docker/DispatcharrBase` - ✅ MODIFIZIERT (drf-spectacular Fix)
 
 ---
 
@@ -304,6 +309,32 @@ class Migration(migrations.Migration):
 
 ---
 
+### 14. docker/DispatcharrBase
+
+**Status:** ✅ MODIFIZIERT (drf-spectacular Fix)
+
+**Problem:** `ModuleNotFoundError: No module named 'drf_spectacular'` beim Start
+
+**Lösung:** Explizite Installation von drf-spectacular nach uv sync
+
+```dockerfile
+# --- Create Python virtual environment and install dependencies ---
+WORKDIR /tmp/build
+COPY pyproject.toml /tmp/build/
+COPY version.py /tmp/build/
+COPY README.md /tmp/build/
+RUN uv sync --python 3.13 --no-cache --no-install-project --no-dev && \
+    uv pip install --python $UV_PROJECT_ENVIRONMENT/bin/python --no-cache drf-spectacular>=0.29.0 && \
+    rm -rf /tmp/build
+WORKDIR /
+```
+
+**Änderung:**
+- Zeile hinzugefügt: `uv pip install --python $UV_PROJECT_ENVIRONMENT/bin/python --no-cache drf-spectacular>=0.29.0 && \`
+- Stellt sicher, dass drf-spectacular beim Docker Build installiert wird
+
+---
+
 ## INSTALLATION
 
 ### Automatisch (Empfohlen)
@@ -312,6 +343,12 @@ class Migration(migrations.Migration):
 cd Dispatcharr-0.20.1
 chmod +x ../install_v0.20.1_enhancements.sh
 ../install_v0.20.1_enhancements.sh
+
+# Docker Images neu bauen
+docker build -f docker/DispatcharrBase -t dispatcharr:base .
+docker build -f docker/Dockerfile --build-arg BASE_TAG=base -t dispatcharr:0.20.1 .
+docker-compose down
+docker-compose up -d
 ```
 
 ### Manuell
@@ -333,9 +370,13 @@ npm run build
 cd ..
 python manage.py collectstatic --noinput
 
-# 5. Server neu starten
-docker compose down
-docker compose up -d --build
+# 5. Docker Images neu bauen
+docker build -f docker/DispatcharrBase -t dispatcharr:base .
+docker build -f docker/Dockerfile --build-arg BASE_TAG=base -t dispatcharr:0.20.1 .
+
+# 6. Server neu starten
+docker-compose down
+docker-compose up -d
 ```
 
 ---
