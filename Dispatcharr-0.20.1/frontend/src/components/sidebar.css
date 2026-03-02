@@ -1,0 +1,58 @@
+.mantine-Stack-root .navlink {
+  display: flex;
+  flex-direction: row; /* Ensures horizontal layout */
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 8px !important;
+  border-radius: 6px;
+  background-color: transparent; /* Default background when not active */
+  border: 1px solid transparent;
+  transition: all 0.3s ease;
+  margin-left: 2px;
+}
+
+/* Active state styles */
+.navlink.navlink-active {
+  color: #ffffff;
+  background-color: #245043;
+  border: 1px solid #3ba882;
+}
+
+/* Hover effect */
+.navlink:hover, .navlink-parent-active {
+  background-color: #2A2F34; /* Gray hover effect when not active */
+  border: 1px solid #3D3D42;
+}
+
+/* Hover effect for active state */
+.navlink.navlink-active:hover {
+  background-color: #3a3a40;
+  border: 1px solid #3ba882;
+}
+
+/* Collapse condition for justifyContent */
+.navlink.navlink-collapsed {
+  justify-content: center;
+}
+
+.navlink:not(.navlink-collapsed) {
+  justify-content: flex-start;
+}
+
+/* Left indicator for open nav groups rendered outside buttons */
+.navgroup-open {
+  position: relative;
+  overflow: visible;
+}
+.navgroup-open::before {
+  content: '';
+  position: absolute;
+  left: 0; /* avoid horizontal overflow; sits at container edge */
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #3BA882;
+  pointer-events: none;
+  z-index: 2;
+}

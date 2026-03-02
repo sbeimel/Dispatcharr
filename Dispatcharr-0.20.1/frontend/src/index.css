@@ -1,0 +1,142 @@
+/* frontend/src/index.css */
+:root {
+  --separator-border: transparent !important;
+  /* Override Allotment's default border */
+  --sash-hover-size: 3px !important;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
+    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #18181b;
+  /* Ensure the global background is dark */
+  color: #ffffff;
+}
+
+code {
+  font-family:
+    source-code-pro, Menlo, Monaco, Consolas, 'Courier New', monospace;
+}
+
+/* Example scrollbars - optional, to match a dark theme. */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #3b3c41;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #555;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+@supports (-moz-appearance: none) {
+  input[readonly][aria-haspopup] {
+    pointer-events: auto !important;
+  }
+}
+
+table.mrt-table
+  tr.mantine-Table-tr.mantine-Table-tr-detail-panel
+  td.mantine-Table-td-detail-panel {
+  width: 100% !important;
+}
+
+.table-input-header input::placeholder {
+  color: rgb(207, 207, 207);
+  font-weight: normal;
+  font-size: 14px;
+}
+
+/* Ensure Allotment uses its default layout */
+.split-view {
+  width: 100%;
+  height: 100%;
+}
+
+/* Styling for the sash (splitter) */
+.sash.sash-vertical {
+  position: relative;
+  width: 4px;
+  /* Thin invisible divider */
+  background: transparent;
+}
+
+/* Create a short vertical bar */
+.sash.sash-vertical::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  /* Width of the short bar */
+  height: 50px;
+  /* Short bar length */
+  background: rgba(255, 255, 255, 0.2);
+  /* Light color similar to your screenshot */
+  border-radius: 4px;
+}
+
+/* Optional: Highlight when hovering */
+.sash.sash-vertical:hover::before {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* Tables should fill available space */
+.split-view-view {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+}
+
+/* Fix for "will-change memory consumption is too high" error */
+* {
+  will-change: auto !important;
+}
+
+/* For elements that specifically need transforms (like draggable elements) */
+[data-draggable='true'] {
+  transform: translate3d(0, 0, 0) !important;
+}
+
+/* styles.css */
+.custom-multiselect-input {
+  display: flex;
+  flex-wrap: wrap;
+  max-height: 30px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.custom-multiselect .mantine-MultiSelect-input {
+  min-height: 30px;
+  max-height: 30px;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+
+.custom-multiselect .mantine-MultiSelect-pillsList {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.custom-multiselect .mantine-MultiSelect-pill {
+  max-width: 100px;
+  flex-shrink: 0;
+}
+
+.custom-multiselect .mantine-MultiSelect-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
