@@ -283,27 +283,46 @@ def get_stream_info_for_profile(
 
 ### 13. apps/m3u/migrations/0019_add_proxy_field.py
 
-**Status:** ✅ NEU
+**Status:** ✅ NEU (Intelligente Migration)
+
+**Besonderheit:** Diese Migration prüft, ob die `proxy` Spalte bereits existiert, bevor sie hinzugefügt wird.
+
+**Funktionsweise:**
+- Bei **frischer Installation**: Spalte wird angelegt
+- Bei **Update**: Prüft ob Spalte existiert, überspringt wenn ja
+- Verhindert `DuplicateColumn` Fehler bei Updates
 
 ```python
 from django.db import migrations, models
 
+def add_proxy_field_safe(apps, schema_editor):
+    """Add proxy field only if it doesn't exist yet"""
+    from django.db import connection
+    
+    with connection.cursor() as cursor:
+        # Check if column exists
+        cursor.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public'
+              AND table_name = 'm3u_m3uaccount' 
+              AND column_name = 'proxy'
+        """)
+        
+        if not cursor.fetchone():
+            # Column doesn't exist, add it
+            cursor.execute("""
+                ALTER TABLE m3u_m3uaccount 
+                ADD COLUMN proxy varchar(500) NULL
+            """)
+
 class Migration(migrations.Migration):
     dependencies = [
-        ('m3u', '0018_...'),
+        ('m3u', '0018_add_profile_custom_properties'),
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='m3uaccount',
-            name='proxy',
-            field=models.CharField(
-                blank=True,
-                help_text='HTTP Proxy URL (e.g., http://proxy:port)',
-                max_length=500,
-                null=True
-            ),
-        ),
+        migrations.RunPython(add_proxy_field_safe, reverse_code=migrations.RunPython.noop),
     ]
 ```
 
