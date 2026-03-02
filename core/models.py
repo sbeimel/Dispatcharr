@@ -132,23 +132,19 @@ class StreamProfile(models.Model):
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
         }
-        
-        # Add proxy to replacements if provided
-        if proxy:
-            replacements["{proxy}"] = proxy
 
         # Split the command and iterate through each part to apply replacements
         cmd = [self.command] + [
             self._replace_in_part(part, replacements)
             for part in shlex_split(self.parameters) # use shlex to handle quoted strings
         ]
-        
+
         # Add proxy parameters to ffmpeg if proxy is provided and not already in parameters
         if proxy and self.command == "ffmpeg" and "-http_proxy" not in self.parameters:
             # Insert proxy parameter after ffmpeg command but before input
             # Find the position of -i (input) parameter
             try:
-                i_index = cmd.index("-i")
+                i_index = cmd.index('-i')
                 # Insert proxy parameters before -i
                 cmd.insert(i_index, proxy)
                 cmd.insert(i_index, "-http_proxy")
@@ -346,11 +342,6 @@ class CoreSettings(models.Model):
             "redis_chunk_ttl": 60,
             "channel_shutdown_delay": 0,
             "channel_init_grace_period": 5,
-            "max_retries": 2,
-            "url_switch_timeout": 20,
-            "max_stream_switches": 200,
-            "connection_timeout": 10,
-            "failover_grace_period": 20,
         })
 
     # System Settings

@@ -491,11 +491,6 @@ class StreamManager:
             # Get proxy from M3U account if available
             proxy = None
             try:
-                # Get the channel to find the M3U account
-                from apps.channels.models import Channel
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
-                
-                # Get current stream and its M3U account
                 if hasattr(self, 'current_stream_id') and self.current_stream_id:
                     from apps.channels.models import Stream
                     stream = Stream.objects.get(id=self.current_stream_id)
@@ -504,7 +499,7 @@ class StreamManager:
                         if proxy:
                             logger.info(f"Using proxy {proxy} for channel {self.channel_id}")
             except Exception as e:
-                logger.debug(f"Could not get proxy for channel {self.channel_id}: {e}")
+                logger.debug(f"Could not get proxy: {e}")
 
             # Build and start transcode command
             self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
@@ -914,11 +909,6 @@ class StreamManager:
             # Get proxy from M3U account if available
             proxy = None
             try:
-                # Get the channel to find the M3U account
-                from apps.channels.models import Channel
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
-                
-                # Get current stream and its M3U account
                 if hasattr(self, 'current_stream_id') and self.current_stream_id:
                     from apps.channels.models import Stream
                     stream = Stream.objects.get(id=self.current_stream_id)
@@ -927,18 +917,18 @@ class StreamManager:
                         if proxy:
                             logger.info(f"Using HTTP proxy {proxy} for channel {self.channel_id}")
             except Exception as e:
-                logger.debug(f"Could not get proxy for channel {self.channel_id}: {e}")
+                logger.debug(f"Could not get HTTP proxy: {e}")
 
             # Use HTTPStreamReader to fetch stream and pipe to a readable file descriptor
             # This allows us to use the same fetch_chunk() path as transcode
             from .http_streamer import HTTPStreamReader
 
-            # Create and start the HTTP stream reader with proxy support
+            # Create and start the HTTP stream reader
             self.http_reader = HTTPStreamReader(
                 url=self.url,
                 user_agent=self.user_agent,
                 chunk_size=self.chunk_size,
-                proxy=proxy  # Pass proxy to HTTPStreamReader
+                proxy=proxy
             )
 
             # Start the reader thread and get the read end of the pipe
@@ -1138,7 +1128,7 @@ class StreamManager:
             self.url = new_url
             self.connected = False
 
-            # Update stream ID if provided
+            # Update stream ID and profile ID if provided
             if stream_id:
                 old_stream_id = self.current_stream_id
                 self.current_stream_id = stream_id
@@ -1146,7 +1136,6 @@ class StreamManager:
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
             
-            # Update profile ID if provided
             if m3u_profile_id:
                 old_profile_id = self.current_profile_id
                 self.current_profile_id = m3u_profile_id
@@ -1679,6 +1668,8 @@ class StreamManager:
 
                 # Add to tried combinations
                 self.tried_combinations.add((stream_id, profile_id))
+                # Also add to tried_stream_ids for backward compatibility
+                self.tried_stream_ids.add(stream_id)
 
                 # Get stream info including URL for specific profile
                 logger.info(f"Trying stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")

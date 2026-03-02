@@ -603,6 +603,14 @@ def get_stream_info_for_profile(channel_id: str, stream_id: int, m3u_profile_id:
     """
     Build URL/User-Agent/Transcode for a fixed combination of Stream + M3U profile.
     Return schema compatible with get_stream_info_for_switch(...).
+    
+    Args:
+        channel_id: The UUID of the channel
+        stream_id: The ID of the stream
+        m3u_profile_id: The ID of the M3U profile
+    
+    Returns:
+        dict: Stream information including URL, user agent, transcode flag, etc.
     """
     try:
         channel = get_stream_object(channel_id)

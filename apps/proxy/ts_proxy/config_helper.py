@@ -19,7 +19,8 @@ class ConfigHelper:
     @staticmethod
     def connection_timeout():
         """Get connection timeout in seconds"""
-        return ConfigHelper.get('CONNECTION_TIMEOUT', 10)
+        from apps.proxy.config import BaseConfig
+        return BaseConfig.get_connection_timeout()
 
     @staticmethod
     def client_wait_timeout():
@@ -61,8 +62,8 @@ class ConfigHelper:
         """Get chunk size in bytes"""
         return ConfigHelper.get('CHUNK_SIZE', 8192)
 
-    @classmethod
-    def max_retries(cls):
+    @staticmethod
+    def max_retries():
         """Get maximum retry attempts"""
         from apps.proxy.config import BaseConfig
         return BaseConfig.get_max_retries()
@@ -87,8 +88,14 @@ class ConfigHelper:
     @staticmethod
     def failover_grace_period():
         """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
+        from apps.proxy.config import TSConfig
+        return TSConfig.get_failover_grace_period()
+
+    @staticmethod
+    def connection_timeout():
+        """Get connection timeout in seconds"""
         from apps.proxy.config import BaseConfig
-        return BaseConfig.get_failover_grace_period()
+        return BaseConfig.get_connection_timeout()
 
     @staticmethod
     def buffering_timeout():
@@ -113,9 +120,3 @@ class ConfigHelper:
         Set this higher (e.g., 30s) for slow providers that may have intermittent delays.
         """
         return ConfigHelper.get('CHUNK_TIMEOUT', 5)  # Default 5 seconds
-
-    @staticmethod
-    def connection_timeout():
-        """Get connection timeout in seconds"""
-        from apps.proxy.config import BaseConfig
-        return BaseConfig.get_connection_timeout()
