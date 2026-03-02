@@ -488,8 +488,21 @@ class StreamManager:
             else:
                 stream_profile = channel.get_stream_profile()
 
+            # Get proxy from M3U account if available
+            proxy = None
+            try:
+                if hasattr(self, 'current_stream_id') and self.current_stream_id:
+                    from apps.channels.models import Stream
+                    stream = Stream.objects.get(id=self.current_stream_id)
+                    if hasattr(stream, 'm3u_account') and stream.m3u_account:
+                        proxy = stream.m3u_account.proxy
+                        if proxy:
+                            logger.info(f"Using proxy {proxy} for channel {self.channel_id}")
+            except Exception as e:
+                logger.debug(f"Could not get proxy: {e}")
+
             # Build and start transcode command
-            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+            self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, proxy)
 
             # Store stream command for efficient log parser routing
             self.stream_command = stream_profile.command
