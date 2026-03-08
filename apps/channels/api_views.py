@@ -1959,7 +1959,7 @@ class LogoViewSet(viewsets.ModelViewSet):
                 remote_response = requests.get(
                     logo_url,
                     stream=True,
-                    timeout=(3, 5),  # (connect_timeout, read_timeout)
+                    timeout=(10, 15),  # (connect_timeout, read_timeout) - increased for slow servers
                     headers={'User-Agent': user_agent}
                 )
                 if remote_response.status_code == 200:

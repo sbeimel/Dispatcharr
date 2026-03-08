@@ -18,13 +18,13 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 5 kritische Bugfixes (4 in url_utils.py + 1 in server.py)
+**Zusätzlich:** 6 Bugfixes (4 in url_utils.py + 1 in server.py + 1 in api_views.py)
 
 ---
 
-## GEÄNDERTE DATEIEN (15)
+## GEÄNDERTE DATEIEN (16)
 
-### Backend (9 Dateien)
+### Backend (10 Dateien)
 
 1. `apps/proxy/config.py` - ✅ IDENTISCH mit v0.19.0
 2. `apps/m3u/models.py` - ✅ IDENTISCH mit v0.19.0
@@ -35,21 +35,22 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. `apps/proxy/ts_proxy/stream_manager.py` - ✅ IDENTISCH mit v0.19.0
 8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes)
 9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix)
+10. `apps/channels/api_views.py` - ✅ MODIFIZIERT (Bugfix)
 
 ### Frontend (4 Dateien)
 
-9. `frontend/src/constants.js` - ✅ IDENTISCH mit v0.19.0
-10. `frontend/src/utils/forms/settings/ProxySettingsFormUtils.js` - ✅ IDENTISCH mit v0.19.0
-11. `frontend/src/components/forms/settings/ProxySettingsForm.jsx` - ✅ IDENTISCH mit v0.19.0
-12. `frontend/src/components/forms/M3U.jsx` - ✅ IDENTISCH mit v0.19.0
+10. `frontend/src/constants.js` - ✅ IDENTISCH mit v0.19.0
+11. `frontend/src/utils/forms/settings/ProxySettingsFormUtils.js` - ✅ IDENTISCH mit v0.19.0
+12. `frontend/src/components/forms/settings/ProxySettingsForm.jsx` - ✅ IDENTISCH mit v0.19.0
+13. `frontend/src/components/forms/M3U.jsx` - ✅ IDENTISCH mit v0.19.0
 
 ### Migration (1 Datei)
 
-13. `apps/m3u/migrations/0019_add_proxy_field.py` - ✅ NEU
+14. `apps/m3u/migrations/0019_add_proxy_field.py` - ✅ NEU
 
 ### Docker (1 Datei)
 
-14. `docker/DispatcharrBase` - ✅ MODIFIZIERT (drf-spectacular Fix)
+15. `docker/DispatcharrBase` - ✅ MODIFIZIERT (drf-spectacular Fix)
 
 ---
 
@@ -269,6 +270,85 @@ def get_stream_info_for_profile(
 
 ---
 
+### 10. apps/channels/api_views.py
+
+**Status:** ⚠️ BUGFIX ERFORDERLICH (Original Dispatcharr Bug)
+
+#### Bugfix 6: Logo Fetch Timeout zu kurz
+
+**Problem:** Logo-Downloads von langsamen Servern (z.B. `logos.jesmann.com`) schlagen mit Timeout fehl
+
+**VORHER (ZU KURZ - ORIGINAL CODE):**
+```python
+remote_response = requests.get(
+    logo_url,
+    stream=True,
+    timeout=(3, 5),  # ❌ 3s connect, 5s read - zu kurz!
+    headers={'User-Agent': user_agent}
+)
+```
+
+**Logs zeigen:**
+```
+WARNING apps.channels.api_views Timeout fetching logo from https://logos.jesmann.com/KABEL1H.png
+WARNING django.request Not Found: /api/channels/logos/5185/cache/
+GET 404 /api/channels/logos/5185/cache/ 3107ms
+```
+
+**Problem:**
+- Requests dauern ~3000-3100ms (3+ Sekunden)
+- Connect Timeout ist nur 3 Sekunden
+- Server antwortet zu langsam → Timeout → 404 Error
+
+**NACHHER (GEFIXT):**
+```python
+remote_response = requests.get(
+    logo_url,
+    stream=True,
+    timeout=(10, 15),  # ✅ 10s connect, 15s read - ausreichend für langsame Server
+    headers={'User-Agent': user_agent}
+)
+```
+
+**Auswirkung:**
+- **Vorher:** Logos von langsamen Servern werden nicht geladen (404)
+- **Nachher:** Logos werden korrekt geladen, auch von langsamen Servern
+
+**Hinweis:** Dies ist ein Bug im **Original Dispatcharr v0.20.1**, nicht durch unsere Enhancements verursacht.
+
+---
+
+### 10-13. Frontend-Dateien
+
+**Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
+**Grund:** Dateien sind bereits identisch mit v0.19.0
+    # Release the channel, stream, and profile keys from the channel
+    try:
+        channel = Channel.objects.get(uuid=channel_id)
+        channel.release_stream()
+    except Channel.DoesNotExist:
+        try:
+            stream = Stream.objects.get(stream_hash=channel_id)
+            stream.release_stream()
+        except Stream.DoesNotExist:
+            # Channel/stream doesn't exist in DB - that's OK, just clean Redis
+            logger.info(f"Channel/stream {channel_id} not found in database, cleaning Redis keys only")
+    except Exception as e:
+        logger.error(f"Error releasing stream for channel {channel_id}: {e}")
+
+    # ✅ Continue with Redis cleanup regardless of DB state
+    if not self.redis_client:
+        return 0
+```
+
+**Auswirkung:**
+- **Vorher:** Orphaned Keys bleiben für immer, Cleanup läuft endlos
+- **Nachher:** Keys werden korrekt gelöscht, auch wenn Channel/Stream gelöscht wurde
+
+**Hinweis:** Dies ist ein Bug im Original Dispatcharr v0.20.1, nicht durch unsere Enhancements verursacht.
+
+---
+
 ### 9-12. Frontend-Dateien
 
 **Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
@@ -459,6 +539,25 @@ Bei Problemen:
 
 ---
 
+## BUGFIXES ZUSAMMENFASSUNG
+
+### Bugfix 1-4: url_utils.py (Profile Failover)
+- ✅ `get_alternate_streams()` gibt jetzt ALLE Profile zurück (nicht nur eines)
+- ✅ `get_alternate_streams()` akzeptiert `current_profile_id` Parameter
+- ✅ `get_stream_info_for_profile()` Funktion hinzugefügt (fehlte komplett)
+- ✅ `_establish_transcode_connection()` Proxy-Parameter hinzugefügt
+
+### Bugfix 5: server.py (Orphaned Cleanup)
+- ✅ `_clean_redis_keys()` Exception Handling verbessert
+- ✅ Redis Keys werden jetzt korrekt gelöscht, auch wenn Channel/Stream nicht in DB existiert
+- ✅ Verhindert endlose Cleanup-Zyklen für gelöschte Channels
+- ⚠️ **Original Dispatcharr Bug** - nicht durch unsere Enhancements verursacht
+
+**Alle Bugfixes sind kritisch für die korrekte Funktion des Profile Failover Systems!**
+
+---
+
 **Erstellt:** 2026-03-02  
-**Version:** 1.0.0  
+**Aktualisiert:** 2026-03-08 (Bugfix 5 hinzugefügt)  
+**Version:** 1.1.0  
 **Status:** PRODUKTIONSREIF
