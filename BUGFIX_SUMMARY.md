@@ -254,3 +254,68 @@ def _clean_redis_keys(self, channel_id):
 
 **Erstellt:** 2026-03-08  
 **Status:** Alle Bugfixes implementiert und getestet
+
+
+---
+
+## Bugfix 6: Logo Fetch Timeout zu kurz
+
+**Datei:** `apps/channels/api_views.py`  
+**Funktion:** Logo fetching (Zeile ~1960)
+
+**Problem:**
+```python
+# VORHER (ZU KURZ)
+remote_response = requests.get(
+    logo_url,
+    stream=True,
+    timeout=(3, 5),  # ❌ 3s connect, 5s read - zu kurz!
+    headers={'User-Agent': user_agent}
+)
+```
+
+**Logs zeigen:**
+```
+WARNING apps.channels.api_views Timeout fetching logo from https://logos.jesmann.com/KABEL1H.png
+WARNING django.request Not Found: /api/channels/logos/5185/cache/
+GET 404 /api/channels/logos/5185/cache/ 3107ms
+```
+
+**Lösung:**
+```python
+# NACHHER (AUSREICHEND)
+remote_response = requests.get(
+    logo_url,
+    stream=True,
+    timeout=(10, 15),  # ✅ 10s connect, 15s read
+    headers={'User-Agent': user_agent}
+)
+```
+
+**Auswirkung:**
+- **Vorher:** Logos von langsamen Servern werden nicht geladen (404 Error)
+- **Nachher:** Logos werden korrekt geladen, auch von langsamen Servern
+
+**Hinweis:** Dies ist ein Bug im **Original Dispatcharr v0.20.1**, nicht durch unsere Enhancements verursacht!
+
+---
+
+## Aktualisierte Zusammenfassung
+
+| Bugfix | Datei | Funktion | Schweregrad | Quelle |
+|--------|-------|----------|-------------|--------|
+| 1 | url_utils.py | get_alternate_streams() | KRITISCH | Unsere Implementation |
+| 2 | url_utils.py | get_alternate_streams() | KRITISCH | Unsere Implementation |
+| 3 | url_utils.py | get_stream_info_for_profile() | KRITISCH | Unsere Implementation |
+| 4 | stream_manager.py | _establish_transcode_connection() | KRITISCH | Unsere Implementation |
+| 5 | server.py | _clean_redis_keys() | HOCH | Original Dispatcharr |
+| 6 | api_views.py | Logo fetching | MITTEL | Original Dispatcharr |
+
+**Bugfix 1-4:** Kritisch für Profile Failover System  
+**Bugfix 5:** Original Bug - verhindert Redis Memory Leak  
+**Bugfix 6:** Original Bug - verhindert Logo-Anzeige
+
+---
+
+**Aktualisiert:** 2026-03-08  
+**Status:** Alle 6 Bugfixes implementiert und getestet

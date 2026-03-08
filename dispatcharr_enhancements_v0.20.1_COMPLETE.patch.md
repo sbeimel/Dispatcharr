@@ -318,42 +318,42 @@ remote_response = requests.get(
 
 ---
 
-### 10-13. Frontend-Dateien
+---
 
-**Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
-**Grund:** Dateien sind bereits identisch mit v0.19.0
-    # Release the channel, stream, and profile keys from the channel
-    try:
-        channel = Channel.objects.get(uuid=channel_id)
-        channel.release_stream()
-    except Channel.DoesNotExist:
-        try:
-            stream = Stream.objects.get(stream_hash=channel_id)
-            stream.release_stream()
-        except Stream.DoesNotExist:
-            # Channel/stream doesn't exist in DB - that's OK, just clean Redis
-            logger.info(f"Channel/stream {channel_id} not found in database, cleaning Redis keys only")
-    except Exception as e:
-        logger.error(f"Error releasing stream for channel {channel_id}: {e}")
+### 9. apps/proxy/ts_proxy/server.py
 
-    # ✅ Continue with Redis cleanup regardless of DB state
-    if not self.redis_client:
-        return 0
-```
+**Status:** ⚠️ BUGFIX (Original Dispatcharr Bug)
 
-**Auswirkung:**
-- **Vorher:** Orphaned Keys bleiben für immer, Cleanup läuft endlos
-- **Nachher:** Keys werden korrekt gelöscht, auch wenn Channel/Stream gelöscht wurde
-
-**Hinweis:** Dies ist ein Bug im Original Dispatcharr v0.20.1, nicht durch unsere Enhancements verursacht.
+**Bugfix 5:** Exception Handling in `_clean_redis_keys()` verbessert
+- Bare `except:` durch spezifische Exception-Behandlung ersetzt
+- Redis Keys werden jetzt korrekt gelöscht, auch wenn Channel/Stream nicht in DB existiert
+- Verhindert endlose Cleanup-Zyklen
 
 ---
 
-### 9-12. Frontend-Dateien
+### 10. apps/channels/api_views.py
+
+**Status:** ⚠️ BUGFIX (Original Dispatcharr Bug)
+
+**Bugfix 6:** Logo Fetch Timeout erhöht
+
+**Änderung:**
+```python
+# VORHER
+timeout=(3, 5)  # 3s connect, 5s read
+
+# NACHHER
+timeout=(10, 15)  # 10s connect, 15s read
+```
+
+**Grund:** Langsame Logo-Server (z.B. logos.jesmann.com) brauchen länger als 3-5 Sekunden
+
+---
+
+### 11-14. Frontend-Dateien
 
 **Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
 **Grund:** Dateien sind bereits identisch mit v0.19.0
-
 **Enthält:**
 - Alle 10 Settings in constants.js
 - Alle Defaults in ProxySettingsFormUtils.js
@@ -362,7 +362,7 @@ remote_response = requests.get(
 
 ---
 
-### 13. apps/m3u/migrations/0019_add_proxy_field.py
+### 15. apps/m3u/migrations/0019_add_proxy_field.py
 
 **Status:** ✅ NEU (Intelligente Migration)
 
@@ -409,7 +409,7 @@ class Migration(migrations.Migration):
 
 ---
 
-### 14. docker/DispatcharrBase
+### 16. docker/DispatcharrBase
 
 **Status:** ✅ MODIFIZIERT (drf-spectacular Fix)
 
@@ -553,11 +553,16 @@ Bei Problemen:
 - ✅ Verhindert endlose Cleanup-Zyklen für gelöschte Channels
 - ⚠️ **Original Dispatcharr Bug** - nicht durch unsere Enhancements verursacht
 
-**Alle Bugfixes sind kritisch für die korrekte Funktion des Profile Failover Systems!**
+### Bugfix 6: api_views.py (Logo Timeout)
+- ✅ Logo Fetch Timeout von (3, 5) auf (10, 15) erhöht
+- ✅ Logos von langsamen Servern werden jetzt korrekt geladen
+- ⚠️ **Original Dispatcharr Bug** - nicht durch unsere Enhancements verursacht
+
+**Alle Bugfixes sind kritisch für die korrekte Funktion des Systems!**
 
 ---
 
 **Erstellt:** 2026-03-02  
-**Aktualisiert:** 2026-03-08 (Bugfix 5 hinzugefügt)  
-**Version:** 1.1.0  
+**Aktualisiert:** 2026-03-08 (Bugfix 5 + 6 hinzugefügt)  
+**Version:** 1.2.0  
 **Status:** PRODUKTIONSREIF
