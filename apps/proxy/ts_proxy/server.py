@@ -1340,9 +1340,15 @@ class ProxyServer:
         try:
             channel = Channel.objects.get(uuid=channel_id)
             channel.release_stream()
-        except:
-            stream = Stream.objects.get(stream_hash=channel_id)
-            stream.release_stream()
+        except Channel.DoesNotExist:
+            try:
+                stream = Stream.objects.get(stream_hash=channel_id)
+                stream.release_stream()
+            except Stream.DoesNotExist:
+                # Channel/stream doesn't exist in DB - that's OK, just clean Redis
+                logger.info(f"Channel/stream {channel_id} not found in database, cleaning Redis keys only")
+        except Exception as e:
+            logger.error(f"Error releasing stream for channel {channel_id}: {e}")
 
         if not self.redis_client:
             return 0

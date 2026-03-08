@@ -18,13 +18,13 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 4 kritische Bugfixes
+**Zusätzlich:** 5 kritische Bugfixes (4 in url_utils.py + 1 in server.py)
 
 ---
 
-## GEÄNDERTE DATEIEN (14)
+## GEÄNDERTE DATEIEN (15)
 
-### Backend (8 Dateien)
+### Backend (9 Dateien)
 
 1. `apps/proxy/config.py` - ✅ IDENTISCH mit v0.19.0
 2. `apps/m3u/models.py` - ✅ IDENTISCH mit v0.19.0
@@ -34,6 +34,7 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 6. `apps/output/views.py` - ✅ IDENTISCH mit v0.19.0
 7. `apps/proxy/ts_proxy/stream_manager.py` - ✅ IDENTISCH mit v0.19.0
 8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes)
+9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix)
 
 ### Frontend (4 Dateien)
 
