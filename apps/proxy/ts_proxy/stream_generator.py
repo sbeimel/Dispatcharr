@@ -435,41 +435,39 @@ class StreamGenerator:
                         # Check if we're the last client
                         if self.channel_id in proxy_server.client_managers:
                             client_count = proxy_server.client_managers[self.channel_id].get_total_client_count()
-                            # Only the last client should release the stream
-                            # For channels: check if we're the owner
-                            # For direct streams: always release if last client
-                            should_release = False
-                            if client_count <= 1:
-                                if proxy_server.am_i_owner(self.channel_id):
-                                    should_release = True
-                                    logger.debug(f"[{self.client_id}] Last client and owner - will release stream")
-                                else:
-                                    # Check if this is a direct stream (no owner)
-                                    owner_field = ChannelMetadataField.OWNER.encode('utf-8')
-                                    if owner_field not in metadata or not metadata[owner_field]:
-                                        should_release = True
-                                        logger.debug(f"[{self.client_id}] Last client of ownerless stream - will release")
                             
-                            if should_release:
-                                from apps.channels.models import Channel
-                                from apps.channels.models import Stream
-                                try:
-                                    # Try Channel first
-                                    channel = Channel.objects.get(uuid=self.channel_id)
-                                    channel.release_stream()
-                                    stream_released = True
-                                    logger.debug(f"[{self.client_id}] Released stream for channel {self.channel_id}")
-                                except Channel.DoesNotExist:
+                            # BUGFIX #9: Always release stream when last client disconnects
+                            # Only release if NO clients left (client_count == 0)
+                            if client_count == 0:
+                                from core.utils import RedisClient
+                                redis_client = RedisClient.get_client()
+                                
+                                # Get stream_id and profile_id from Redis metadata
+                                stream_id_bytes = proxy_server.redis_client.hget(metadata_key, ChannelMetadataField.STREAM_ID)
+                                profile_id_bytes = proxy_server.redis_client.hget(metadata_key, ChannelMetadataField.M3U_PROFILE_ID)
+                                
+                                if stream_id_bytes and profile_id_bytes:
                                     try:
-                                        # Try Stream (direct preview)
-                                        stream = Stream.objects.get(stream_hash=self.channel_id)
-                                        stream.release_stream()
-                                        stream_released = True
-                                        logger.debug(f"[{self.client_id}] Released stream for direct stream {self.channel_id}")
-                                    except Stream.DoesNotExist:
-                                        logger.warning(f"[{self.client_id}] Could not find Channel or Stream for {self.channel_id}")
-                                except Exception as e:
-                                    logger.error(f"[{self.client_id}] Error releasing stream for {self.channel_id}: {e}")
+                                        stream_id = int(stream_id_bytes.decode('utf-8'))
+                                        profile_id = int(profile_id_bytes.decode('utf-8'))
+                                        
+                                        # Release directly via Redis - no DB needed!
+                                        redis_client.delete(f"channel_stream:{self.channel_id}")
+                                        redis_client.delete(f"stream_profile:{stream_id}")
+                                        
+                                        # Decrement profile counter
+                                        profile_connections_key = f"profile_connections:{profile_id}"
+                                        current_count = int(redis_client.get(profile_connections_key) or 0)
+                                        if current_count > 0:
+                                            redis_client.decr(profile_connections_key)
+                                            logger.info(f"[{self.client_id}] Released stream {stream_id} profile {profile_id} (counter: {current_count} → {current_count-1})")
+                                            stream_released = True
+                                        else:
+                                            logger.debug(f"[{self.client_id}] Counter already at 0 for profile {profile_id}")
+                                    except Exception as e:
+                                        logger.error(f"[{self.client_id}] Error releasing stream via Redis: {e}")
+                                else:
+                                    logger.debug(f"[{self.client_id}] No stream/profile metadata found in Redis")
             except Exception as e:
                 logger.error(f"[{self.client_id}] Error checking stream data for release: {e}")
 
