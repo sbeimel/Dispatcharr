@@ -87,6 +87,8 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
 
             if not selected_profile:
                 logger.error(f"No profiles available with connection capacity for M3U account {m3u_account.id}")
+                # BUGFIX #8: This path doesn't use get_stream(), so no release needed
+                # The counter was never incremented in this direct preview path
                 return None, None, False, None
 
             # Get the appropriate user agent

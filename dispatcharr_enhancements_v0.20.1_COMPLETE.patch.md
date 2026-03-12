@@ -1,6 +1,6 @@
 # Dispatcharr v0.20.1 Enhancements - Complete Patch
 
-**Version:** v0.20.1  
+**Version:** v1.4.0  
 **Datum:** 2026-03-12  
 **Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
@@ -18,7 +18,7 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 7 Bugfixes (4 in url_utils.py + 1 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py)
+**Zusätzlich:** 8 Bugfixes (5 in url_utils.py + 1 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py)
 
 ---
 
@@ -33,9 +33,9 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 5. `apps/proxy/ts_proxy/config_helper.py` - ✅ IDENTISCH mit v0.19.0
 6. `apps/output/views.py` - ✅ IDENTISCH mit v0.19.0
 7. `apps/proxy/ts_proxy/stream_manager.py` - ✅ IDENTISCH mit v0.19.0
-8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes)
-9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix)
-10. `apps/channels/api_views.py` - ✅ MODIFIZIERT (Bugfix)
+8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes #1-4 + #8)
+9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix #5)
+10. `apps/channels/api_views.py` - ✅ MODIFIZIERT (Bugfix #6)
 11. `apps/proxy/ts_proxy/views.py` - ✅ MODIFIZIERT (Bugfix #7)
 12. `apps/channels/models.py` - ✅ MODIFIZIERT (Bugfix #7 TTL)
 
@@ -269,6 +269,48 @@ def get_stream_info_for_profile(
         logger.error(f"Error in get_stream_info_for_profile: {e}", exc_info=True)
         return {'error': f'Error: {str(e)}'}
 ```
+
+#### Bugfix 8: Connection Leak in Preview (NEU!)
+
+**Problem:** Wenn `get_stream()` in Preview fehlschlägt, wird der Profile Connection Counter nie dekrementiert
+
+**VORHER (BUGGY):**
+```python
+# Handle channel preview (existing logic)
+channel = channel_or_stream
+
+# Get stream and profile for this channel
+stream_id, profile_id, error_reason = channel.get_stream()
+
+if not stream_id or not profile_id:
+    # ❌ Counter bleibt erhöht!
+    logger.error(f"No stream available for channel {channel_id}: {error_reason}")
+    return None, None, False, None
+```
+
+**NACHHER (GEFIXT):**
+```python
+# Handle channel preview (existing logic)
+channel = channel_or_stream
+
+# Get stream and profile for this channel
+stream_id, profile_id, error_reason = channel.get_stream()
+
+if not stream_id or not profile_id:
+    # BUGFIX #8: Release stream if get_stream() failed to prevent connection leak
+    try:
+        channel.release_stream()
+        logger.debug(f"Released stream after failed get_stream() in url_utils")
+    except Exception as e:
+        logger.debug(f"Could not release stream in url_utils: {e}")
+    logger.error(f"No stream available for channel {channel_id}: {error_reason}")
+    return None, None, False, None
+```
+
+**Auswirkung:**
+- ✅ Preview gibt Counter frei wenn fehlgeschlagen
+- ✅ Verhindert Connection Leak bei Preview
+- ✅ Funktioniert zusammen mit Bugfix #7 (views.py)
 
 ---
 
