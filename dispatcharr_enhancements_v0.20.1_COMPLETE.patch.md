@@ -1,6 +1,6 @@
 # Dispatcharr v0.20.1 Enhancements - Complete Patch
 
-**Version:** v1.4.0  
+**Version:** v1.5.0  
 **Datum:** 2026-03-12  
 **Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
@@ -18,7 +18,7 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 8 Bugfixes (5 in url_utils.py + 1 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py)
+**Zusätzlich:** 10 Bugfixes (5 in url_utils.py + 2 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py + 1 in stream_generator.py)
 
 ---
 
@@ -34,10 +34,11 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 6. `apps/output/views.py` - ✅ IDENTISCH mit v0.19.0
 7. `apps/proxy/ts_proxy/stream_manager.py` - ✅ IDENTISCH mit v0.19.0
 8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes #1-4 + #8)
-9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix #5)
+9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix #5 + #10)
 10. `apps/channels/api_views.py` - ✅ MODIFIZIERT (Bugfix #6)
 11. `apps/proxy/ts_proxy/views.py` - ✅ MODIFIZIERT (Bugfix #7)
 12. `apps/channels/models.py` - ✅ MODIFIZIERT (Bugfix #7 TTL)
+13. `apps/proxy/ts_proxy/stream_generator.py` - ✅ MODIFIZIERT (Bugfix #9)
 
 ### Frontend (4 Dateien)
 
@@ -688,11 +689,31 @@ Bei Problemen:
 - ⚠️ **Original Dispatcharr Bug seit v0.17** - existierte vor unseren Enhancements
 - ⚠️ **Wurde durch Profile Failover sichtbar** - mehr Profile mit niedrigeren Limits
 
+### Bugfix 8: url_utils.py (Preview Connection Leak)
+- ✅ Preview-Pfad gibt Profile-Connection frei wenn get_stream() fehlschlägt
+- ✅ Verhindert Connection-Leak bei fehlgeschlagenen Preview-Requests
+- ⚠️ **Original Dispatcharr Bug** - nicht durch unsere Enhancements verursacht
+
+### Bugfix 9: stream_generator.py (Last Client Release) - KRITISCH!
+- ✅ Letzter Client gibt Profile-Connection via Redis frei (kein DB-Lookup)
+- ✅ Funktioniert auch wenn Channel aus DB gelöscht wurde
+- ✅ Verwendet Metadata aus Redis (stream_id, profile_id)
+- ✅ Behebt "No profiles available" nach normalem Stream-Stop
+- ⚠️ **Original Dispatcharr Bug seit v0.17** - existierte vor unseren Enhancements
+
+### Bugfix 10: server.py (Server Release via Redis) - KRITISCH!
+- ✅ `_clean_redis_keys()` gibt Profile-Connection via Redis frei (kein DB-Lookup)
+- ✅ Funktioniert für UUIDs UND Stream-Hashes (keine UUID-Validierung mehr)
+- ✅ Zombie Channel Cleanup vereinfacht (nur noch Redis-basiert)
+- ✅ Behebt UUID-Fehler: "is not a valid UUID" beim Stream-Stop
+- ✅ Konsistent mit Bugfix #9 (gleicher Redis-basierter Ansatz)
+- ⚠️ **Original Dispatcharr Bug seit v0.17** - existierte vor unseren Enhancements
+
 **Alle Bugfixes sind kritisch für die korrekte Funktion des Systems!**
 
 ---
 
 **Erstellt:** 2026-03-02  
-**Aktualisiert:** 2026-03-12 (Bugfix 7 hinzugefügt - Connection Leak Fix)  
-**Version:** 1.3.0  
+**Aktualisiert:** 2026-03-12 (Bugfix 7-10 hinzugefügt - Connection Leak Fixes)  
+**Version:** 1.5.0  
 **Status:** PRODUKTIONSREIF

@@ -782,21 +782,8 @@ class ProxyServer:
                 owner = metadata.get(b'owner', b'unknown').decode('utf-8')
                 logger.info(f"Zombie channel details - state: {state}, owner: {owner}")
 
-            # Clean up Redis keys
+            # Clean up Redis keys (this now includes stream release via Redis)
             self._clean_redis_keys(channel_id)
-
-            # Force release resources in the Channel model
-            try:
-                channel = Channel.objects.get(uuid=channel_id)
-                channel.release_stream()
-                logger.info(f"Released stream allocation for zombie channel {channel_id}")
-            except Exception as e:
-                try:
-                    stream = Stream.objects.get(stream_hash=channel_id)
-                    stream.release_stream()
-                    logger.info(f"Released stream allocation for zombie channel {channel_id}")
-                except Exception as e:
-                    logger.error(f"Error releasing stream for zombie channel {channel_id}: {e}")
 
             return True
         except Exception as e:
@@ -1336,19 +1323,43 @@ class ProxyServer:
 
     def _clean_redis_keys(self, channel_id):
         """Clean up all Redis keys for a channel more efficiently"""
-        # Release the channel, stream, and profile keys from the channel
-        try:
-            channel = Channel.objects.get(uuid=channel_id)
-            channel.release_stream()
-        except Channel.DoesNotExist:
+        # BUGFIX #10: Release stream counter directly via Redis (no DB lookup)
+        # This works for both UUIDs and stream hashes
+        if self.redis_client:
             try:
-                stream = Stream.objects.get(stream_hash=channel_id)
-                stream.release_stream()
-            except Stream.DoesNotExist:
-                # Channel/stream doesn't exist in DB - that's OK, just clean Redis
-                logger.info(f"Channel/stream {channel_id} not found in database, cleaning Redis keys only")
-        except Exception as e:
-            logger.error(f"Error releasing stream for channel {channel_id}: {e}")
+                metadata_key = RedisKeys.channel_metadata(channel_id)
+                metadata = self.redis_client.hgetall(metadata_key)
+                
+                if metadata:
+                    # Get stream_id and profile_id from Redis metadata
+                    stream_id_bytes = metadata.get(b'stream_id')
+                    profile_id_bytes = metadata.get(b'profile_id')
+                    
+                    if stream_id_bytes and profile_id_bytes:
+                        try:
+                            stream_id = int(stream_id_bytes.decode('utf-8'))
+                            profile_id = int(profile_id_bytes.decode('utf-8'))
+                            
+                            # Release directly via Redis - no DB needed!
+                            self.redis_client.delete(f"channel_stream:{channel_id}")
+                            self.redis_client.delete(f"stream_profile:{stream_id}")
+                            
+                            # Decrement profile counter
+                            profile_connections_key = f"profile_connections:{profile_id}"
+                            current_count = int(self.redis_client.get(profile_connections_key) or 0)
+                            if current_count > 0:
+                                self.redis_client.decr(profile_connections_key)
+                                logger.info(f"Released stream {stream_id} profile {profile_id} via Redis (counter: {current_count} → {current_count-1})")
+                            else:
+                                logger.debug(f"Counter already at 0 for profile {profile_id}")
+                        except Exception as e:
+                            logger.error(f"Error releasing stream via Redis: {e}")
+                    else:
+                        logger.debug(f"No stream/profile metadata found in Redis for {channel_id}")
+                else:
+                    logger.debug(f"No metadata found in Redis for {channel_id}")
+            except Exception as e:
+                logger.error(f"Error releasing stream for channel {channel_id}: {e}")
 
         if not self.redis_client:
             return 0
