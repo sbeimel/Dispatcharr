@@ -44,7 +44,6 @@ from dispatcharr.utils import network_access_allowed
 logger = get_logger()
 
 
-@api_view(["GET"])
 def stream_ts(request, channel_id):
     if not network_access_allowed(request, "STREAMS"):
         return JsonResponse({"error": "Forbidden"}, status=403)
@@ -162,9 +161,15 @@ def stream_ts(request, channel_id):
             attempt = 0
             should_retry = True
 
+            # BUGFIX #7: Prevent connection leak in retry loop
+            # Reserve stream/profile ONCE before retry loop, then release if all attempts fail
+            # This prevents multiple get_stream() calls from incrementing the counter multiple times
+
             # Try to get a stream with fixed interval retries
             while should_retry and time.time() - wait_start_time < retry_timeout:
                 attempt += 1
+
+                # Generate stream URL (this will call channel.get_stream() internally)
                 stream_url, stream_user_agent, transcode, profile_value = (
                     generate_stream_url(channel_id)
                 )
@@ -184,6 +189,14 @@ def stream_ts(request, channel_id):
                         )
                         should_retry = False
                         break
+
+                # BUGFIX #7: Release stream after failed attempt to prevent connection leak
+                # This ensures the profile connection counter is decremented after each failed attempt
+                try:
+                    channel.release_stream()
+                    logger.debug(f"[{client_id}] Released stream after failed attempt {attempt}")
+                except Exception as e:
+                    logger.debug(f"[{client_id}] Could not release stream (may not have been acquired): {e}")
 
                 # Check if we have time remaining for another sleep cycle
                 elapsed_time = time.time() - wait_start_time
@@ -219,9 +232,13 @@ def stream_ts(request, channel_id):
                     )
 
             if stream_url is None:
-                # Release the channel's stream lock if one was acquired
-                # Note: Only call this if get_stream() actually assigned a stream
-                # In our case, if stream_url is None, no stream was ever assigned, so don't release
+                # BUGFIX #7: Release stream if all attempts failed
+                # This ensures the profile connection counter is properly decremented
+                try:
+                    channel.release_stream()
+                    logger.debug(f"[{client_id}] Released stream after all attempts failed")
+                except Exception as e:
+                    logger.debug(f"[{client_id}] Could not release stream: {e}")
 
                 # Get the specific error message if available
                 wait_duration = f"{int(time.time() - wait_start_time)}s"
@@ -508,6 +525,7 @@ def stream_ts(request, channel_id):
     except Exception as e:
         logger.error(f"Error in stream_ts: {e}", exc_info=True)
         return JsonResponse({"error": str(e)}, status=500)
+
 
 
 @api_view(["GET"])

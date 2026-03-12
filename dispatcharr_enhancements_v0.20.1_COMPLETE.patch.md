@@ -1,7 +1,7 @@
 # Dispatcharr v0.20.1 Enhancements - Complete Patch
 
 **Version:** v0.20.1  
-**Datum:** 2026-03-02  
+**Datum:** 2026-03-12  
 **Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
 ---
@@ -18,13 +18,13 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 6 Bugfixes (4 in url_utils.py + 1 in server.py + 1 in api_views.py)
+**Zusätzlich:** 7 Bugfixes (4 in url_utils.py + 1 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py)
 
 ---
 
-## GEÄNDERTE DATEIEN (16)
+## GEÄNDERTE DATEIEN (18)
 
-### Backend (10 Dateien)
+### Backend (12 Dateien)
 
 1. `apps/proxy/config.py` - ✅ IDENTISCH mit v0.19.0
 2. `apps/m3u/models.py` - ✅ IDENTISCH mit v0.19.0
@@ -36,6 +36,8 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 8. `apps/proxy/ts_proxy/url_utils.py` - ✅ MODIFIZIERT (Bugfixes)
 9. `apps/proxy/ts_proxy/server.py` - ✅ MODIFIZIERT (Bugfix)
 10. `apps/channels/api_views.py` - ✅ MODIFIZIERT (Bugfix)
+11. `apps/proxy/ts_proxy/views.py` - ✅ MODIFIZIERT (Bugfix #7)
+12. `apps/channels/models.py` - ✅ MODIFIZIERT (Bugfix #7 TTL)
 
 ### Frontend (4 Dateien)
 
@@ -350,6 +352,84 @@ timeout=(10, 15)  # 10s connect, 15s read
 
 ---
 
+### 11. apps/proxy/ts_proxy/views.py
+
+**Status:** ⚠️ BUGFIX #7 (Original Dispatcharr Bug seit v0.17)
+
+**Problem:** Profile Connection Leak im Retry-Loop
+
+**Symptome:**
+- "No profiles available with connection capacity" Fehler
+- Profile erscheinen "voll" obwohl keine Streams laufen
+- Counter in Redis steigt bei jedem Retry-Versuch
+- Tritt auf bei Accounts mit niedrigen max_streams Limits (1-2)
+
+**Root Cause:**
+```python
+# VORHER (BUGGY):
+while retry:
+    stream_url = generate_stream_url(channel_id)  # ❌ Ruft get_stream() auf
+    # get_stream() inkrementiert Counter bei JEDEM Versuch!
+    # Counter: 0 → 1 → 2 → 3 → ... → 14
+    if stream_url:
+        break
+# Wenn alle Versuche fehlschlagen: Counter bleibt erhöht! ❌
+```
+
+**Lösung:**
+```python
+# NACHHER (GEFIXT):
+while retry:
+    stream_url = generate_stream_url(channel_id)  # Inkrementiert Counter
+    
+    if stream_url:
+        break  # Erfolg! Counter bleibt erhöht (wird bei Stream-Ende freigegeben)
+    
+    # FEHLER! Gebe Counter sofort frei
+    channel.release_stream()  # ✅ Dekrementiert Counter
+    gevent.sleep(retry_interval)
+
+# Wenn alle Versuche fehlschlagen:
+channel.release_stream()  # ✅ Finaler Cleanup
+```
+
+**Auswirkung:**
+- **Vorher:** 14 Retry-Versuche → Counter = 14 → Profile "voll" → Fehler
+- **Nachher:** 14 Retry-Versuche → Counter bleibt bei 1 → wird freigegeben → Profile verfügbar
+
+**Hinweis:** Dies ist ein Bug im **Original Dispatcharr seit v0.17**, nicht durch unsere Enhancements verursacht. Das Problem wurde nur durch Profile Failover sichtbar, weil jetzt mehr Profile mit niedrigeren Limits verwendet werden.
+
+---
+
+### 12. apps/channels/models.py
+
+**Status:** ⚠️ BUGFIX #7 TTL (Sicherheitsnetz)
+
+**Problem:** Wenn `release_stream()` nie aufgerufen wird (Crash, Exception), bleibt Counter permanent erhöht
+
+**Lösung:** Redis Keys mit TTL (Time-To-Live) versehen
+
+**Änderung:**
+```python
+# VORHER:
+if profile.max_streams > 0:
+    redis_client.incr(profile_connections_key)
+
+# NACHHER:
+if profile.max_streams > 0:
+    redis_client.incr(profile_connections_key)
+    # Set TTL to 1 hour (3600 seconds) as safety net
+    redis_client.expire(profile_connections_key, 3600)  # ✅ TTL hinzugefügt
+```
+
+**Auswirkung:**
+- **Vorher:** Counter bleibt permanent erhöht wenn release_stream() nie aufgerufen wird
+- **Nachher:** Counter läuft nach 1 Stunde automatisch ab (Sicherheitsnetz)
+
+**Vorteil:** Selbst bei Server-Crashes oder Exceptions wird der Counter nach 1 Stunde automatisch zurückgesetzt.
+
+---
+
 ### 11-14. Frontend-Dateien
 
 **Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
@@ -558,11 +638,19 @@ Bei Problemen:
 - ✅ Logos von langsamen Servern werden jetzt korrekt geladen
 - ⚠️ **Original Dispatcharr Bug** - nicht durch unsere Enhancements verursacht
 
+### Bugfix 7: views.py + models.py (Connection Leak) - KRITISCH!
+- ✅ Retry-Loop gibt Profile-Connections nach jedem fehlgeschlagenen Versuch frei
+- ✅ Verhindert dass Counter bei jedem Retry inkrementiert wird
+- ✅ TTL (1 Stunde) als Sicherheitsnetz für vergessene Releases
+- ✅ Behebt "No profiles available with connection capacity" Fehler
+- ⚠️ **Original Dispatcharr Bug seit v0.17** - existierte vor unseren Enhancements
+- ⚠️ **Wurde durch Profile Failover sichtbar** - mehr Profile mit niedrigeren Limits
+
 **Alle Bugfixes sind kritisch für die korrekte Funktion des Systems!**
 
 ---
 
 **Erstellt:** 2026-03-02  
-**Aktualisiert:** 2026-03-08 (Bugfix 5 + 6 hinzugefügt)  
-**Version:** 1.2.0  
+**Aktualisiert:** 2026-03-12 (Bugfix 7 hinzugefügt - Connection Leak Fix)  
+**Version:** 1.3.0  
 **Status:** PRODUKTIONSREIF

@@ -470,9 +470,12 @@ class Channel(models.Model):
                     redis_client.set(f"channel_stream:{self.id}", stream.id)
                     redis_client.set(f"stream_profile:{stream.id}", profile.id)
 
-                    # Increment connection count for profiles with limits
+                    # BUGFIX #7: Increment connection count with TTL to prevent permanent leaks
+                    # TTL ensures counter is automatically reset after 1 hour if release_stream() is never called
                     if profile.max_streams > 0:
                         redis_client.incr(profile_connections_key)
+                        # Set TTL to 1 hour (3600 seconds) as safety net
+                        redis_client.expire(profile_connections_key, 3600)
 
                     return (
                         stream.id,
