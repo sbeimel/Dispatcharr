@@ -126,6 +126,12 @@ def generate_stream_url(channel_id: str) -> Tuple[str, str, bool, Optional[int]]
         stream_id, profile_id, error_reason = channel.get_stream()
 
         if not stream_id or not profile_id:
+            # BUGFIX #7: Release stream if get_stream() failed to prevent connection leak
+            try:
+                channel.release_stream()
+                logger.debug(f"Released stream after failed get_stream() in url_utils")
+            except Exception as e:
+                logger.debug(f"Could not release stream in url_utils: {e}")
             logger.error(f"No stream available for channel {channel_id}: {error_reason}")
             return None, None, False, None
 
