@@ -473,7 +473,243 @@ if profile.max_streams > 0:
 
 ---
 
-### 11-14. Frontend-Dateien
+### 13. apps/proxy/ts_proxy/url_utils.py (Bugfix #8)
+
+**Status:** ⚠️ BUGFIX #8 (Preview Connection Leak)
+
+**Problem:** Preview-Pfad gibt Profile-Connection nicht frei wenn get_stream() fehlschlägt
+
+**Symptome:**
+- Preview-Requests belegen Connections permanent
+- Counter steigt auch wenn Preview fehlschlägt
+- "No profiles available" nach mehreren fehlgeschlagenen Previews
+
+**Root Cause:**
+```python
+# VORHER (BUGGY):
+if isinstance(channel_or_stream, Stream):
+    # Preview-Pfad
+    stream_id, profile_id = get_stream(...)  # ❌ Inkrementiert Counter
+    
+    if not stream_id:
+        # ❌ Counter wird NICHT dekrementiert!
+        return None
+```
+
+**Lösung:**
+```python
+# NACHHER (GEFIXT):
+if isinstance(channel_or_stream, Stream):
+    stream_id, profile_id = get_stream(...)
+    
+    if not stream_id or not profile_id:
+        # ✅ Release wenn get_stream() fehlschlägt
+        try:
+            channel.release_stream()
+            logger.debug(f"Released stream after get_stream() failed in preview")
+        except Exception as e:
+            logger.debug(f"Could not release stream: {e}")
+        return None
+```
+
+**Auswirkung:**
+- **Vorher:** Preview fehlschlägt → Counter bleibt erhöht → Profile "voll"
+- **Nachher:** Preview fehlschlägt → Counter wird freigegeben → Profile verfügbar
+
+**Zeile:** ~1050 in url_utils.py
+
+---
+
+### 14. apps/proxy/ts_proxy/stream_generator.py (Bugfix #9)
+
+**Status:** ⚠️ BUGFIX #9 (Last Client Release via Redis) - KRITISCH!
+
+**Problem:** Letzter Client gibt Profile-Connection nicht frei (DB-Lookup schlägt fehl)
+
+**Symptome:**
+- Nach normalem Stream-Stop: "No profiles available"
+- Counter bleibt bei 1 obwohl Stream gestoppt wurde
+- Logs zeigen KEINE Fehler (weil DB-Lookup fehlschlägt ohne Exception)
+
+**Root Cause:**
+```python
+# VORHER (BUGGY):
+def _cleanup():
+    if client_count <= 1:
+        # ❌ Versucht DB-Lookup
+        channel = Channel.objects.get(uuid=self.channel_id)
+        # ↑ Schlägt fehl wenn channel_id ein Stream-Hash ist!
+        # ↑ Schlägt fehl wenn Channel aus DB gelöscht wurde!
+        channel.release_stream()
+```
+
+**Lösung:**
+```python
+# NACHHER (GEFIXT):
+def _cleanup():
+    # BUGFIX #9: Release stream counter via Redis when last client disconnects
+    stream_released = False
+    if self.redis_client:
+        try:
+            metadata_key = RedisKeys.channel_metadata(self.channel_id)
+            metadata = proxy_server.redis_client.hgetall(metadata_key)
+            
+            if metadata:
+                stream_id_bytes = metadata.get(b'stream_id')
+                profile_id_bytes = metadata.get(b'profile_id')
+                
+                if stream_id_bytes and profile_id_bytes:
+                    stream_id = int(stream_id_bytes.decode('utf-8'))
+                    profile_id = int(profile_id_bytes.decode('utf-8'))
+                    
+                    # Check if we're the last client
+                    if self.channel_id in proxy_server.client_managers:
+                        client_count = proxy_server.client_managers[self.channel_id].get_total_client_count()
+                        
+                        # ✅ Only release if NO clients left (client_count == 0)
+                        if client_count == 0:
+                            from core.utils import RedisClient
+                            redis_client = RedisClient.get_client()
+                            
+                            # ✅ Release directly via Redis - no DB needed!
+                            redis_client.delete(f"channel_stream:{self.channel_id}")
+                            redis_client.delete(f"stream_profile:{stream_id}")
+                            
+                            # ✅ Decrement profile counter
+                            profile_connections_key = f"profile_connections:{profile_id}"
+                            current_count = int(redis_client.get(profile_connections_key) or 0)
+                            if current_count > 0:
+                                redis_client.decr(profile_connections_key)
+                                logger.info(f"Released stream {stream_id} profile {profile_id} (counter: {current_count} → {current_count-1})")
+                                stream_released = True
+        except Exception as e:
+            logger.error(f"Error releasing stream via Redis: {e}")
+```
+
+**Auswirkung:**
+- **Vorher:** Stream stoppt → Counter bleibt bei 1 → Nächster Stream: "No profiles available"
+- **Nachher:** Stream stoppt → Counter wird auf 0 gesetzt → Nächster Stream funktioniert
+
+**Wichtig:** 
+- Funktioniert für UUIDs UND Stream-Hashes
+- Funktioniert auch wenn Channel aus DB gelöscht wurde
+- Verwendet nur Redis (kein DB-Lookup)
+- Nur wenn client_count == 0 (nicht <= 1, weil bei 2 Clients einer noch aktiv ist)
+
+**Zeile:** ~444 in stream_generator.py
+
+---
+
+### 15. apps/proxy/ts_proxy/server.py (Bugfix #10)
+
+**Status:** ⚠️ BUGFIX #10 (Server Release via Redis) - KRITISCH!
+
+**Problem:** Server Cleanup gibt Profile-Connection nicht frei (UUID-Validierung schlägt fehl)
+
+**Symptome:**
+- Logs zeigen: `Error releasing stream: "..." is not a valid UUID`
+- Counter bleibt erhöht nach Channel-Stop
+- "No profiles available" nach Server Cleanup
+
+**Root Cause:**
+```python
+# VORHER (BUGGY):
+def _clean_redis_keys(self, channel_id):
+    try:
+        # ❌ Versucht UUID-Lookup
+        channel = Channel.objects.get(uuid=channel_id)
+        # ↑ Schlägt fehl wenn channel_id ein Stream-Hash ist!
+        # ↑ Fehler: "is not a valid UUID"
+        channel.release_stream()
+    except Channel.DoesNotExist:
+        # ❌ Versucht Stream-Hash-Lookup
+        stream = Stream.objects.get(stream_hash=channel_id)
+        stream.release_stream()
+```
+
+**Lösung:**
+```python
+# NACHHER (GEFIXT):
+def _clean_redis_keys(self, channel_id):
+    """Clean up all Redis keys for a channel more efficiently"""
+    # BUGFIX #10: Release stream counter directly via Redis (no DB lookup)
+    # This works for both UUIDs and stream hashes
+    if self.redis_client:
+        try:
+            metadata_key = RedisKeys.channel_metadata(channel_id)
+            metadata = self.redis_client.hgetall(metadata_key)
+            
+            if metadata:
+                # Get stream_id and profile_id from Redis metadata
+                stream_id_bytes = metadata.get(b'stream_id')
+                profile_id_bytes = metadata.get(b'profile_id')
+                
+                if stream_id_bytes and profile_id_bytes:
+                    try:
+                        stream_id = int(stream_id_bytes.decode('utf-8'))
+                        profile_id = int(profile_id_bytes.decode('utf-8'))
+                        
+                        # ✅ Release directly via Redis - no DB needed!
+                        self.redis_client.delete(f"channel_stream:{channel_id}")
+                        self.redis_client.delete(f"stream_profile:{stream_id}")
+                        
+                        # ✅ Decrement profile counter
+                        profile_connections_key = f"profile_connections:{profile_id}"
+                        current_count = int(self.redis_client.get(profile_connections_key) or 0)
+                        if current_count > 0:
+                            self.redis_client.decr(profile_connections_key)
+                            logger.info(f"Released stream {stream_id} profile {profile_id} via Redis (counter: {current_count} → {current_count-1})")
+                        else:
+                            logger.debug(f"Counter already at 0 for profile {profile_id}")
+                    except Exception as e:
+                        logger.error(f"Error releasing stream via Redis: {e}")
+                else:
+                    logger.debug(f"No stream/profile metadata found in Redis for {channel_id}")
+            else:
+                logger.debug(f"No metadata found in Redis for {channel_id}")
+        except Exception as e:
+            logger.error(f"Error releasing stream for channel {channel_id}: {e}")
+    
+    # ... rest of Redis cleanup code ...
+```
+
+**Zusätzlich:** Zombie Channel Cleanup vereinfacht (Zeile ~790):
+```python
+# VORHER (BUGGY):
+# Clean up Redis keys
+self._clean_redis_keys(channel_id)
+
+# Force release resources in the Channel model
+try:
+    channel = Channel.objects.get(uuid=channel_id)
+    channel.release_stream()
+except Exception as e:
+    try:
+        stream = Stream.objects.get(stream_hash=channel_id)
+        stream.release_stream()
+    except Exception as e:
+        logger.error(f"Error releasing stream: {e}")
+
+# NACHHER (GEFIXT):
+# Clean up Redis keys (this now includes stream release via Redis)
+self._clean_redis_keys(channel_id)
+```
+
+**Auswirkung:**
+- **Vorher:** UUID-Fehler → Counter bleibt erhöht → "No profiles available"
+- **Nachher:** Redis-basierte Freigabe → Counter wird korrekt dekrementiert → Profile verfügbar
+
+**Wichtig:**
+- Funktioniert für UUIDs UND Stream-Hashes
+- Keine UUID-Validierung mehr (kein DB-Lookup)
+- Konsistent mit Bugfix #9 (gleicher Redis-basierter Ansatz)
+- Funktioniert auch wenn Channel aus DB gelöscht wurde
+
+**Zeilen:** ~1338 (_clean_redis_keys) und ~790 (Zombie Cleanup) in server.py
+
+---
+
+### 16-19. Frontend-Dateien
 
 **Status:** ✅ KEINE ÄNDERUNGEN ERFORDERLICH  
 **Grund:** Dateien sind bereits identisch mit v0.19.0
@@ -485,7 +721,7 @@ if profile.max_streams > 0:
 
 ---
 
-### 15. apps/m3u/migrations/0019_add_proxy_field.py
+### 20. apps/m3u/migrations/0019_add_proxy_field.py
 
 **Status:** ✅ NEU (Intelligente Migration)
 
@@ -532,7 +768,7 @@ class Migration(migrations.Migration):
 
 ---
 
-### 16. docker/DispatcharrBase
+### 21. docker/DispatcharrBase
 
 **Status:** ✅ MODIFIZIERT (drf-spectacular Fix)
 

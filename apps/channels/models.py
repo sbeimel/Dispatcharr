@@ -240,6 +240,8 @@ class Stream(models.Model):
                 # Increment connection count for profiles with limits
                 if profile.max_streams > 0:
                     redis_client.incr(profile_connections_key)
+                    # Set TTL to 1 hour (3600 seconds) as safety net
+                    redis_client.expire(profile_connections_key, 3600)
 
                 return (
                     self.id,
@@ -257,13 +259,43 @@ class Stream(models.Model):
         redis_client = RedisClient.get_client()
 
         stream_id = self.id
-        # Get the matched profile for cleanup
+        
+        # Try to get the matched profile for cleanup
         profile_id = redis_client.get(f"stream_profile:{stream_id}")
+        
         if not profile_id:
-            logger.debug("Invalid profile ID pulled from stream index")
-            return
+            # BUGFIX #11: If stream_profile key doesn't exist, try to get from channel metadata
+            # This can happen if the key expired or was deleted prematurely
+            logger.debug(f"stream_profile key not found for stream {stream_id}, checking channel metadata")
+            
+            # Try to find profile_id from channel metadata (for channel-based streams)
+            metadata_key = f"ts_proxy:channel:{self.uuid}:metadata"
+            metadata = redis_client.hgetall(metadata_key)
+            
+            if metadata and b'profile_id' in metadata:
+                profile_id = metadata[b'profile_id'].decode('utf-8')
+                logger.debug(f"Found profile_id {profile_id} in channel metadata")
+            else:
+                # Last resort: check all profile_connections keys and decrement the first non-zero one
+                # This is a fallback for when we can't determine which profile was used
+                logger.warning(f"Could not find profile_id for stream {stream_id}, checking all profiles")
+                
+                # Get all profile_connections keys
+                profile_keys = redis_client.keys("profile_connections:*")
+                for key in profile_keys:
+                    current_count = int(redis_client.get(key) or 0)
+                    if current_count > 0:
+                        # Decrement this profile (best guess)
+                        redis_client.decr(key)
+                        profile_id_from_key = key.decode('utf-8').split(':')[1]
+                        logger.warning(f"Decremented profile {profile_id_from_key} as fallback (counter: {current_count} → {current_count-1})")
+                        return
+                
+                logger.error(f"Could not find any profile to release for stream {stream_id}")
+                return
 
-        redis_client.delete(f"stream_profile:{stream_id}")  # Remove profile association
+        # Clean up the stream_profile association
+        redis_client.delete(f"stream_profile:{stream_id}")
 
         profile_id = int(profile_id)
         logger.debug(
@@ -276,6 +308,7 @@ class Stream(models.Model):
         current_count = int(redis_client.get(profile_connections_key) or 0)
         if current_count > 0:
             redis_client.decr(profile_connections_key)
+            logger.info(f"Released stream {stream_id} profile {profile_id} (counter: {current_count} → {current_count-1})")
 
 
 class ChannelManager(models.Manager):
@@ -517,13 +550,42 @@ class Channel(models.Model):
             f"Found stream ID {stream_id} associated with channel stream {self.id}"
         )
 
-        # Get the matched profile for cleanup
+        # Try to get the matched profile for cleanup
         profile_id = redis_client.get(f"stream_profile:{stream_id}")
+        
         if not profile_id:
-            logger.debug("Invalid profile ID pulled from stream index")
-            return
+            # BUGFIX #11: If stream_profile key doesn't exist, try to get from channel metadata
+            # This can happen if the key expired or was deleted prematurely
+            logger.debug(f"stream_profile key not found for stream {stream_id}, checking channel metadata")
+            
+            # Try to find profile_id from channel metadata (for stream-based channels)
+            metadata_key = f"ts_proxy:channel:{self.uuid}:metadata"
+            metadata = redis_client.hgetall(metadata_key)
+            
+            if metadata and b'profile_id' in metadata:
+                profile_id = metadata[b'profile_id'].decode('utf-8')
+                logger.debug(f"Found profile_id {profile_id} in channel metadata")
+            else:
+                # Last resort: check all profile_connections keys and decrement the first non-zero one
+                # This is a fallback for when we can't determine which profile was used
+                logger.warning(f"Could not find profile_id for stream {stream_id}, checking all profiles")
+                
+                # Get all profile_connections keys
+                profile_keys = redis_client.keys("profile_connections:*")
+                for key in profile_keys:
+                    current_count = int(redis_client.get(key) or 0)
+                    if current_count > 0:
+                        # Decrement this profile (best guess)
+                        redis_client.decr(key)
+                        profile_id_from_key = key.decode('utf-8').split(':')[1]
+                        logger.warning(f"Decremented profile {profile_id_from_key} as fallback (counter: {current_count} → {current_count-1})")
+                        return
+                
+                logger.error(f"Could not find any profile to release for stream {stream_id}")
+                return
 
-        redis_client.delete(f"stream_profile:{stream_id}")  # Remove profile association
+        # Clean up the stream_profile association
+        redis_client.delete(f"stream_profile:{stream_id}")
 
         profile_id = int(profile_id)
         logger.debug(
@@ -536,6 +598,7 @@ class Channel(models.Model):
         current_count = int(redis_client.get(profile_connections_key) or 0)
         if current_count > 0:
             redis_client.decr(profile_connections_key)
+            logger.info(f"Released stream {stream_id} profile {profile_id} (counter: {current_count} → {current_count-1})")
 
     def update_stream_profile(self, new_profile_id):
         """
