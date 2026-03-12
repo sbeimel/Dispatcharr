@@ -435,17 +435,41 @@ class StreamGenerator:
                         # Check if we're the last client
                         if self.channel_id in proxy_server.client_managers:
                             client_count = proxy_server.client_managers[self.channel_id].get_total_client_count()
-                            # Only the last client or owner should release the stream
-                            if client_count <= 1 and proxy_server.am_i_owner(self.channel_id):
+                            # Only the last client should release the stream
+                            # For channels: check if we're the owner
+                            # For direct streams: always release if last client
+                            should_release = False
+                            if client_count <= 1:
+                                if proxy_server.am_i_owner(self.channel_id):
+                                    should_release = True
+                                    logger.debug(f"[{self.client_id}] Last client and owner - will release stream")
+                                else:
+                                    # Check if this is a direct stream (no owner)
+                                    owner_field = ChannelMetadataField.OWNER.encode('utf-8')
+                                    if owner_field not in metadata or not metadata[owner_field]:
+                                        should_release = True
+                                        logger.debug(f"[{self.client_id}] Last client of ownerless stream - will release")
+                            
+                            if should_release:
                                 from apps.channels.models import Channel
+                                from apps.channels.models import Stream
                                 try:
-                                    # Get the channel by UUID
+                                    # Try Channel first
                                     channel = Channel.objects.get(uuid=self.channel_id)
                                     channel.release_stream()
                                     stream_released = True
                                     logger.debug(f"[{self.client_id}] Released stream for channel {self.channel_id}")
+                                except Channel.DoesNotExist:
+                                    try:
+                                        # Try Stream (direct preview)
+                                        stream = Stream.objects.get(stream_hash=self.channel_id)
+                                        stream.release_stream()
+                                        stream_released = True
+                                        logger.debug(f"[{self.client_id}] Released stream for direct stream {self.channel_id}")
+                                    except Stream.DoesNotExist:
+                                        logger.warning(f"[{self.client_id}] Could not find Channel or Stream for {self.channel_id}")
                                 except Exception as e:
-                                    logger.error(f"[{self.client_id}] Error releasing stream for channel {self.channel_id}: {e}")
+                                    logger.error(f"[{self.client_id}] Error releasing stream for {self.channel_id}: {e}")
             except Exception as e:
                 logger.error(f"[{self.client_id}] Error checking stream data for release: {e}")
 
