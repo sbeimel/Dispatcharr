@@ -214,26 +214,28 @@ docker logs Dispatcharr 2>&1 | grep "Released stream"
 ### Was wurde erreicht?
 
 1. ✅ **Alle v0.19.0 Features** erfolgreich in v0.20.1 integriert
-2. ✅ **10 Bugfixes** implementiert (5 Profile Failover + 5 Connection Leak)
+2. ✅ **11 Bugfixes** implementiert (5 Profile Failover + 6 Connection Leak)
 3. ✅ **Docker Build** funktioniert (drf-spectacular Fix)
 4. ✅ **Migration** ist intelligent (prüft ob Spalte existiert)
-5. ✅ **Connection Leak** komplett gelöst (4 Bugfixes)
+5. ✅ **Connection Leak** komplett gelöst (5 Bugfixes)
 
-### Was ist neu in v1.5.0?
+### Was ist neu in v1.6.0?
 
-- **Bugfix #9:** Last Client Release via Redis (stream_generator.py)
-- **Bugfix #10:** Server Release via Redis (server.py)
-- **Dokumentation:** Alle Bugfixes im Patch dokumentiert
-- **Konsistenz:** Redis-basierte Release überall wo nötig
+- **Bugfix #11:** Release Order Fix (models.py + server.py)
+  - Richtige Reihenfolge: Counter dekrementieren BEVOR Keys löschen
+  - Mehrere Fallbacks für stream_id/profile_id
+  - Robuste release_stream() Methoden
+  - Behebt kritischen Bug in Bugfix #10
 
-### Warum v1.5.0?
+### Warum v1.6.0?
 
 - v1.0.0: Initiale Integration
 - v1.1.0: Bugfixes #1-4 (Profile Failover)
 - v1.2.0: Bugfix #5-6 (Orphaned Cleanup + Logo Timeout)
 - v1.3.0: Bugfix #7 (Retry-Loop Connection Leak)
 - v1.4.0: Bugfix #8 (Preview Connection Leak)
-- **v1.5.0: Bugfix #9-10 (Complete Connection Leak Fix)** ✅
+- v1.5.0: Bugfix #9-10 (Complete Connection Leak Fix)
+- **v1.6.0: Bugfix #11 (Release Order Fix - KRITISCH!)** ✅
 
 ---
 

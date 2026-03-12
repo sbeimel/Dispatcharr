@@ -1,6 +1,6 @@
 # Dispatcharr v0.20.1 Enhancements - Complete Patch
 
-**Version:** v1.5.0  
+**Version:** v1.6.0  
 **Datum:** 2026-03-12  
 **Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
@@ -18,7 +18,7 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 10 Bugfixes (5 in url_utils.py + 2 in server.py + 1 in api_views.py + 1 in views.py + 1 in models.py + 1 in stream_generator.py)
+**Zusätzlich:** 11 Bugfixes (5 in url_utils.py + 2 in server.py + 1 in api_views.py + 1 in views.py + 2 in models.py + 1 in stream_generator.py)
 
 ---
 
@@ -945,11 +945,21 @@ Bei Problemen:
 - ✅ Konsistent mit Bugfix #9 (gleicher Redis-basierter Ansatz)
 - ⚠️ **Original Dispatcharr Bug seit v0.17** - existierte vor unseren Enhancements
 
+### Bugfix 11: models.py + server.py (Release Order Fix) - KRITISCH!
+- ✅ `Channel.release_stream()` gibt nicht mehr auf wenn `stream_profile` Key fehlt
+- ✅ Prüft Channel Metadata als Fallback
+- ✅ Dekrementiert ersten non-zero Counter als letzter Fallback
+- ✅ `Stream.release_stream()` gleiche Logik
+- ✅ `_clean_redis_keys()` dekrementiert Counter BEVOR Keys gelöscht werden (richtige Reihenfolge!)
+- ✅ Prüft BEIDE Key-Typen: Metadata UND channel_stream/stream_profile
+- ✅ DB-Fallback wenn Redis fehlschlägt
+- ⚠️ **Kritischer Bug in Bugfix #10** - falsche Reihenfolge führte zu Leaks
+
 **Alle Bugfixes sind kritisch für die korrekte Funktion des Systems!**
 
 ---
 
 **Erstellt:** 2026-03-02  
-**Aktualisiert:** 2026-03-12 (Bugfix 7-10 hinzugefügt - Connection Leak Fixes)  
-**Version:** 1.5.0  
+**Aktualisiert:** 2026-03-12 (Bugfix 7-11 hinzugefügt - Complete Connection Leak Fix)  
+**Version:** 1.6.0  
 **Status:** PRODUKTIONSREIF

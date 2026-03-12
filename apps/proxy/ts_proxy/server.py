@@ -1338,7 +1338,7 @@ class ProxyServer:
                 
                 if metadata:
                     stream_id_bytes = metadata.get(b'stream_id')
-                    profile_id_bytes = metadata.get(b'profile_id')
+                    profile_id_bytes = metadata.get(b'profile_id') or metadata.get(b'm3u_profile')  # Try both!
                     
                     if stream_id_bytes and profile_id_bytes:
                         stream_id = int(stream_id_bytes.decode('utf-8'))
