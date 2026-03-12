@@ -1361,11 +1361,7 @@ class ProxyServer:
                 # If we found both, release the counter via Redis
                 if stream_id and profile_id:
                     try:
-                        # Release directly via Redis - no DB needed!
-                        self.redis_client.delete(f"channel_stream:{channel_id}")
-                        self.redis_client.delete(f"stream_profile:{stream_id}")
-                        
-                        # Decrement profile counter
+                        # ✅ FIRST: Decrement profile counter (BEFORE deleting keys!)
                         profile_connections_key = f"profile_connections:{profile_id}"
                         current_count = int(self.redis_client.get(profile_connections_key) or 0)
                         if current_count > 0:
@@ -1375,6 +1371,10 @@ class ProxyServer:
                         else:
                             logger.debug(f"Counter already at 0 for profile {profile_id}")
                             stream_released = True
+                        
+                        # ✅ THEN: Delete the keys (AFTER decrementing counter!)
+                        self.redis_client.delete(f"channel_stream:{channel_id}")
+                        self.redis_client.delete(f"stream_profile:{stream_id}")
                     except Exception as e:
                         logger.error(f"Error releasing stream via Redis: {e}")
                 else:
