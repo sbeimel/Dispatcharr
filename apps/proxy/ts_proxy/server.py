@@ -1323,9 +1323,11 @@ class ProxyServer:
 
     def _clean_redis_keys(self, channel_id):
         """Clean up all Redis keys for a channel more efficiently"""
-        # BUGFIX #10 + #11: Release stream counter directly via Redis (no DB lookup)
-        # This works for both UUIDs and stream hashes
+        # BUGFIX #10 + #11: Release stream counter via Redis OR DB
+        # Try Redis first (works for both UUIDs and hashes), then fall back to DB
         if self.redis_client:
+            stream_released = False
+            
             try:
                 stream_id = None
                 profile_id = None
@@ -1356,7 +1358,7 @@ class ProxyServer:
                             profile_id = int(stream_profile_bytes.decode('utf-8'))
                             logger.debug(f"Found stream_id={stream_id}, profile_id={profile_id} from channel_stream/stream_profile keys")
                 
-                # If we found both, release the counter
+                # If we found both, release the counter via Redis
                 if stream_id and profile_id:
                     try:
                         # Release directly via Redis - no DB needed!
@@ -1369,14 +1371,33 @@ class ProxyServer:
                         if current_count > 0:
                             self.redis_client.decr(profile_connections_key)
                             logger.info(f"Released stream {stream_id} profile {profile_id} via Redis (counter: {current_count} → {current_count-1})")
+                            stream_released = True
                         else:
                             logger.debug(f"Counter already at 0 for profile {profile_id}")
+                            stream_released = True
                     except Exception as e:
                         logger.error(f"Error releasing stream via Redis: {e}")
                 else:
-                    logger.debug(f"No stream/profile found in Redis for {channel_id}")
+                    logger.debug(f"No stream/profile found in Redis for {channel_id}, trying DB fallback")
             except Exception as e:
-                logger.error(f"Error releasing stream for channel {channel_id}: {e}")
+                logger.error(f"Error releasing stream via Redis for channel {channel_id}: {e}")
+            
+            # Fallback: Try DB-based release (original method)
+            if not stream_released:
+                try:
+                    channel = Channel.objects.get(uuid=channel_id)
+                    channel.release_stream()
+                    logger.info(f"Released stream via DB for channel {channel_id}")
+                except Channel.DoesNotExist:
+                    try:
+                        stream = Stream.objects.get(stream_hash=channel_id)
+                        stream.release_stream()
+                        logger.info(f"Released stream via DB for stream {channel_id}")
+                    except Stream.DoesNotExist:
+                        # Channel/stream doesn't exist in DB - that's OK, just clean Redis
+                        logger.debug(f"Channel/stream {channel_id} not found in database, Redis keys will be cleaned")
+                except Exception as e:
+                    logger.error(f"Error releasing stream via DB for channel {channel_id}: {e}")
 
         if not self.redis_client:
             return 0
