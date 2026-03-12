@@ -1323,41 +1323,58 @@ class ProxyServer:
 
     def _clean_redis_keys(self, channel_id):
         """Clean up all Redis keys for a channel more efficiently"""
-        # BUGFIX #10: Release stream counter directly via Redis (no DB lookup)
+        # BUGFIX #10 + #11: Release stream counter directly via Redis (no DB lookup)
         # This works for both UUIDs and stream hashes
         if self.redis_client:
             try:
+                stream_id = None
+                profile_id = None
+                
+                # Try 1: Get from channel metadata (for stream-based channels)
                 metadata_key = RedisKeys.channel_metadata(channel_id)
                 metadata = self.redis_client.hgetall(metadata_key)
                 
                 if metadata:
-                    # Get stream_id and profile_id from Redis metadata
                     stream_id_bytes = metadata.get(b'stream_id')
                     profile_id_bytes = metadata.get(b'profile_id')
                     
                     if stream_id_bytes and profile_id_bytes:
-                        try:
-                            stream_id = int(stream_id_bytes.decode('utf-8'))
-                            profile_id = int(profile_id_bytes.decode('utf-8'))
-                            
-                            # Release directly via Redis - no DB needed!
-                            self.redis_client.delete(f"channel_stream:{channel_id}")
-                            self.redis_client.delete(f"stream_profile:{stream_id}")
-                            
-                            # Decrement profile counter
-                            profile_connections_key = f"profile_connections:{profile_id}"
-                            current_count = int(self.redis_client.get(profile_connections_key) or 0)
-                            if current_count > 0:
-                                self.redis_client.decr(profile_connections_key)
-                                logger.info(f"Released stream {stream_id} profile {profile_id} via Redis (counter: {current_count} → {current_count-1})")
-                            else:
-                                logger.debug(f"Counter already at 0 for profile {profile_id}")
-                        except Exception as e:
-                            logger.error(f"Error releasing stream via Redis: {e}")
-                    else:
-                        logger.debug(f"No stream/profile metadata found in Redis for {channel_id}")
+                        stream_id = int(stream_id_bytes.decode('utf-8'))
+                        profile_id = int(profile_id_bytes.decode('utf-8'))
+                        logger.debug(f"Found stream_id={stream_id}, profile_id={profile_id} in metadata")
+                
+                # Try 2: Get from channel_stream and stream_profile keys (for channel-based streams)
+                if not stream_id or not profile_id:
+                    # For Channel.get_stream() based streams
+                    channel_stream_bytes = self.redis_client.get(f"channel_stream:{channel_id}")
+                    if channel_stream_bytes:
+                        stream_id = int(channel_stream_bytes.decode('utf-8'))
+                        
+                        # Now get profile_id from stream_profile
+                        stream_profile_bytes = self.redis_client.get(f"stream_profile:{stream_id}")
+                        if stream_profile_bytes:
+                            profile_id = int(stream_profile_bytes.decode('utf-8'))
+                            logger.debug(f"Found stream_id={stream_id}, profile_id={profile_id} from channel_stream/stream_profile keys")
+                
+                # If we found both, release the counter
+                if stream_id and profile_id:
+                    try:
+                        # Release directly via Redis - no DB needed!
+                        self.redis_client.delete(f"channel_stream:{channel_id}")
+                        self.redis_client.delete(f"stream_profile:{stream_id}")
+                        
+                        # Decrement profile counter
+                        profile_connections_key = f"profile_connections:{profile_id}"
+                        current_count = int(self.redis_client.get(profile_connections_key) or 0)
+                        if current_count > 0:
+                            self.redis_client.decr(profile_connections_key)
+                            logger.info(f"Released stream {stream_id} profile {profile_id} via Redis (counter: {current_count} → {current_count-1})")
+                        else:
+                            logger.debug(f"Counter already at 0 for profile {profile_id}")
+                    except Exception as e:
+                        logger.error(f"Error releasing stream via Redis: {e}")
                 else:
-                    logger.debug(f"No metadata found in Redis for {channel_id}")
+                    logger.debug(f"No stream/profile found in Redis for {channel_id}")
             except Exception as e:
                 logger.error(f"Error releasing stream for channel {channel_id}: {e}")
 
