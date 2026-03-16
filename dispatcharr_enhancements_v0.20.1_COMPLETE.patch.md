@@ -1,7 +1,7 @@
 # Dispatcharr v0.20.1 Enhancements - Complete Patch
 
-**Version:** v1.6.0  
-**Datum:** 2026-03-12  
+**Version:** v1.7.0  
+**Datum:** 2026-03-16  
 **Features:** Alle v0.19.0 Features + Bugfixes + Docker Fix
 
 ---
@@ -18,13 +18,13 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 7. Alle Frontend-Änderungen
 8. Docker drf-spectacular Fix
 
-**Zusätzlich:** 11 Bugfixes (5 in url_utils.py + 2 in server.py + 1 in api_views.py + 1 in views.py + 2 in models.py + 1 in stream_generator.py)
+**Zusätzlich:** 12 Bugfixes (5 in url_utils.py + 2 in server.py + 1 in api_views.py + 1 in views.py + 2 in models.py + 1 in stream_generator.py + 1 in serializers.py)
 
 ---
 
-## GEÄNDERTE DATEIEN (18)
+## GEÄNDERTE DATEIEN (19)
 
-### Backend (12 Dateien)
+### Backend (13 Dateien)
 
 1. `apps/proxy/config.py` - ✅ IDENTISCH mit v0.19.0
 2. `apps/m3u/models.py` - ✅ IDENTISCH mit v0.19.0
@@ -39,6 +39,7 @@ Dieser Patch integriert alle Features von v0.19.0 in v0.20.1:
 11. `apps/proxy/ts_proxy/views.py` - ✅ MODIFIZIERT (Bugfix #7)
 12. `apps/channels/models.py` - ✅ MODIFIZIERT (Bugfix #7 TTL)
 13. `apps/proxy/ts_proxy/stream_generator.py` - ✅ MODIFIZIERT (Bugfix #9)
+14. `apps/m3u/serializers.py` - ✅ MODIFIZIERT (Bugfix #12)
 
 ### Frontend (4 Dateien)
 
@@ -955,11 +956,41 @@ Bei Problemen:
 - ✅ DB-Fallback wenn Redis fehlschlägt
 - ⚠️ **Kritischer Bug in Bugfix #10** - falsche Reihenfolge führte zu Leaks
 
+### Bugfix 12: serializers.py (Proxy Feld fehlt in API Response) - KRITISCH!
+- ✅ `proxy` Feld in `M3UAccountSerializer.fields` hinzugefügt
+- ✅ Proxy URL wird jetzt korrekt im Frontend angezeigt nach Speichern
+- ✅ Proxy URL wird korrekt geladen wenn M3U Account bearbeitet wird
+- ⚠️ **Original Dispatcharr Bug** - `proxy` Feld war im Model vorhanden aber fehlte im Serializer
+
+**Problem:** Das `proxy` Feld war im `M3UAccount` Model definiert und im Frontend-Formular vorhanden, aber fehlte in der `fields` Liste des `M3UAccountSerializer`. Dadurch wurde der Wert zwar gespeichert (weil das Model-Feld existiert), aber beim Laden des Accounts nicht zurückgegeben - das Frontend zeigte das Feld immer leer an.
+
+**Änderung in `apps/m3u/serializers.py`:**
+```python
+# VORHER:
+fields = [
+    ...
+    "enable_vod",
+    "auto_enable_new_groups_live",
+    "auto_enable_new_groups_vod",
+    "auto_enable_new_groups_series",
+]
+
+# NACHHER:
+fields = [
+    ...
+    "enable_vod",
+    "auto_enable_new_groups_live",
+    "auto_enable_new_groups_vod",
+    "auto_enable_new_groups_series",
+    "proxy",  # ✅ NEU
+]
+```
+
 **Alle Bugfixes sind kritisch für die korrekte Funktion des Systems!**
 
 ---
 
 **Erstellt:** 2026-03-02  
-**Aktualisiert:** 2026-03-12 (Bugfix 7-11 hinzugefügt - Complete Connection Leak Fix)  
-**Version:** 1.6.0  
+**Aktualisiert:** 2026-03-16 (Bugfix 12 hinzugefügt - Proxy Feld in Serializer)  
+**Version:** 1.7.0  
 **Status:** PRODUKTIONSREIF

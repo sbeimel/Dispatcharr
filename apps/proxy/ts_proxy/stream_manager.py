@@ -134,6 +134,9 @@ class StreamManager:
         # Add HTTP reader thread property
         self.http_reader = None
 
+        # Track last stream switch time for adaptive health monitor cooldown
+        self.last_stream_switch_time = 0
+
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
         session = requests.Session()
@@ -237,6 +240,7 @@ class StreamManager:
                         logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
                         stream_switch_attempts += 1
                         self.retry_count = 0  # Reset retries for new stream
+                        self.last_stream_switch_time = time.time()
                         continue  # Go back to main loop with new stream
                     else:
                         logger.error(f"Health-requested stream switch failed for channel {self.channel_id}")
@@ -376,6 +380,7 @@ class StreamManager:
                     if switch_result:
                         # Successfully switched to a new stream, continue with the new URL
                         stream_switch_attempts += 1
+                        self.last_stream_switch_time = time.time()
                         logger.info(f"Successfully switched to new URL: {self.url} (switch attempt {stream_switch_attempts}/{max_stream_switches}) for channel: {self.channel_id}")
                         # Reset retry count for the new stream - important for the loop to work correctly
                         self.retry_count = 0
@@ -1185,19 +1190,32 @@ class StreamManager:
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
         consecutive_unhealthy_checks = 0
-        max_unhealthy_checks = 3
 
         # Add flags for the main loop to check
         self.needs_reconnect = False
         self.needs_stream_switch = False
         self.last_health_action_time = 0
-        action_cooldown = 30  # Prevent rapid recovery attempts
 
         while self.running:
             try:
                 now = time.time()
                 inactivity_duration = now - self.last_data_time
-                timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
+
+                # Adaptive thresholds based on time since last switch
+                last_switch_time = getattr(self, 'last_stream_switch_time', 0)
+                time_since_switch = now - last_switch_time if last_switch_time > 0 else float('inf')
+                recently_switched = time_since_switch < 30
+
+                # After a recent switch: detect problems faster (5s timeout, 1 check, 0s cooldown)
+                # Normal operation: standard thresholds (10s timeout, 3 checks, 30s cooldown)
+                if recently_switched:
+                    timeout_threshold = 5
+                    max_unhealthy_checks = 1
+                    action_cooldown = 0
+                else:
+                    timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
+                    max_unhealthy_checks = 3
+                    action_cooldown = 30
 
                 if inactivity_duration > timeout_threshold and self.connected:
                     if self.healthy:
@@ -1214,19 +1232,20 @@ class StreamManager:
                         connection_start_time = getattr(self, 'connection_start_time', 0)
                         stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
 
-                        if stable_time >= 30:  # Stream was stable, try reconnect first
+                        if stable_time >= 30 and not recently_switched:
+                            # Stream was stable for a while and no recent switch — try reconnect first
                             if not self.needs_reconnect:
                                 logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
                                 self.needs_reconnect = True
                                 self.last_health_action_time = now
                         else:
-                            # Stream wasn't stable, suggest stream switch
+                            # Stream wasn't stable or just switched — go straight to stream switch
                             if not self.needs_stream_switch:
-                                logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
+                                logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s, {time_since_switch:.1f}s since last switch) for channel {self.channel_id}")
                                 self.needs_stream_switch = True
                                 self.last_health_action_time = now
 
-                        consecutive_unhealthy_checks = 0 # Reset after setting flag
+                        consecutive_unhealthy_checks = 0  # Reset after setting flag
 
                 elif self.connected and not self.healthy:
                     # Auto-recover health when data resumes

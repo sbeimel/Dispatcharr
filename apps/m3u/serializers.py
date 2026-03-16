@@ -172,6 +172,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "auto_enable_new_groups_live",
             "auto_enable_new_groups_vod",
             "auto_enable_new_groups_series",
+            "proxy",
         ]
         extra_kwargs = {
             "password": {
