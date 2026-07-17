@@ -1775,29 +1775,67 @@ class ProxyServer:
                                     except (ValueError, TypeError):
                                         pass
 
-                                if total_clients == 0:
-                                    # Check if we have a connection_attempt timestamp (set when CONNECTING starts)
-                                    connection_attempt_time = None
-                                    attempt_key = RedisKeys.connection_attempt(channel_id)
-                                    if self.redis_client:
-                                        attempt_value = self.redis_client.get(attempt_key)
-                                        if attempt_value:
-                                            try:
-                                                connection_attempt_time = float(attempt_value)
-                                            except (ValueError, TypeError):
-                                                pass
-
-                                    # Also get init time as a fallback
-                                    init_time = None
-                                    if metadata and 'init_time' in metadata:
+                                # BUFFER TIMEOUT FAILOVER: Check for stuck channels REGARDLESS of client count
+                                # Get start time for timeout calculation
+                                connection_attempt_time = None
+                                attempt_key = RedisKeys.connection_attempt(channel_id)
+                                if self.redis_client:
+                                    attempt_value = self.redis_client.get(attempt_key)
+                                    if attempt_value:
                                         try:
-                                            init_time = float(metadata['init_time'])
+                                            connection_attempt_time = float(attempt_value)
                                         except (ValueError, TypeError):
                                             pass
 
-                                    # Use whichever timestamp we have (prefer connection_attempt as it's more recent)
-                                    start_time = connection_attempt_time or init_time
+                                # Also get init time as a fallback
+                                init_time = None
+                                if metadata and 'init_time' in metadata:
+                                    try:
+                                        init_time = float(metadata['init_time'])
+                                    except (ValueError, TypeError):
+                                        pass
 
+                                # Use whichever timestamp we have (prefer connection_attempt as it's more recent)
+                                start_time = connection_attempt_time or init_time
+
+                                # Check if channel stuck in connecting state (buffer not filling)
+                                if start_time and not connection_ready_time:
+                                    time_since_start = time.time() - start_time
+                                    connecting_timeout = ConfigHelper.channel_init_grace_period()
+
+                                    if time_since_start > connecting_timeout:
+                                        # Channel stuck in connecting - trigger failover REGARDLESS of client count
+                                        # Clients are waiting for stream, so we should try alternatives
+                                        stream_manager = self.stream_managers.get(channel_id)
+                                        if stream_manager and not getattr(stream_manager, 'url_switching', False):
+                                            logger.warning(
+                                                f"Channel {channel_id} stuck in {channel_state} state for {time_since_start:.1f}s "
+                                                f"with {total_clients} client(s) waiting "
+                                                f"(timeout: {connecting_timeout}s) - triggering failover to alternate stream/profile"
+                                            )
+                                            # Trigger stream switch by calling _try_next_stream
+                                            try:
+                                                switch_success = stream_manager._try_next_stream()
+                                                if switch_success:
+                                                    logger.info(f"Buffer timeout failover triggered successfully for channel {channel_id}")
+                                                else:
+                                                    logger.warning(f"Buffer timeout failover failed - no alternate streams available for channel {channel_id}")
+                                                    self._coordinated_stop_channel(channel_id)
+                                            except Exception as e:
+                                                logger.error(f"Error during buffer timeout failover for channel {channel_id}: {e}")
+                                                self._coordinated_stop_channel(channel_id)
+                                            continue
+                                        else:
+                                            # No stream manager or already switching - stop the channel
+                                            logger.warning(
+                                                f"Channel {channel_id} stuck in {channel_state} state for {time_since_start:.1f}s "
+                                                f"with no stream manager or already switching - stopping channel"
+                                            )
+                                            self._coordinated_stop_channel(channel_id)
+                                            continue
+
+                                if total_clients == 0:
+                                    # No clients - check if we should shutdown due to no clients
                                     if start_time:
                                         # Check which timeout to apply based on channel lifecycle
                                         if connection_ready_time:
@@ -1812,40 +1850,6 @@ class ProxyServer:
                                                 )
                                                 self._coordinated_stop_channel(channel_id)
                                                 continue
-                                        else:
-                                            # Never reached ready - use grace_period timeout
-                                            time_since_start = time.time() - start_time
-                                            connecting_timeout = ConfigHelper.channel_init_grace_period()
-
-                                            if time_since_start > connecting_timeout:
-                                                # BUGFIX: Trigger failover instead of stopping immediately
-                                                # This allows trying alternate profiles/streams when buffer doesn't fill
-                                                stream_manager = self.stream_managers.get(channel_id)
-                                                if stream_manager and not getattr(stream_manager, 'url_switching', False):
-                                                    logger.warning(
-                                                        f"Channel {channel_id} stuck in {channel_state} state for {time_since_start:.1f}s "
-                                                        f"(timeout: {connecting_timeout}s) - triggering failover to alternate stream/profile"
-                                                    )
-                                                    # Trigger stream switch by calling _try_next_stream
-                                                    try:
-                                                        switch_success = stream_manager._try_next_stream()
-                                                        if switch_success:
-                                                            logger.info(f"Buffer timeout failover triggered successfully for channel {channel_id}")
-                                                        else:
-                                                            logger.warning(f"Buffer timeout failover failed - no alternate streams available for channel {channel_id}")
-                                                            self._coordinated_stop_channel(channel_id)
-                                                    except Exception as e:
-                                                        logger.error(f"Error during buffer timeout failover for channel {channel_id}: {e}")
-                                                        self._coordinated_stop_channel(channel_id)
-                                                    continue
-                                                else:
-                                                    # No stream manager or already switching - stop the channel
-                                                    logger.warning(
-                                                        f"Channel {channel_id} stuck in {channel_state} state for {time_since_start:.1f}s "
-                                                        f"with no stream manager or already switching - stopping channel"
-                                                    )
-                                                    self._coordinated_stop_channel(channel_id)
-                                                    continue
                                 elif connection_ready_time:
                                     # We have clients now, but check grace period for state transition
                                     grace_period = ConfigHelper.channel_init_grace_period()
