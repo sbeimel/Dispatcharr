@@ -71,20 +71,26 @@ class HTTPStreamReader:
             self.session.mount('http://', adapter)
             self.session.mount('https://', adapter)
 
-            # Stream the URL
+            # Stream the URL (allow_redirects=True to follow 302/301)
             self.response = self.session.get(
                 self.url,
                 headers=headers,
                 stream=True,
                 timeout=(5, 30),  # 5s connect, 30s read
                 proxies=proxies,
+                allow_redirects=True,  # Follow HTTP redirects (302, 301, etc.)
             )
+
+            # Log if URL was redirected
+            if self.response.history:
+                redirect_chain = ' -> '.join([resp.url for resp in self.response.history])
+                logger.info(f"HTTP reader followed redirects: {redirect_chain} -> {self.response.url}")
 
             if self.response.status_code != 200:
                 logger.error(f"HTTP {self.response.status_code} from {self.url}")
                 return
 
-            logger.info(f"HTTP reader connected successfully, streaming data...")
+            logger.info(f"HTTP reader connected successfully to {self.response.url}, streaming data...")
 
             import select as _select
 
