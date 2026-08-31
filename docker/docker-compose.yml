@@ -7,7 +7,15 @@ services:
   # Web Service
   # ============================================================================
   web:
-    image: ghcr.io/dispatcharr/dispatcharr:latest
+    image: sbeimel/dispatcharr:0.30.0
+    # ODER: Build lokal
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    #   args:
+    #     BASE_TAG: base
+    #     REPO_OWNER: sbeimel
+    #     REPO_NAME: dispatcharr
     container_name: dispatcharr_web
     restart: unless-stopped
     ports:
@@ -111,7 +119,7 @@ services:
   # Celery Service - Background task worker
   # ============================================================================
   celery:
-    image: ghcr.io/dispatcharr/dispatcharr:latest
+    image: sbeimel/dispatcharr:0.30.0
     container_name: dispatcharr_celery
     restart: unless-stopped
     depends_on:

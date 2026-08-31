@@ -34,6 +34,26 @@ COPY pyproject.toml /tmp/build/
 COPY version.py /tmp/build/
 COPY README.md /tmp/build/
 RUN uv sync --python 3.13 --no-cache --no-install-project --no-dev
+
+# EXPLICIT installation of critical packages that might be version-mismatched
+RUN echo "=== Ensuring critical packages with correct versions ===" && \
+    uv pip install --python $UV_PROJECT_ENVIRONMENT/bin/python \
+    'psycopg[binary]' \
+    django-db-geventpool \
+    'drf-spectacular>=0.30.0' \
+    django-redis \
+    'channels-redis>=4.3.0'
+
+# Verify critical packages are installed
+RUN echo "=== Verifying critical packages ===" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import django_db_geventpool; print('✓ django-db-geventpool')" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import drf_spectacular; print('✓ drf-spectacular')" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import gevent; print('✓ gevent')" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import psycopg; print('✓ psycopg version:', psycopg.__version__)" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import django_redis; print('✓ django-redis')" && \
+    $UV_PROJECT_ENVIRONMENT/bin/python -c "import channels_redis; print('✓ channels-redis')" && \
+    echo "=== All critical packages verified ==="
+
 WORKDIR /
 
 # --- Build legacy NumPy wheel for old hardware (store for runtime switching) ---
