@@ -1,0 +1,51 @@
+diff --git a/apps/proxy/live_proxy/url_utils.py b/apps/proxy/live_proxy/url_utils.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/url_utils.py
++++ b/apps/proxy/live_proxy/url_utils.py
+@@ -90,11 +90,11 @@ def generate_stream_url(
+                 try:
+                     redis_client = RedisClient.get_client()
+                     if redis_client:
+-                        # Scan for cooldown keys for this stream with channel_id (channel-specific in v0.30.0)
+-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*"
++                        # Scan for cooldown keys - must include :cooldown suffix!
++                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*:cooldown"
+                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+-                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+-                            if len(parts) >= 7:
++                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown (8 parts)
++                            if len(parts) >= 8:
+                                 try:
+                                     profile_id_from_key = int(parts[6])
+@@ -212,11 +212,11 @@ def generate_stream_url(
+                     # Get all streams for this channel to check their cooldowns
+                     channel_streams = channel.streams.all()
+                     for ch_stream in channel_streams:
+-                        # Scan for cooldown keys (channel-specific in v0.30.0)
+-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*"
++                        # Scan for cooldown keys - must include :cooldown suffix!
++                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*:cooldown"
+                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+-                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+-                            if len(parts) >= 7:
++                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown (8 parts)
++                            if len(parts) >= 8:
+                                 try:
+                                     profile_id_from_key = int(parts[6])
+
+diff --git a/apps/proxy/live_proxy/input/manager.py b/apps/proxy/live_proxy/input/manager.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/input/manager.py
++++ b/apps/proxy/live_proxy/input/manager.py
+@@ -2259,8 +2259,8 @@ class StreamManager:
+                             stream_ids_in_alternates = {alt['stream_id'] for alt in alternate_streams}
+                             
+                             for stream_id in stream_ids_in_alternates:
+-                                # v0.30.0 uses channel-specific cooldown keys
+-                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*"
++                                # v0.30.0 uses channel-specific cooldown keys - must include :cooldown suffix!
++                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*:cooldown"
+                                 for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                                     keys_to_delete.append(key)

@@ -91,11 +91,11 @@ def generate_stream_url(
                     redis_client = RedisClient.get_client()
                     if redis_client:
                         # Scan for cooldown keys for this stream with channel_id (channel-specific in v0.30.0)
-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*"
+                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*:cooldown"
                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
                             # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
-                            if len(parts) >= 7:
+                            if len(parts) >= 8:
                                 try:
                                     profile_id_from_key = int(parts[6])
                                     ttl = redis_client.ttl(key)
@@ -206,11 +206,11 @@ def generate_stream_url(
                     channel_streams = channel.streams.all()
                     for ch_stream in channel_streams:
                         # Scan for cooldown keys (channel-specific in v0.30.0)
-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*"
+                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*:cooldown"
                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
                             # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
-                            if len(parts) >= 7:
+                            if len(parts) >= 8:
                                 try:
                                     profile_id_from_key = int(parts[6])
                                     ttl = redis_client.ttl(key)

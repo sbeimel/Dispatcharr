@@ -2252,7 +2252,7 @@ class StreamManager:
                             
                             for stream_id in stream_ids_in_alternates:
                                 # v0.30.0 uses channel-specific cooldown keys
-                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*"
+                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*:cooldown"
                                 for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
                                     keys_to_delete.append(key)
                             
