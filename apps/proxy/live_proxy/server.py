@@ -2399,13 +2399,23 @@ class ProxyServer:
                             cursor, keys = self.redis_client.scan(cursor, match=pattern, count=100)
                             if keys:
                                 # Filter out cooldown keys - they should persist beyond channel lifetime
-                                keys_to_delete = [k for k in keys if not k.decode('utf-8' if isinstance(k, bytes) else str).endswith(':cooldown')]
+                                keys_to_delete = []
+                                cooldown_keys = []
+                                
+                                for k in keys:
+                                    # Handle both bytes and str keys
+                                    key_str = k.decode('utf-8') if isinstance(k, bytes) else k
+                                    
+                                    if key_str.endswith(':cooldown'):
+                                        cooldown_keys.append(k)
+                                    else:
+                                        keys_to_delete.append(k)
+                                
                                 if keys_to_delete:
                                     self.redis_client.delete(*keys_to_delete)
                                     total_deleted += len(keys_to_delete)
                                 
                                 # Log skipped cooldown keys
-                                cooldown_keys = [k for k in keys if k.decode('utf-8' if isinstance(k, bytes) else str).endswith(':cooldown')]
                                 if cooldown_keys:
                                     logger.debug(f"Preserved {len(cooldown_keys)} cooldown keys for channel {channel_id}")
 
