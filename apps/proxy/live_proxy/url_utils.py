@@ -233,6 +233,8 @@ def generate_stream_url(
                                         cooldown_skip_profiles.add(profile_id_from_key)
                                 except (ValueError, IndexError) as e:
                                     logger.debug(f"Error parsing cooldown key {key}: {e}")
+                
+                logger.info(f"[COOLDOWN] Found {len(cooldown_skip_profiles)} cooled profiles for channel {channel_id}")
             except Exception as e:
                 logger.debug(f"Could not check cooldowns for channel playback: {e}")
 
