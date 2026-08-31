@@ -26,6 +26,41 @@ ENV VIRTUAL_ENV=/dispatcharrpy
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
 
+# IMPORTANT: Verify Python packages are still available after base image
+RUN echo "=== Verifying packages in final stage ===" && \
+    /dispatcharrpy/bin/python -c "import django_db_geventpool; print('✓ django-db-geventpool in final')" || \
+    echo "⚠️ WARNING: django-db-geventpool NOT found in final stage!"
+
+# Fallback: Install critical packages if they're missing
+RUN /dispatcharrpy/bin/python -c "import psycopg; import psycopg.pq" 2>/dev/null || \
+    (echo "⚠️  psycopg missing! Installing..." && \
+    uv pip install --python /dispatcharrpy/bin/python 'psycopg[binary]>=3.1.18')
+
+RUN /dispatcharrpy/bin/python -c "import django_db_geventpool" 2>/dev/null || \
+    (echo "Installing missing django-db-geventpool..." && \
+    uv pip install --python /dispatcharrpy/bin/python django-db-geventpool>=4.0.8)
+
+RUN /dispatcharrpy/bin/python -c "import drf_spectacular" 2>/dev/null || \
+    (echo "Installing missing drf-spectacular..." && \
+    uv pip install --python /dispatcharrpy/bin/python drf-spectacular>=0.29.0)
+
+RUN /dispatcharrpy/bin/python -c "import django_redis" 2>/dev/null || \
+    (echo "Installing missing django-redis..." && \
+    uv pip install --python /dispatcharrpy/bin/python django-redis)
+
+RUN /dispatcharrpy/bin/python -c "import channels_redis" 2>/dev/null || \
+    (echo "Installing missing channels-redis..." && \
+    uv pip install --python /dispatcharrpy/bin/python channels-redis==4.3.0)
+
+# Final verification - fail build if packages are still missing
+RUN echo "=== Final verification ===" && \
+    /dispatcharrpy/bin/python -c "import psycopg; print('✓ psycopg version:', psycopg.__version__)" && \
+    /dispatcharrpy/bin/python -c "import psycopg.pq; print('✓ psycopg binary driver')" && \
+    /dispatcharrpy/bin/python -c "import django_db_geventpool; print('✓ django-db-geventpool available')" && \
+    /dispatcharrpy/bin/python -c "import drf_spectacular; print('✓ drf-spectacular available')" && \
+    /dispatcharrpy/bin/python -c "import django_redis; print('✓ django-redis available')" && \
+    /dispatcharrpy/bin/python -c "import channels_redis; print('✓ channels-redis available')"
+
 # Copy application code
 COPY . /app
 # Copy nginx configuration
