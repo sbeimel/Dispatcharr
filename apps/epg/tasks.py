@@ -602,8 +602,16 @@ def fetch_xmltv(source):
         # Send initial download notification
         send_epg_update(source.id, "downloading", 0)
 
+        # Check if EPG source has custom proxy configured
+        proxies = None
+        if source.custom_properties and source.custom_properties.get('http_proxy'):
+            from core.utils import sanitize_proxy_url
+            proxy_url = source.custom_properties['http_proxy']
+            proxies = {'http': proxy_url, 'https': proxy_url}
+            logger.info(f"Using HTTP proxy for EPG source '{source.name}': {sanitize_proxy_url(proxy_url)}")
+
         # Use streaming response to track download progress
-        with requests.get(source.url, headers=headers, stream=True, timeout=60) as response:
+        with requests.get(source.url, headers=headers, proxies=proxies, stream=True, timeout=60) as response:
             # Handle 404 specifically
             if response.status_code == 404:
                 logger.error(f"EPG URL not found (404): {source.url}")
