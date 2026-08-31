@@ -689,9 +689,13 @@ class Channel(models.Model):
         redis_client.delete(f"channel_stream:{self.id}")
         redis_client.delete(f"stream_profile:{stream_id}")
 
-    def get_stream(self, requester=None):
+    def get_stream(self, requester=None, cooldown_skip_profiles=None):
         """
         Finds an available stream for the requested channel and returns the selected stream and profile.
+        
+        Args:
+            requester: Optional requester information
+            cooldown_skip_profiles: Optional set of profile IDs to skip (e.g. due to cooldown)
 
         Returns:
             Tuple[Optional[int], Optional[int], Optional[str], bool]:
@@ -699,6 +703,10 @@ class Channel(models.Model):
         """
         redis_client = RedisClient.get_client()
         error_reason = None
+        
+        # Convert to set if None
+        if cooldown_skip_profiles is None:
+            cooldown_skip_profiles = set()
 
         # Check if this channel has any streams
         if not self.streams.exists():
@@ -770,6 +778,13 @@ class Channel(models.Model):
 
             for profile in profiles:
                 has_active_profiles = True
+                
+                # Skip profiles that are on cooldown
+                if profile.id in cooldown_skip_profiles:
+                    logger.info(
+                        f"[COOLDOWN] Skipping profile {profile.id} ({profile.name}) for stream {stream.id} - on cooldown"
+                    )
+                    continue
 
                 # Atomically check and reserve a slot (INCR-first pattern)
                 reserved, current_count, failure_reason = reserve_profile_slot(

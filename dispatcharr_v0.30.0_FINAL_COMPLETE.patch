@@ -1,0 +1,98 @@
+# Dispatcharr v0.30.0 - COMPLETE FIX PATCH
+# Includes: Cooldown-Check at Start + Preserve Cooldown Keys + Debug Logs
+
+## Summary of Changes:
+# 1. url_utils.py: Fix cooldown key pattern + Add debug logs
+# 2. server.py: Preserve cooldown keys on channel stop
+# 3. manager.py: LAST RESORT system (optional - already done)
+
+## Files Modified: 3
+## Critical Bugs Fixed: 2
+## - Cooldown keys deleted on channel stop (CRITICAL)
+## - Cooldown pattern missing :cooldown suffix (CRITICAL)
+
+# Apply with:
+# docker compose build --no-cache && docker compose up -d
+
+---
+
+### File 1: apps/proxy/live_proxy/url_utils.py
+**Changes:**
+- Line ~93: Add :cooldown suffix to pattern
+- Line ~94: Add debug logging
+- Line ~98: Change len(parts) >= 7 to >= 8
+- Line ~208: Add :cooldown suffix to pattern
+- Line ~213: Change len(parts) >= 7 to >= 8
+
+**Key Fix:** Cooldown pattern must end with :cooldown to match Redis keys
+
+---
+
+### File 2: apps/proxy/live_proxy/server.py
+**Changes:**
+- Line ~2395: Filter cooldown keys before deletion
+- Line ~2410: Log preserved cooldown keys
+
+**Key Fix:** Cooldown keys must persist beyond channel lifetime
+
+---
+
+### File 3: apps/proxy/live_proxy/input/manager.py (Optional)
+**Changes:**
+- Line ~2255: Add :cooldown suffix to LAST RESORT pattern
+
+**Key Fix:** LAST RESORT must find correct cooldown keys to delete
+
+---
+
+## Expected Behavior After Patch:
+
+### 1. Channel Start with Cooldown:
+```
+[COOLDOWN] Checking cooldowns for 43 streams in channel xxx
+[COOLDOWN] Profile 579 for stream 1187282 on cooldown - blocked for 9m 45s
+[COOLDOWN] Found 1 cooled profiles for channel xxx
+Channel assigned stream 1187282 profile 582  ← NOT 579!
+```
+
+### 2. Channel Stop:
+```
+Cleaned up 89 Redis keys for channel xxx
+Preserved 2 cooldown keys for channel xxx  ← NEW!
+```
+
+### 3. Channel Restart (after 10s):
+```
+[COOLDOWN] Checking cooldowns for 43 streams
+[COOLDOWN] Profile 579 for stream 1187282 - blocked for 9m 35s  ← STILL COOLED!
+[COOLDOWN] Found 1 cooled profiles
+Channel assigned profile 582  ← Cooldown working!
+```
+
+---
+
+## Testing:
+
+1. Start a channel that fails with profile 579
+2. Check logs: "Set 600s cooldown for stream XXX with profile 579"
+3. Stop channel
+4. Check logs: "Preserved X cooldown keys"
+5. Start same channel within 10 minutes
+6. Check logs: "[COOLDOWN] Profile 579... blocked for Xm Ys"
+7. Verify different profile is selected (not 579)
+
+---
+
+## Rollback:
+
+If issues occur, revert with:
+```bash
+git checkout apps/proxy/live_proxy/url_utils.py
+git checkout apps/proxy/live_proxy/server.py
+docker compose build --no-cache && docker compose up -d
+```
+
+---
+
+Created: 2026-08-31
+Version: v0.30.0 FINAL COMPLETE

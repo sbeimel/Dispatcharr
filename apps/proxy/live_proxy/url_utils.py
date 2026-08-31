@@ -238,8 +238,11 @@ def generate_stream_url(
             except Exception as e:
                 logger.debug(f"Could not check cooldowns for channel playback: {e}")
 
-        # Get stream and profile for this channel
-        stream_id, profile_id, error_reason, slot_reserved = channel.get_stream()
+        # Get stream and profile for this channel - pass cooldown_skip_profiles!
+        stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
+            requester=None,
+            cooldown_skip_profiles=cooldown_skip_profiles
+        )
 
         if not stream_id or not profile_id:
             logger.error(f"No stream available for channel {channel_id}: {error_reason}")
