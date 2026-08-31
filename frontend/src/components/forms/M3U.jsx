@@ -424,21 +424,6 @@ const M3U = ({
                 }
               />
 
-              <TextInput
-                label="HTTP Proxy"
-                placeholder="http://proxy.example.com:8080"
-                description="HTTP proxy URL for streaming (always used when configured)"
-                {...form.getInputProps('proxy')}
-                key={form.key('proxy')}
-              />
-
-              <Switch
-                label="Use Proxy for API Calls"
-                description="When enabled, the HTTP proxy will also be used for API calls (M3U download, XC API). When disabled, proxy is only used for streaming."
-                {...form.getInputProps('proxy_for_api', { type: 'checkbox' })}
-                key={form.key('proxy_for_api')}
-              />
-
               {form.getValues().account_type == 'XC' && (
                 <Box>
                   <NumberInput
@@ -462,6 +447,21 @@ const M3U = ({
                       })}
                     />
                   </Group>
+
+                  <TextInput
+                    label="HTTP Proxy"
+                    placeholder="http://proxy.example.com:8080"
+                    description="HTTP proxy URL for streaming (always used when configured)"
+                    {...form.getInputProps('proxy')}
+                    key={form.key('proxy')}
+                  />
+
+                  <Switch
+                    label="Use Proxy for API Calls"
+                    description="When enabled, the HTTP proxy will also be used for API calls (M3U download, XC API). When disabled, proxy is only used for streaming."
+                    {...form.getInputProps('proxy_for_api', { type: 'checkbox' })}
+                    key={form.key('proxy_for_api')}
+                  />
 
                   {!m3uAccount && (
                     <Group justify="space-between">
