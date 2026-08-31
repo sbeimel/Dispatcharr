@@ -92,7 +92,12 @@ def generate_stream_url(
                     if redis_client:
                         # Scan for cooldown keys for this stream with channel_id (channel-specific in v0.30.0)
                         cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*:cooldown"
+                        logger.info(f"[COOLDOWN] Scanning Redis with pattern: {cooldown_pattern}")
+                        
+                        key_count = 0
                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                            key_count += 1
+                            logger.info(f"[COOLDOWN] Found key: {key}")
                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
                             # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
                             if len(parts) >= 8:
@@ -109,6 +114,8 @@ def generate_stream_url(
                                         cooldown_skip_profiles.add(profile_id_from_key)
                                 except (ValueError, IndexError) as e:
                                     logger.debug(f"Error parsing cooldown key {key}: {e}")
+                        
+                        logger.info(f"[COOLDOWN] Scanned {key_count} keys for stream {stream.id}, found {len(cooldown_skip_profiles)} cooled profiles")
                 except Exception as e:
                     logger.debug(f"Could not check cooldowns for stream preview: {e}")
 
@@ -204,6 +211,8 @@ def generate_stream_url(
                 if redis_client:
                     # Get all streams for this channel to check their cooldowns
                     channel_streams = channel.streams.all()
+                    logger.info(f"[COOLDOWN] Checking cooldowns for {len(channel_streams)} streams in channel {channel_id}")
+                    
                     for ch_stream in channel_streams:
                         # Scan for cooldown keys (channel-specific in v0.30.0)
                         cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*:cooldown"
