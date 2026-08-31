@@ -189,6 +189,10 @@ describe('UserUtils', () => {
       expect(result.output_format).toBe('');
       expect(result.output_profile).toBe('');
       expect(result.hide_adult_content).toBe(false);
+      expect(result.catchup_enabled).toBe(true);
+      expect(result.vod_movies_enabled).toBe(true);
+      expect(result.vod_series_enabled).toBe(true);
+      expect(result.dvr_access).toBe('view');
       expect(result.epg_days).toBe(0);
       expect(result.epg_prev_days).toBe(0);
     });
@@ -200,6 +204,10 @@ describe('UserUtils', () => {
           output_format: 'ts',
           output_profile: 5,
           hide_adult_content: true,
+          catchup_enabled: false,
+          vod_movies_enabled: false,
+          vod_series_enabled: false,
+          dvr_access: 'manage',
           epg_days: 7,
           epg_prev_days: 2,
           allowed_networks: {
@@ -213,6 +221,10 @@ describe('UserUtils', () => {
       expect(result.output_format).toBe('ts');
       expect(result.output_profile).toBe('5');
       expect(result.hide_adult_content).toBe(true);
+      expect(result.catchup_enabled).toBe(false);
+      expect(result.vod_movies_enabled).toBe(false);
+      expect(result.vod_series_enabled).toBe(false);
+      expect(result.dvr_access).toBe('manage');
       expect(result.epg_days).toBe(7);
       expect(result.epg_prev_days).toBe(2);
     });
@@ -246,6 +258,10 @@ describe('UserUtils', () => {
       output_format: 'ts',
       output_profile: '3',
       hide_adult_content: true,
+      catchup_enabled: false,
+      vod_movies_enabled: false,
+      vod_series_enabled: true,
+      dvr_access: 'view',
       epg_days: 7,
       epg_prev_days: 2,
       allowed_ips: ['192.168.1.0/24'],
@@ -283,6 +299,86 @@ describe('UserUtils', () => {
       const result = formValuesToPayload(makeValues(), null);
       expect(result.hide_adult_content).toBeUndefined();
       expect(result.custom_properties.hide_adult_content).toBe(true);
+    });
+
+    it('moves catchup_enabled into custom_properties', () => {
+      const result = formValuesToPayload(makeValues(), null);
+      expect(result.catchup_enabled).toBeUndefined();
+      expect(result.custom_properties.catchup_enabled).toBe(false);
+    });
+
+    it('defaults catchup_enabled to true when omitted', () => {
+      const result = formValuesToPayload(
+        makeValues({ catchup_enabled: undefined }),
+        null
+      );
+      expect(result.custom_properties.catchup_enabled).toBe(true);
+    });
+
+    it('moves the VOD flags into custom_properties independently', () => {
+      const result = formValuesToPayload(makeValues(), null);
+      expect(result.vod_movies_enabled).toBeUndefined();
+      expect(result.vod_series_enabled).toBeUndefined();
+      expect(result.custom_properties.vod_movies_enabled).toBe(false);
+      expect(result.custom_properties.vod_series_enabled).toBe(true);
+    });
+
+    it('defaults both VOD flags to true when omitted', () => {
+      const result = formValuesToPayload(
+        makeValues({
+          vod_movies_enabled: undefined,
+          vod_series_enabled: undefined,
+        }),
+        null
+      );
+      expect(result.custom_properties.vod_movies_enabled).toBe(true);
+      expect(result.custom_properties.vod_series_enabled).toBe(true);
+    });
+
+    it('maps dvr_access into custom_properties (default view)', () => {
+      const result = formValuesToPayload(makeValues(), null);
+      expect(result.dvr_access).toBeUndefined();
+      expect(result.custom_properties.dvr_access).toBe('view');
+    });
+
+    it('stores manage when selected', () => {
+      const result = formValuesToPayload(
+        makeValues({ dvr_access: 'manage' }),
+        null
+      );
+      expect(result.custom_properties.dvr_access).toBe('manage');
+    });
+
+    it('stores none when selected', () => {
+      const result = formValuesToPayload(
+        makeValues({ dvr_access: 'none' }),
+        null
+      );
+      expect(result.custom_properties.dvr_access).toBe('none');
+    });
+
+    it('forces dvr_access none when saving a streamer', () => {
+      // This file mocks USER_LEVELS.STREAMER as 2 (see vi.mock above).
+      const result = formValuesToPayload(
+        makeValues({
+          user_level: '2',
+          dvr_access: 'manage',
+        }),
+        null
+      );
+      expect(result.custom_properties.dvr_access).toBe('none');
+    });
+
+    it('strips leftover dual-flag dvr keys on save', () => {
+      const result = formValuesToPayload(makeValues({ dvr_access: 'view' }), {
+        custom_properties: {
+          dvr_view_enabled: true,
+          dvr_manage_enabled: true,
+        },
+      });
+      expect(result.custom_properties.dvr_access).toBe('view');
+      expect(result.custom_properties.dvr_view_enabled).toBeUndefined();
+      expect(result.custom_properties.dvr_manage_enabled).toBeUndefined();
     });
 
     it('moves epg_days and epg_prev_days into custom_properties', () => {
@@ -362,6 +458,10 @@ describe('UserUtils', () => {
         output_profile: '',
         channel_profiles: [],
         hide_adult_content: false,
+        catchup_enabled: true,
+        vod_movies_enabled: true,
+        vod_series_enabled: true,
+        dvr_access: 'view',
         epg_days: 0,
         epg_prev_days: 0,
         allowed_ips: [],
@@ -389,7 +489,7 @@ describe('UserUtils', () => {
         expect(result.username).toBe('Username is required');
       });
 
-      it('returns null for a valid non-streamer username', () => {
+      it('returns null for a valid username', () => {
         const result = validate(null, {
           ...getFormInitialValues(),
           username: 'alice',
@@ -398,22 +498,22 @@ describe('UserUtils', () => {
         expect(result.username).toBeNull();
       });
 
-      it('returns null for a valid alphanumeric streamer username', () => {
+      it('returns null for a username with supported special characters', () => {
         const result = validate(null, {
           ...getFormInitialValues(),
-          username: 'alice123',
-          user_level: '2',
+          username: 'alice.smith_123@test-user',
+          user_level: '0',
         });
         expect(result.username).toBeNull();
       });
 
-      it('returns error for streamer username with non-alphanumeric characters', () => {
+      it('returns error for username with unsupported characters', () => {
         const result = validate(null, {
           ...getFormInitialValues(),
-          username: 'alice_123',
-          user_level: '2',
+          username: 'alice+123',
+          user_level: '0',
         });
-        expect(result.username).toBe('Streamer username must be alphanumeric');
+        expect(result.username).toBe('Username may only contain letters, numbers, periods (.), underscores (_), at signs (@), and hyphens (-)');
       });
     });
 
@@ -463,20 +563,22 @@ describe('UserUtils', () => {
         expect(result.xc_password).toBeNull();
       });
 
-      it('returns null for a valid alphanumeric xc_password', () => {
+      it('returns null for an xc_password with supported characters', () => {
         const result = validate(null, {
           ...getFormInitialValues(),
-          xc_password: 'abc123',
+          xc_password: 'abc.123_test-user@example',
         });
         expect(result.xc_password).toBeNull();
       });
 
-      it('returns error for xc_password with non-alphanumeric characters', () => {
+      it('returns error for xc_password with unsupported characters', () => {
         const result = validate(null, {
           ...getFormInitialValues(),
-          xc_password: 'abc!@#',
+          xc_password: 'abc+123',
         });
-        expect(result.xc_password).toBe('XC password must be alphanumeric');
+        expect(result.xc_password).toBe(
+          'XC password may only contain letters, numbers, periods (.), underscores (_), at signs (@), and hyphens (-)'
+        );
       });
     });
 

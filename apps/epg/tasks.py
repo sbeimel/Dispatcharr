@@ -3,6 +3,7 @@
 import logging
 import gzip
 import html.entities
+import lzma
 import os
 import uuid
 import requests
@@ -26,246 +27,197 @@ from core.models import UserAgent, CoreSettings
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
-from .models import EPGSource, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
+from .models import EPGSource, EPGSourceIndex, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
+from apps.epg.utils import (
+    _ONSCREEN_RE,
+    extract_season_episode_from_description,
+    fill_original_air_date_if_missing,
+    send_epg_update,
+)
+from apps.epg.sd_utils import SD_BASE_URL
+from apps.epg.sd_tasks import (
+    SD_BULK_GUIDE_FETCH_THRESHOLD,
+    SD_DAYS_TO_FETCH,
+    SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
+    SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES,
+    SD_POSTER_STYLE_DEFAULT,
+    SD_PROGRAM_BATCH_SIZE,
+    _sd_backfill_schedule_dates_without_data,
+    _sd_compute_schedule_changes_from_md5,
+    _sd_pick_poster_url,
+    _sd_programs_needing_metadata,
+    fetch_schedules_direct,
+    fetch_schedules_direct_stations,
+    fetch_sd_guide_for_epg,
+    fetch_sd_mapped_guide_batch,
+    parse_schedules_direct_time,
+)
 from core.utils import (
+    RedisClient,
     acquire_task_lock,
     is_task_lock_held,
     release_task_lock,
     TaskLockRenewer,
-    send_websocket_update,
     cleanup_memory,
     log_system_event,
+    _is_celery_worker_context,
+    truncate_with_warning,
 )
 
 logger = logging.getLogger(__name__)
 
-SD_BASE_URL = 'https://json.schedulesdirect.org/20141201'
-SD_DAYS_TO_FETCH = 20
-SD_PROGRAM_BATCH_SIZE = 5000
-SD_BULK_GUIDE_FETCH_THRESHOLD = 3
-SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS = 90
-SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES = 2
-
-def _sd_compute_schedule_changes_from_md5(server_md5s, cached_md5s, date_list):
-    """Return station_id -> [date_str] for dates whose schedule MD5 differs from cache."""
-    changed_by_station = {}
-    for (sid, date_str), server_info in server_md5s.items():
-        if date_str not in date_list:
-            continue
-        cached = cached_md5s.get((sid, date_str))
-        if cached != server_info['md5']:
-            changed_by_station.setdefault(sid, []).append(date_str)
-    return changed_by_station
+_EPG_SOURCE_FILE_LOCK = 'epg_source_file'
+_EPG_REFRESH_DEFER_SECONDS = 15
+_EPG_TVG_PARSE_DEFER_SECONDS = 5
+_EPG_PARSE_DEFER_MAX = 480  # 15s x 480 = 2h for refresh; 5s x 480 = 40m for index build
 
 
-def _sd_backfill_schedule_dates_without_data(
-    changed_by_station,
-    server_md5s,
-    date_list,
-    mapped_station_ids,
-    epg_id_map,
-    dates_with_data,
-    cached_md5s,
-    stations_without_any_data,
-):
-    """
-    Add fetch-window dates that lack ProgramData to changed_by_station.
-
-    Dates with a cached schedule MD5 are treated as already fetched (e.g. legitimately
-    empty airings). Stations with zero ProgramData still backfill all missing dates
-    so stale cache from unmapped lineup refreshes cannot block guide population.
-    """
-    from datetime import date as date_type
-
-    stations_without_any_data = set(stations_without_any_data)
-    backfilled_count = 0
-    for sid in mapped_station_ids:
-        epg_db_id = epg_id_map.get(sid)
-        if not epg_db_id:
-            continue
-        force_despite_cache = sid in stations_without_any_data
-        already_changing = set(changed_by_station.get(sid, []))
-        for ds in date_list:
-            if ds in already_changing or (sid, ds) not in server_md5s:
-                continue
-            if (epg_db_id, date_type.fromisoformat(ds)) in dates_with_data:
-                continue
-            if (sid, ds) in cached_md5s and not force_despite_cache:
-                continue
-            changed_by_station.setdefault(sid, []).append(ds)
-            backfilled_count += 1
-    return backfilled_count
+def _source_tvg_parse_count_key(source_id):
+    return f'epg_source_tvg_parse_{source_id}'
 
 
-def _sd_programs_needing_metadata(
-    program_ids_needed,
-    schedule_program_md5s,
-    cached_prog_md5s,
-    programs_with_data,
-):
-    """Return programIDs that need metadata download from Schedules Direct."""
-    programs_with_data = set(programs_with_data)
-    return {
-        pid for pid in program_ids_needed
-        if schedule_program_md5s.get(pid) != cached_prog_md5s.get(pid)
-        or pid not in programs_with_data
-    }
+def _incr_source_tvg_parse_count(source_id):
+    client = RedisClient.get_client()
+    if client:
+        client.incr(_source_tvg_parse_count_key(source_id))
 
 
-SD_POSTER_CATEGORIES = (
-    'Iconic', 'Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner',
-    'Staple', 'Poster Art', 'Box Art',
-)
-
-SD_POSTER_STYLE_CONFIG = {
-    'portrait_iconic': {
-        'aspect_groups': (('2x3', '3x4'),),
-        'categories': ('Iconic',),
-    },
-    'portrait_banner': {
-        'aspect_groups': (('2x3', '3x4'),),
-        'categories': ('Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner'),
-    },
-    'landscape_iconic': {
-        'aspect_groups': (('16x9', '4x3'),),
-        'categories': ('Iconic',),
-    },
-    'landscape_banner': {
-        'aspect_groups': (('16x9', '4x3'),),
-        'categories': ('Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner'),
-    },
-    'square_iconic': {
-        'aspect_groups': (('1x1',),),
-        'categories': ('Iconic',),
-    },
-}
+def _decr_source_tvg_parse_count(source_id):
+    client = RedisClient.get_client()
+    if not client:
+        return
+    key = _source_tvg_parse_count_key(source_id)
+    value = client.decr(key)
+    if value is not None and value <= 0:
+        client.delete(key)
 
 
-def _sd_image_width(img):
-    try:
-        return int(img.get('width') or 0)
-    except (TypeError, ValueError):
+def _source_tvg_parse_count(source_id):
+    client = RedisClient.get_client()
+    if not client:
         return 0
+    return int(client.get(_source_tvg_parse_count_key(source_id)) or 0)
 
 
-def _sd_is_primary(img):
-    val = img.get('primary')
-    if val is True:
+def _defer_refresh_epg_data(source, force, file_defer_retry, reason):
+    if file_defer_retry >= _EPG_PARSE_DEFER_MAX:
+        msg = f"EPG refresh blocked for too long ({reason}); retry later"
+        logger.error(f"Cannot refresh {source.name}: {msg}")
+        source.status = EPGSource.STATUS_ERROR
+        source.last_message = msg
+        source.save(update_fields=['status', 'last_message'])
         return True
-    if isinstance(val, str):
-        return val.lower() in ('true', '1', 'yes')
-    return False
+    logger.info(
+        f"Deferring refresh for {source.name} for {_EPG_REFRESH_DEFER_SECONDS}s: {reason}"
+    )
+    refresh_epg_data.apply_async(
+        args=[source.id],
+        kwargs={'force': force, '_file_defer_retry': file_defer_retry + 1},
+        countdown=_EPG_REFRESH_DEFER_SECONDS,
+    )
+    return True
 
 
-def _sd_matching_images(images, *, categories=None, aspects=None, min_width=0, primary_only=False):
-    matches = []
-    for img in images:
-        if not isinstance(img, dict):
-            continue
-        if primary_only and not _sd_is_primary(img):
-            continue
-        if categories is not None and img.get('category') not in categories:
-            continue
-        if aspects is not None and img.get('aspect') not in aspects:
-            continue
-        if _sd_image_width(img) < min_width:
-            continue
-        if img.get('uri'):
-            matches.append(img)
-    return matches
+_NON_TERMINAL_REFRESH_STATUSES = frozenset({
+    EPGSource.STATUS_FETCHING,
+    EPGSource.STATUS_PARSING,
+})
 
 
-def _sd_best_image(matches):
-    if not matches:
-        return None
-    best = max(matches, key=lambda img: (_sd_is_primary(img), _sd_image_width(img)))
-    return best.get('uri')
+def _release_task_db_connection():
+    """Return the Celery worker's DB connection to a clean state after ORM errors."""
+    if not _is_celery_worker_context():
+        return
+    from django.db import close_old_connections
+    close_old_connections()
 
 
-def _sd_find_image(images, *, categories=None, aspects=None, min_width=0, primary_only=False):
-    return _sd_best_image(_sd_matching_images(
-        images,
-        categories=categories,
-        aspects=aspects,
-        min_width=min_width,
-        primary_only=primary_only,
-    ))
+def _db_query_with_retry(fn, *, label="DB query", max_retries=2):
+    """
+    Run an ORM read with one connection reset + retry on transient failures.
+
+    Poisoned Celery worker connections often surface as OperationalError or as
+    ``IndexError: list index out of range`` inside Django's row converters.
+    """
+    from django.db import DatabaseError, InterfaceError, OperationalError
+
+    transient_errors = (OperationalError, InterfaceError, IndexError, DatabaseError)
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except transient_errors as exc:
+            if attempt + 1 >= max_retries:
+                raise
+            logger.warning(
+                "%s failed (%s), resetting DB connection (%s/%s)",
+                label,
+                exc,
+                attempt + 1,
+                max_retries,
+            )
+            _release_task_db_connection()
 
 
-SD_POSTER_STYLE_DEFAULT = 'sd_recommended'
-SD_POSTER_PORTRAIT_FALLBACK = 'portrait_iconic'
+def _get_epg_source(source_id):
+    return _db_query_with_retry(
+        lambda: EPGSource.objects.get(id=source_id),
+        label=f"load EPG source {source_id}",
+    )
 
 
-def _sd_pick_recommended_poster_url(images):
-    """Use Gracenote's primary flag, then fall back to portrait iconic."""
-    min_widths = (240, 135, 120, 0)
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=SD_POSTER_CATEGORIES,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
+def _set_epg_source_status(
+    source_id,
+    status,
+    last_message=None,
+    *,
+    notify_error=False,
+    ws_action="refresh",
+    ws_error=None,
+):
+    """Update source status using a fresh connection (safe after DB failures)."""
+    _release_task_db_connection()
+    update = {"status": status}
+    if last_message is not None:
+        update["last_message"] = last_message
+    try:
+        EPGSource.objects.filter(id=source_id).update(**update)
+        if notify_error:
+            send_epg_update(
+                source_id,
+                ws_action,
+                100,
+                status="error",
+                error=ws_error or last_message,
+            )
+    except Exception as e:
+        logger.error(
+            f"Failed to set EPG source {source_id} status to {status}: {e}"
         )
-        if uri:
-            return uri
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=None,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
+
+
+def _ensure_epg_refresh_terminal_status(source_id):
+    """Mark refresh as failed when the task exits while still in progress."""
+    _release_task_db_connection()
+    try:
+        current_status = (
+            EPGSource.objects.filter(id=source_id)
+            .values_list("status", flat=True)
+            .first()
         )
-        if uri:
-            return uri
-    return _sd_pick_poster_url(images, SD_POSTER_PORTRAIT_FALLBACK)
-
-
-def _sd_pick_poster_url(images, poster_style=SD_POSTER_STYLE_DEFAULT):
-    """Pick the best SD poster URI for the user's style preference, with fallbacks."""
-    if poster_style == 'sd_recommended':
-        return _sd_pick_recommended_poster_url(images)
-
-    config = SD_POSTER_STYLE_CONFIG.get(poster_style)
-    if not config:
-        return _sd_pick_recommended_poster_url(images)
-    min_widths = (240, 135, 120, 0)
-
-    for min_w in min_widths:
-        for cat in config['categories']:
-            for aspects in config['aspect_groups']:
-                uri = _sd_find_image(images, categories=(cat,), aspects=aspects, min_width=min_w)
-                if uri:
-                    return uri
-
-    for min_w in min_widths:
-        for aspects in config['aspect_groups']:
-            uri = _sd_find_image(images, categories=SD_POSTER_CATEGORIES, aspects=aspects, min_width=min_w)
-            if uri:
-                return uri
-
-    for aspects in config['aspect_groups']:
-        uri = _sd_find_image(images, categories=None, aspects=aspects, min_width=0)
-        if uri:
-            return uri
-
-    # Fallback: SD primary among poster categories (any aspect)
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=SD_POSTER_CATEGORIES,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
+        if current_status in _NON_TERMINAL_REFRESH_STATUSES:
+            message = "Refresh did not complete successfully"
+            EPGSource.objects.filter(id=source_id).update(
+                status=EPGSource.STATUS_ERROR,
+                last_message=message,
+            )
+            send_epg_update(
+                source_id, "refresh", 100, status="error", error=message
+            )
+    except Exception as e:
+        logger.debug(
+            f"Could not verify terminal refresh status for EPG source {source_id}: {e}"
         )
-        if uri:
-            return uri
 
-    if poster_style != SD_POSTER_PORTRAIT_FALLBACK:
-        return _sd_pick_poster_url(images, SD_POSTER_PORTRAIT_FALLBACK)
-
-    return None
 
 # DOCTYPE internal subset for XMLTV files.  Declares all 252 HTML 4 named
 # entities so lxml/libxml2 can resolve references like &eacute; correctly
@@ -391,33 +343,6 @@ def validate_icon_url_fast(icon_url, max_length=None):
 MAX_EXTRACT_CHUNK_SIZE = 65536 # 64kb (base2)
 
 
-def send_epg_update(source_id, action, progress, **kwargs):
-    """Send WebSocket update about EPG download/parsing progress"""
-    # Start with the base data dictionary
-    data = {
-        "progress": progress,
-        "type": "epg_refresh",
-        "source": source_id,
-        "action": action,
-    }
-
-    # Add the additional key-value pairs from kwargs
-    data.update(kwargs)
-
-    # Use the standardized update function with garbage collection for program parsing
-    # This is a high-frequency operation that needs more aggressive memory management
-    collect_garbage = action == "parsing_programs" and progress % 10 == 0
-    send_websocket_update('updates', 'update', data, collect_garbage=collect_garbage)
-
-    # Explicitly clear references
-    data = None
-
-    # For high-frequency parsing, occasionally force additional garbage collection
-    # to prevent memory buildup
-    if action == "parsing_programs" and progress % 50 == 0:
-        gc.collect()
-
-
 def delete_epg_refresh_task_by_id(epg_id):
     """
     Delete the periodic task associated with an EPG source ID.
@@ -490,7 +415,7 @@ def refresh_all_epg_data():
 
 
 @shared_task(time_limit=14400)
-def refresh_epg_data(source_id, force=False):
+def refresh_epg_data(source_id, force=False, _file_defer_retry=0):
     if not acquire_task_lock('refresh_epg_data', source_id):
         logger.debug(f"EPG refresh for {source_id} already running")
         return
@@ -498,102 +423,111 @@ def refresh_epg_data(source_id, force=False):
     lock_renewer = TaskLockRenewer('refresh_epg_data', source_id)
     lock_renewer.start()
 
-    source = None
+    _release_task_db_connection()
+
     try:
-        # Try to get the EPG source
-        try:
-            source = EPGSource.objects.get(id=source_id)
-        except EPGSource.DoesNotExist:
-            # The EPG source doesn't exist, so delete the periodic task if it exists
-            logger.warning(f"EPG source with ID {source_id} not found, but task was triggered. Cleaning up orphaned task.")
-
-            # Call the shared function to delete the task
-            if delete_epg_refresh_task_by_id(source_id):
-                logger.info(f"Successfully cleaned up orphaned task for EPG source {source_id}")
-            else:
-                logger.info(f"No orphaned task found for EPG source {source_id}")
-
-            # Release the lock and exit
-            lock_renewer.stop()
-            release_task_lock('refresh_epg_data', source_id)
-            # Force garbage collection before exit
-            gc.collect()
-            return f"EPG source {source_id} does not exist, task cleaned up"
-
-        # The source exists but is not active, just skip processing
-        if not source.is_active:
-            logger.info(f"EPG source {source_id} is not active. Skipping.")
-            lock_renewer.stop()
-            release_task_lock('refresh_epg_data', source_id)
-            # Force garbage collection before exit
-            gc.collect()
-            return
-
-        # Skip refresh for dummy EPG sources - they don't need refreshing
-        if source.source_type == 'dummy':
-            logger.info(f"Skipping refresh for dummy EPG source {source.name} (ID: {source_id})")
-            lock_renewer.stop()
-            release_task_lock('refresh_epg_data', source_id)
-            gc.collect()
-            return
-
-        # Continue with the normal processing...
-        logger.info(f"Processing EPGSource: {source.name} (type: {source.source_type})")
-        if source.source_type == 'xmltv':
-            # Invalidate the byte-offset index before downloading the new file
-            # so stale offsets are never used during the refresh window.
-            EPGSource.objects.filter(id=source.id).update(programme_index=None)
-            fetch_success = fetch_xmltv(source)
-            if not fetch_success:
-                logger.error(f"Failed to fetch XMLTV for source {source.name}")
-                lock_renewer.stop()
-                release_task_lock('refresh_epg_data', source_id)
-                # Force garbage collection before exit
-                gc.collect()
-                return
-
-            parse_channels_success = parse_channels_only(source)
-            if not parse_channels_success:
-                logger.error(f"Failed to parse channels for source {source.name}")
-                lock_renewer.stop()
-                release_task_lock('refresh_epg_data', source_id)
-                # Force garbage collection before exit
-                gc.collect()
-                return
-
-            # Build byte-offset index after programme data is committed so refresh
-            # does not compete for memory/IO during the programme swap.
-            parse_programs_for_source(source)
-            build_programme_index_task.delay(source.id)
-
-        elif source.source_type == 'schedules_direct':
-            fetch_schedules_direct(source, force=force)
-
-        source.save(update_fields=['updated_at'])
-        # After successful EPG refresh, evaluate DVR series rules to schedule new episodes
-        try:
-            from apps.channels.tasks import evaluate_series_rules
-            evaluate_series_rules.delay()
-        except Exception:
-            pass
+        return _refresh_epg_data_impl(
+            source_id, force=force, _file_defer_retry=_file_defer_retry
+        )
     except Exception as e:
-        logger.error(f"Error in refresh_epg_data for source {source_id}: {e}", exc_info=True)
-        try:
-            if source:
-                source.status = 'error'
-                source.last_message = f"Error refreshing EPG data: {str(e)}"
-                source.save(update_fields=['status', 'last_message'])
-                send_epg_update(source_id, "refresh", 100, status="error", error=str(e))
-        except Exception as inner_e:
-            logger.error(f"Error updating source status: {inner_e}")
+        logger.error(
+            f"Error in refresh_epg_data for source {source_id}: {e}",
+            exc_info=True,
+        )
+        _set_epg_source_status(
+            source_id,
+            EPGSource.STATUS_ERROR,
+            f"Error refreshing EPG data: {str(e)[:500]}",
+            notify_error=True,
+            ws_error=str(e)[:500],
+        )
     finally:
-        # Clear references to ensure proper garbage collection
-        source = None
-        # Force garbage collection before releasing the lock
+        _ensure_epg_refresh_terminal_status(source_id)
+        _release_task_db_connection()
         gc.collect()
-        connection.close()
         lock_renewer.stop()
         release_task_lock('refresh_epg_data', source_id)
+
+
+def _refresh_epg_data_impl(source_id, force=False, _file_defer_retry=0):
+    try:
+        source = _get_epg_source(source_id)
+    except EPGSource.DoesNotExist:
+        logger.warning(
+            f"EPG source with ID {source_id} not found, but task was triggered. "
+            "Cleaning up orphaned task."
+        )
+
+        if delete_epg_refresh_task_by_id(source_id):
+            logger.info(
+                f"Successfully cleaned up orphaned task for EPG source {source_id}"
+            )
+        else:
+            logger.info(f"No orphaned task found for EPG source {source_id}")
+
+        return f"EPG source {source_id} does not exist, task cleaned up"
+
+    if not source.is_active:
+        logger.info(f"EPG source {source_id} is not active. Skipping.")
+        return
+
+    if source.source_type == 'dummy':
+        logger.info(
+            f"Skipping refresh for dummy EPG source {source.name} (ID: {source_id})"
+        )
+        return
+
+    logger.info(f"Processing EPGSource: {source.name} (type: {source.source_type})")
+    if source.source_type == 'xmltv':
+        # Invalidate the byte-offset index before downloading the new file
+        # so stale offsets are never used during the refresh window.
+        EPGSourceIndex.objects.update_or_create(
+            source_id=source.id, defaults={'data': None}
+        )
+
+        if _source_tvg_parse_count(source.id) > 0:
+            _defer_refresh_epg_data(
+                source, force, _file_defer_retry, 'per-channel program parses in progress'
+            )
+            return
+
+        if not acquire_task_lock(_EPG_SOURCE_FILE_LOCK, source.id):
+            _defer_refresh_epg_data(
+                source, force, _file_defer_retry, 'EPG file in use (index build)'
+            )
+            return
+
+        file_lock_renewer = TaskLockRenewer(_EPG_SOURCE_FILE_LOCK, source.id)
+        file_lock_renewer.start()
+        try:
+            if not fetch_xmltv(source):
+                logger.error(f"Failed to fetch XMLTV for source {source.name}")
+                return
+
+            if not parse_channels_only(source):
+                logger.error(f"Failed to parse channels for source {source.name}")
+                return
+
+            if not parse_programs_for_source(source):
+                logger.error(f"Failed to parse programs for source {source.name}")
+                return
+        finally:
+            file_lock_renewer.stop()
+            release_task_lock(_EPG_SOURCE_FILE_LOCK, source.id)
+
+        # Index build runs after the file lock is released so it does not
+        # compete with download/parse for the same XML on disk.
+        build_programme_index_task.delay(source.id)
+
+    elif source.source_type == 'schedules_direct':
+        fetch_schedules_direct(source, force=force)
+
+    EPGSource.objects.filter(id=source.id).update(updated_at=timezone.now())
+    try:
+        from apps.channels.tasks import evaluate_series_rules
+        evaluate_series_rules.delay()
+    except Exception:
+        pass
 
 
 def fetch_xmltv(source):
@@ -602,7 +536,7 @@ def fetch_xmltv(source):
         logger.info(f"Using existing local file for EPG source: {source.name} at {source.file_path}")
 
         # Check if the existing file is compressed and we need to extract it
-        if source.file_path.endswith(('.gz', '.zip')) and not source.file_path.endswith('.xml'):
+        if source.file_path.endswith(('.gz', '.zip', '.xz')) and not source.file_path.endswith('.xml'):
             try:
                 # Define the path for the extracted file in the cache directory
                 cache_dir = os.path.join(settings.MEDIA_ROOT, "cached_epg")
@@ -983,7 +917,7 @@ def fetch_xmltv(source):
 
 def extract_compressed_file(file_path, output_path=None, delete_original=False):
     """
-    Extracts a compressed file (.gz or .zip) to an XML file.
+    Extracts a compressed file (.gz, .zip, or .xz) to an XML file.
 
     Args:
         file_path: Path to the compressed file
@@ -1055,6 +989,42 @@ def extract_compressed_file(file_path, output_path=None, delete_original=False):
 
             return extracted_path
 
+        elif format_type == 'xz':
+            logger.debug(f"Extracting xz file: {file_path}")
+            try:
+                # First check if the content is XML by reading a sample
+                with lzma.open(file_path, 'rb') as xz_file:
+                    content_sample = xz_file.read(4096)  # Read first 4KB for detection
+                    detected_format, _, _ = detect_file_format(content=content_sample)
+
+                    if detected_format != 'xml':
+                        logger.warning(f"XZ file does not appear to contain XML content: {file_path} (detected as: {detected_format})")
+                        # Continue anyway since XZ only contains one file
+
+                    # Reset file pointer and extract the content
+                    xz_file.seek(0)
+                    with open(extracted_path, 'wb') as out_file:
+                        while True:
+                            chunk = xz_file.read(MAX_EXTRACT_CHUNK_SIZE)
+                            if not chunk or len(chunk) == 0:
+                                break
+                            out_file.write(chunk)
+            except Exception as e:
+                logger.error(f"Error extracting XZ file: {e}", exc_info=True)
+                return None
+
+            logger.info(f"Successfully extracted xz file to: {extracted_path}")
+
+            # Delete original compressed file if requested
+            if delete_original:
+                try:
+                    os.remove(file_path)
+                    logger.info(f"Deleted original compressed file: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete original compressed file {file_path}: {e}")
+
+            return extracted_path
+
         elif format_type == 'zip':
             logger.debug(f"Extracting zip file: {file_path}")
             with zipfile.ZipFile(file_path, 'r') as zip_file:
@@ -1109,6 +1079,35 @@ def extract_compressed_file(file_path, output_path=None, delete_original=False):
     except Exception as e:
         logger.error(f"Error extracting {file_path}: {str(e)}", exc_info=True)
         return None
+
+_CHANNEL_PARSE_PROGRESS_START = 25
+_CHANNEL_PARSE_PROGRESS_CAP = 98
+_CHANNEL_PARSE_PROGRESS_SCALE = 0.98
+
+
+def _channel_parse_progress(processed_channels, channel_estimate, had_db_baseline):
+    """Map channel parsing onto 25-98%. Bump estimate when the XML has grown."""
+    if not had_db_baseline:
+        if processed_channels <= 0:
+            return _CHANNEL_PARSE_PROGRESS_START, channel_estimate
+        return (
+            min(
+                _CHANNEL_PARSE_PROGRESS_START + (processed_channels // 100),
+                _CHANNEL_PARSE_PROGRESS_CAP - 1,
+            ),
+            channel_estimate,
+        )
+
+    if processed_channels > channel_estimate:
+        channel_estimate = processed_channels
+    if channel_estimate <= 0:
+        return _CHANNEL_PARSE_PROGRESS_START, channel_estimate
+
+    span = _CHANNEL_PARSE_PROGRESS_CAP - _CHANNEL_PARSE_PROGRESS_START
+    progress = _CHANNEL_PARSE_PROGRESS_START + int(
+        (processed_channels / channel_estimate) * span * _CHANNEL_PARSE_PROGRESS_SCALE
+    )
+    return min(_CHANNEL_PARSE_PROGRESS_CAP, progress), channel_estimate
 
 
 def parse_channels_only(source):
@@ -1167,7 +1166,15 @@ def parse_channels_only(source):
                 # Update status to error
                 source.status = 'error'
                 source.last_message = f"No URL provided, cannot fetch EPG data"
-                source.save(update_fields=['updated_at'])
+                source.save(update_fields=['status', 'last_message'])
+                send_epg_update(
+                    source.id,
+                    "parsing_channels",
+                    100,
+                    status="error",
+                    error="No URL provided",
+                )
+                return False
 
         # Initialize process variable for memory tracking only in debug mode
         try:
@@ -1214,6 +1221,8 @@ def parse_channels_only(source):
         epgs_to_create = []
         epgs_to_update = []
         total_channels = 0
+        channel_estimate = 0
+        had_db_baseline = False
         processed_channels = 0
         batch_size = 500  # Process in batches to limit memory usage
         progress = 0  # Initialize progress variable here
@@ -1228,10 +1237,14 @@ def parse_channels_only(source):
             # Attempt to count existing channels in the database
             try:
                 total_channels = EPGData.objects.filter(epg_source=source).count()
+                channel_estimate = total_channels
+                had_db_baseline = total_channels > 0
                 logger.info(f"Found {total_channels} existing channels for this source")
             except Exception as e:
                 logger.error(f"Error counting channels: {e}")
                 total_channels = 500  # Default estimate
+                channel_estimate = total_channels
+                had_db_baseline = True
             if process:
                 logger.debug(f"[parse_channels_only] Memory after closing initial file: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
@@ -1275,9 +1288,11 @@ def parse_channels_only(source):
                         if not display_name:
                             display_name = tvg_id
 
-                        if display_name and len(display_name) > name_max_length:
-                            logger.warning(f"EPG display name too long ({len(display_name)} > {name_max_length}), truncating: {display_name[:80]}...")
-                            display_name = display_name[:name_max_length]
+                        display_name = truncate_with_warning(
+                            display_name,
+                            max_length=name_max_length,
+                            label="EPG display name",
+                        )
 
                         # Use lazy loading approach to reduce memory usage
                         if tvg_id in existing_tvg_ids:
@@ -1358,20 +1373,36 @@ def parse_channels_only(source):
                         if process:
                             logger.info(f"[parse_channels_only] Memory after clearing cache: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
-                    # Send progress updates
-                    if processed_channels % 100 == 0 or processed_channels == total_channels:
-                        progress = 25 + int((processed_channels / total_channels) * 65) if total_channels > 0 else 90
+                    # Send progress updates (~20 ticks when the DB count still holds; else every 100)
+                    estimate_exceeded = had_db_baseline and processed_channels > total_channels
+                    interval = (
+                        max(1, total_channels // 20)
+                        if had_db_baseline and total_channels and not estimate_exceeded
+                        else 100
+                    )
+                    if processed_channels % interval == 0:
+                        progress, channel_estimate = _channel_parse_progress(
+                            processed_channels,
+                            channel_estimate,
+                            had_db_baseline,
+                        )
                         send_epg_update(
                             source.id,
                             "parsing_channels",
                             progress,
                             processed=processed_channels,
-                            total=total_channels
+                            total=channel_estimate,
                         )
-                    if processed_channels > total_channels:
-                        logger.debug(f"[parse_channels_only] Processed channel {tvg_id} - processed {processed_channels - total_channels} additional channels")
+                    if had_db_baseline and processed_channels > total_channels:
+                        logger.debug(
+                            f"[parse_channels_only] Processed channel {tvg_id} - "
+                            f"processed {processed_channels - total_channels} additional channels"
+                        )
                     else:
-                        logger.debug(f"[parse_channels_only] Processed channel {tvg_id} - processed {processed_channels}/{total_channels}")
+                        logger.debug(
+                            f"[parse_channels_only] Processed channel {tvg_id} - "
+                            f"processed {processed_channels}/{channel_estimate or total_channels}"
+                        )
                     if process:
                         logger.debug(f"[parse_channels_only] Memory before elem cleanup: {process.memory_info().rss / 1024 / 1024:.2f} MB")
                     # Clear memory
@@ -1404,6 +1435,21 @@ def parse_channels_only(source):
             logger.info(f"[parse_channels_only] Processed {processed_channels} channels current memory: {process.memory_info().rss / 1024 / 1024:.2f} MB")
         else:
             logger.info(f"[parse_channels_only] Processed {processed_channels} channels")
+
+        if processed_channels > 0:
+            progress, channel_estimate = _channel_parse_progress(
+                processed_channels,
+                channel_estimate,
+                had_db_baseline,
+            )
+            send_epg_update(
+                source.id,
+                "parsing_channels",
+                progress,
+                processed=processed_channels,
+                total=channel_estimate,
+            )
+
         # Process any remaining items
         if epgs_to_create:
             EPGData.objects.bulk_create(epgs_to_create, ignore_conflicts=True)
@@ -1505,305 +1551,342 @@ def parse_channels_only(source):
             pass
 
 
+def _defer_parse_programs_for_tvg_id(epg_id, force, defer_retry, reason):
+    if defer_retry >= _EPG_PARSE_DEFER_MAX:
+        logger.warning(
+            f"Giving up on parse_programs_for_tvg_id({epg_id}) after "
+            f"{defer_retry} deferrals: {reason}"
+        )
+        return f"Deferred too many times: {reason}"
+
+    logger.info(
+        f"Deferring parse_programs_for_tvg_id({epg_id}) for "
+        f"{_EPG_REFRESH_DEFER_SECONDS}s: {reason}"
+    )
+    parse_programs_for_tvg_id.apply_async(
+        args=[epg_id],
+        kwargs={'force': force, '_defer_retry': defer_retry + 1},
+        countdown=_EPG_REFRESH_DEFER_SECONDS,
+    )
+    return "Deferred"
+
 
 @shared_task(time_limit=3600, soft_time_limit=3500)
-def parse_programs_for_tvg_id(epg_id, force=False):
+def parse_programs_for_tvg_id(epg_id, force=False, _defer_retry=0):
+    epg_obj = None
     try:
-        from apps.epg.models import EPGData
         epg_obj = EPGData.objects.select_related('epg_source').filter(id=epg_id).first()
         if epg_obj and epg_obj.epg_source and epg_obj.epg_source.source_type == 'schedules_direct':
             return fetch_sd_guide_for_epg(epg_id, force=force)
     except Exception as e:
         logger.warning(f"Could not check EPG source type for id={epg_id}: {e}")
 
-    if not acquire_task_lock('parse_epg_programs', epg_id):
-        logger.info(f"Program parse for {epg_id} already in progress, skipping duplicate task")
-        return "Task already running"
+    if not epg_obj or not epg_obj.epg_source:
+        return "EPG not found"
 
-    lock_renewer = TaskLockRenewer('parse_epg_programs', epg_id)
-    lock_renewer.start()
+    epg_source = epg_obj.epg_source
+    if epg_source.source_type == 'dummy':
+        return
 
-    source_file = None
-    program_parser = None
-    programs_to_create = []
-    programs_processed = 0
+    source_id = epg_source.id
+    if is_task_lock_held('refresh_epg_data', source_id):
+        return _defer_parse_programs_for_tvg_id(
+            epg_id, force, _defer_retry, 'source refresh in progress'
+        )
+
+    _incr_source_tvg_parse_count(source_id)
     try:
-        # Add memory tracking only in trace mode or higher
+        if not acquire_task_lock('parse_epg_programs', epg_id):
+            mapped_channels = Channel.objects.filter(epg_data_id=epg_id).count()
+            logger.info(
+                f"Program parse for epg_id={epg_id} ({epg_obj.tvg_id}) already in progress, "
+                f"skipping duplicate task ({mapped_channels} channel(s) mapped to this EPG)"
+            )
+            return "Task already running"
+
+        lock_renewer = TaskLockRenewer('parse_epg_programs', epg_id)
+        lock_renewer.start()
+
+        source_file = None
+        program_parser = None
+        programs_to_create = []
+        programs_processed = 0
         try:
-            process = None
-            # Get current log level as a number
-            current_log_level = logger.getEffectiveLevel()
+            # Add memory tracking only in trace mode or higher
+            try:
+                process = None
+                # Get current log level as a number
+                current_log_level = logger.getEffectiveLevel()
+    
+                # Only track memory usage when log level is TRACE or more verbose or if running in DEBUG mode
+                should_log_memory = current_log_level <= 5 or settings.DEBUG
+    
+                if should_log_memory:
+                    process = psutil.Process()
+                    initial_memory = process.memory_info().rss / 1024 / 1024
+                    logger.info(f"[parse_programs_for_tvg_id] Initial memory usage: {initial_memory:.2f} MB")
+                    mem_before = initial_memory
+            except ImportError:
+                process = None
+                should_log_memory = False
+    
+            # Reuse the EPGData fetched at the top of the task (epg_source is already
+            # cached via select_related) instead of issuing a second query mid-task.
+            epg = epg_obj
 
-            # Only track memory usage when log level is TRACE or more verbose or if running in DEBUG mode
-            should_log_memory = current_log_level <= 5 or settings.DEBUG
+            from apps.channels.managers import is_epg_mapped_to_channel
 
-            if should_log_memory:
-                process = psutil.Process()
-                initial_memory = process.memory_info().rss / 1024 / 1024
-                logger.info(f"[parse_programs_for_tvg_id] Initial memory usage: {initial_memory:.2f} MB")
-                mem_before = initial_memory
-        except ImportError:
-            process = None
-            should_log_memory = False
-
-        epg = EPGData.objects.get(id=epg_id)
-        epg_source = epg.epg_source
-
-        # Skip program parsing for dummy EPG sources - they don't have program data files
-        if epg_source.source_type == 'dummy':
-            logger.info(f"Skipping program parsing for dummy EPG source {epg_source.name} (ID: {epg_id})")
-            lock_renewer.stop()
-            release_task_lock('parse_epg_programs', epg_id)
-            return
-
-        if not force and not Channel.objects.filter(epg_data=epg).exists():
-            logger.info(f"No channels matched to EPG {epg.tvg_id}")
-            lock_renewer.stop()
-            release_task_lock('parse_epg_programs', epg_id)
-            return
-
-        logger.info(f"Refreshing program data for tvg_id: {epg.tvg_id}")
-
-        # Optimize deletion with a single delete query instead of chunking
-        # This is faster for most database engines
-        ProgramData.objects.filter(epg=epg).delete()
-
-        file_path = epg_source.extracted_file_path if epg_source.extracted_file_path else epg_source.file_path
-        if not file_path:
-            file_path = epg_source.get_cache_file()
-
-        # Check if the file exists
-        if not os.path.exists(file_path):
-            logger.error(f"EPG file not found at: {file_path}")
-
-            if epg_source.url:
-                # Update the file path in the database
-                new_path = epg_source.get_cache_file()
-                logger.info(f"Updating file_path from '{file_path}' to '{new_path}'")
-                epg_source.file_path = new_path
-                epg_source.save(update_fields=['file_path'])
-                logger.info(f"Fetching new EPG data from URL: {epg_source.url}")
-            else:
-                logger.info(f"EPG source does not have a URL, using existing file path: {file_path} to rebuild cache")
-
-            # Fetch new data before continuing
-            if epg_source:
-
-                # Properly check the return value from fetch_xmltv
-                fetch_success = fetch_xmltv(epg_source)
-
-                # If fetch was not successful or the file still doesn't exist, abort
-                if not fetch_success:
-                    logger.error(f"Failed to fetch EPG data, cannot parse programs for tvg_id: {epg.tvg_id}")
-                    # Update status to error if not already set
-                    epg_source.status = 'error'
-                    epg_source.last_message = f"Failed to download EPG data, cannot parse programs"
-                    epg_source.save(update_fields=['status', 'last_message'])
-                    send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="Failed to download EPG file")
-                    lock_renewer.stop()
-                    release_task_lock('parse_epg_programs', epg_id)
-                    return
-
-                # Also check if the file exists after download
-                if not os.path.exists(epg_source.file_path):
-                    logger.error(f"Failed to fetch EPG data, file still missing at: {epg_source.file_path}")
-                    epg_source.status = 'error'
-                    epg_source.last_message = f"Failed to download EPG data, file missing after download"
-                    epg_source.save(update_fields=['status', 'last_message'])
-                    send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="File not found after download")
-                    lock_renewer.stop()
-                    release_task_lock('parse_epg_programs', epg_id)
-                    return
-
-                # Update file_path with the new location
-                if epg_source.extracted_file_path:
-                    file_path = epg_source.extracted_file_path
-                else:
-                    file_path = epg_source.file_path
-            else:
-                logger.error(f"No URL provided for EPG source {epg_source.name}, cannot fetch new data")
-                # Update status to error
-                epg_source.status = 'error'
-                epg_source.last_message = f"No URL provided, cannot fetch EPG data"
-                epg_source.save(update_fields=['status', 'last_message'])
-                send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="No URL provided")
-                lock_renewer.stop()
-                release_task_lock('parse_epg_programs', epg_id)
+            if not force and not is_epg_mapped_to_channel(epg):
+                logger.info(f"No channels matched to EPG {epg.tvg_id}")
                 return
 
-        # Use streaming parsing to reduce memory usage
-        # No need to check file type anymore since it's always XML
-        logger.debug(f"Parsing programs for tvg_id={epg.tvg_id} from {file_path}")
+            logger.info(f"Refreshing program data for tvg_id: {epg.tvg_id}")
 
-        # Memory usage tracking
-        if process:
-            try:
-                mem_before = process.memory_info().rss / 1024 / 1024
-                logger.debug(f"[parse_programs_for_tvg_id] Memory before parsing {epg.tvg_id} -  {mem_before:.2f} MB")
-            except Exception as e:
-                logger.warning(f"Error tracking memory: {e}")
-                mem_before = 0
-
-        programs_to_create = []
-        batch_size = 1000  # Process in batches to limit memory usage
-
-        try:
-            # Open the file directly - no need to check compression
-            logger.debug(f"Opening file for parsing: {file_path}")
-            source_file = _open_xmltv_file(file_path)
-
-            # Stream parse the file using lxml's iterparse
-            program_parser = etree.iterparse(source_file, events=('end',), tag='programme',  remove_blank_text=True, recover=True)
-
-            for _, elem in program_parser:
-                if elem.get('channel') == epg.tvg_id:
-                    try:
-                        start_time = parse_xmltv_time(elem.get('start'))
-                        end_time = parse_xmltv_time(elem.get('stop'))
-                        title = None
-                        desc = None
-                        sub_title = None
-
-                        # Efficiently process child elements
-                        for child in elem:
-                            if child.tag == 'title':
-                                title = child.text or 'No Title'
-                            elif child.tag == 'desc':
-                                desc = child.text or ''
-                            elif child.tag == 'sub-title':
-                                sub_title = child.text or ''
-
-                        if not title:
-                            title = 'No Title'
-
-                        # Extract custom properties
-                        custom_props = extract_custom_properties(elem)
-                        custom_properties_json = None
-
-                        if custom_props:
-                            logger.trace(f"Number of custom properties: {len(custom_props)}")
-                            custom_properties_json = custom_props
-
-                        # Fallback: extract S/E from description when episode-num
-                        # elements didn't provide them
-                        if desc:
-                            has_season = (custom_properties_json or {}).get('season') is not None
-                            has_episode = (custom_properties_json or {}).get('episode') is not None
-                            if not has_season or not has_episode:
-                                d_season, d_episode, cleaned_desc = extract_season_episode_from_description(desc)
-                                if d_season is not None and d_episode is not None:
-                                    if custom_properties_json is None:
-                                        custom_properties_json = {}
-                                    if not has_season:
-                                        custom_properties_json['season'] = d_season
-                                    if not has_episode:
-                                        custom_properties_json['episode'] = d_episode
-                                    custom_properties_json['season_episode_source'] = 'description'
-                                    desc = cleaned_desc
-
-                        programs_to_create.append(ProgramData(
-                            epg=epg,
-                            start_time=start_time,
-                            end_time=end_time,
-                            title=title[:255],
-                            description=desc,
-                            sub_title=sub_title,
-                            tvg_id=epg.tvg_id,
-                            custom_properties=custom_properties_json
-                        ))
-                        programs_processed += 1
-                        # Clear the element to free memory
-                        clear_element(elem)
-                        # Batch processing
-                        if len(programs_to_create) >= batch_size:
-                            ProgramData.objects.bulk_create(programs_to_create)
-                            logger.debug(f"Saved batch of {len(programs_to_create)} programs for {epg.tvg_id}")
-                            programs_to_create = []
-                            # Only call gc.collect() every few batches
-                            if programs_processed % (batch_size * 5) == 0:
-                                gc.collect()
-
-                    except Exception as e:
-                        logger.error(f"Error processing program for {epg.tvg_id}: {e}", exc_info=True)
+            file_path = epg_source.extracted_file_path if epg_source.extracted_file_path else epg_source.file_path
+            if not file_path:
+                file_path = epg_source.get_cache_file()
+    
+            # Check if the file exists
+            if not os.path.exists(file_path):
+                logger.error(f"EPG file not found at: {file_path}")
+    
+                if epg_source.url:
+                    # Update the file path in the database
+                    new_path = epg_source.get_cache_file()
+                    logger.info(f"Updating file_path from '{file_path}' to '{new_path}'")
+                    epg_source.file_path = new_path
+                    epg_source.save(update_fields=['file_path'])
+                    logger.info(f"Fetching new EPG data from URL: {epg_source.url}")
                 else:
-                    # Immediately clean up non-matching elements to reduce memory pressure
-                    if elem is not None:
-                        clear_element(elem)
-                    continue
-
-            # Make sure to close the file and release parser resources
-            if source_file:
-                source_file.close()
-                source_file = None
-
-            if program_parser:
-                program_parser = None
-
-            gc.collect()
-
-        except zipfile.BadZipFile as zip_error:
-            logger.error(f"Bad ZIP file: {zip_error}")
-            raise
-        except etree.XMLSyntaxError as xml_error:
-            logger.error(f"XML syntax error parsing program data: {xml_error}")
-            raise
-        except Exception as e:
-            logger.error(f"Error parsing XML for programs: {e}", exc_info=True)
-            raise
-        finally:
-            # Ensure file is closed even if an exception occurs
-            if source_file:
-                source_file.close()
-                source_file = None
-             # Memory tracking after processing
+                    logger.info(f"EPG source does not have a URL, using existing file path: {file_path} to rebuild cache")
+    
+                # Fetch new data before continuing
+                if epg_source:
+    
+                    # Properly check the return value from fetch_xmltv
+                    fetch_success = fetch_xmltv(epg_source)
+    
+                    # If fetch was not successful or the file still doesn't exist, abort
+                    if not fetch_success:
+                        logger.error(f"Failed to fetch EPG data, cannot parse programs for tvg_id: {epg.tvg_id}")
+                        # Update status to error if not already set
+                        epg_source.status = 'error'
+                        epg_source.last_message = f"Failed to download EPG data, cannot parse programs"
+                        epg_source.save(update_fields=['status', 'last_message'])
+                        send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="Failed to download EPG file")
+                        return
+    
+                    # Also check if the file exists after download
+                    if not os.path.exists(epg_source.file_path):
+                        logger.error(f"Failed to fetch EPG data, file still missing at: {epg_source.file_path}")
+                        epg_source.status = 'error'
+                        epg_source.last_message = f"Failed to download EPG data, file missing after download"
+                        epg_source.save(update_fields=['status', 'last_message'])
+                        send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="File not found after download")
+                        return
+    
+                    # Update file_path with the new location
+                    if epg_source.extracted_file_path:
+                        file_path = epg_source.extracted_file_path
+                    else:
+                        file_path = epg_source.file_path
+                else:
+                    logger.error(f"No URL provided for EPG source {epg_source.name}, cannot fetch new data")
+                    # Update status to error
+                    epg_source.status = 'error'
+                    epg_source.last_message = f"No URL provided, cannot fetch EPG data"
+                    epg_source.save(update_fields=['status', 'last_message'])
+                    send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="No URL provided")
+                    return
+    
+            # Use streaming parsing to reduce memory usage
+            # No need to check file type anymore since it's always XML
+            logger.debug(f"Parsing programs for tvg_id={epg.tvg_id} from {file_path}")
+    
+            # Memory usage tracking
             if process:
                 try:
-                    mem_after = process.memory_info().rss / 1024 / 1024
-                    logger.info(f"[parse_programs_for_tvg_id] Memory after parsing 1 {epg.tvg_id} - {programs_processed} programs: {mem_after:.2f} MB (change: {mem_after-mem_before:.2f} MB)")
+                    mem_before = process.memory_info().rss / 1024 / 1024
+                    logger.debug(f"[parse_programs_for_tvg_id] Memory before parsing {epg.tvg_id} -  {mem_before:.2f} MB")
                 except Exception as e:
                     logger.warning(f"Error tracking memory: {e}")
-
-        # Process any remaining items
-        if programs_to_create:
-            ProgramData.objects.bulk_create(programs_to_create)
-            logger.debug(f"Saved final batch of {len(programs_to_create)} programs for {epg.tvg_id}")
+                    mem_before = 0
+    
+            # Accumulate all of this channel's programmes in memory and swap them in
+            # atomically at the end (delete-old + insert-new in one transaction), so a
+            # mid-parse failure leaves the previous guide data intact instead of the
+            # channel ending up with nothing. Per-channel volume is small enough
+            # (weeks of one channel's schedule) that this doesn't need batched flushing
+            # to the DB the way the whole-source bulk parse does.
+            programs_to_create = []
+            title_max_length = ProgramData._meta.get_field('title').max_length
+    
+            try:
+                # Open the file directly - no need to check compression
+                logger.debug(f"Opening file for parsing: {file_path}")
+                source_file = _open_xmltv_file(file_path)
+    
+                # Stream parse the file using lxml's iterparse
+                program_parser = etree.iterparse(source_file, events=('end',), tag='programme',  remove_blank_text=True, recover=True)
+    
+                for _, elem in program_parser:
+                    if elem.get('channel') == epg.tvg_id:
+                        try:
+                            start_time = parse_xmltv_time(elem.get('start'))
+                            end_time = parse_xmltv_time(elem.get('stop'))
+                            title = None
+                            desc = None
+                            sub_title = None
+    
+                            # Efficiently process child elements
+                            for child in elem:
+                                if child.tag == 'title':
+                                    title = child.text or 'No Title'
+                                elif child.tag == 'desc':
+                                    desc = child.text or ''
+                                elif child.tag == 'sub-title':
+                                    sub_title = child.text or ''
+    
+                            if not title:
+                                title = 'No Title'
+    
+                            # Extract custom properties
+                            custom_props = extract_custom_properties(elem)
+                            custom_properties_json = None
+    
+                            if custom_props:
+                                logger.trace(f"Number of custom properties: {len(custom_props)}")
+                                custom_properties_json = custom_props
+    
+                            # Fallback: extract S/E from description when episode-num
+                            # elements didn't provide them
+                            if desc:
+                                has_season = (custom_properties_json or {}).get('season') is not None
+                                has_episode = (custom_properties_json or {}).get('episode') is not None
+                                if not has_season or not has_episode:
+                                    d_season, d_episode, cleaned_desc = extract_season_episode_from_description(desc)
+                                    if d_season is not None and d_episode is not None:
+                                        if custom_properties_json is None:
+                                            custom_properties_json = {}
+                                        if not has_season:
+                                            custom_properties_json['season'] = d_season
+                                        if not has_episode:
+                                            custom_properties_json['episode'] = d_episode
+                                        custom_properties_json['season_episode_source'] = 'description'
+                                        desc = cleaned_desc
+    
+                            programs_to_create.append(ProgramData(
+                                epg=epg,
+                                start_time=start_time,
+                                end_time=end_time,
+                                title=title[:title_max_length],
+                                description=desc,
+                                sub_title=sub_title,
+                                tvg_id=epg.tvg_id,
+                                custom_properties=custom_properties_json
+                            ))
+                            programs_processed += 1
+                            # Clear the element to free memory
+                            clear_element(elem)
+                            if programs_processed % 5000 == 0:
+                                gc.collect()
+    
+                        except Exception as e:
+                            logger.error(f"Error processing program for {epg.tvg_id}: {e}", exc_info=True)
+                    else:
+                        # Immediately clean up non-matching elements to reduce memory pressure
+                        if elem is not None:
+                            clear_element(elem)
+                        continue
+    
+                # Make sure to close the file and release parser resources
+                if source_file:
+                    source_file.close()
+                    source_file = None
+    
+                if program_parser:
+                    program_parser = None
+    
+                gc.collect()
+    
+            except zipfile.BadZipFile as zip_error:
+                logger.error(f"Bad ZIP file: {zip_error}")
+                raise
+            except etree.XMLSyntaxError as xml_error:
+                logger.error(f"XML syntax error parsing program data: {xml_error}")
+                raise
+            except Exception as e:
+                logger.error(f"Error parsing XML for programs: {e}", exc_info=True)
+                raise
+            finally:
+                # Ensure file is closed even if an exception occurs
+                if source_file:
+                    source_file.close()
+                    source_file = None
+                 # Memory tracking after processing
+                if process:
+                    try:
+                        mem_after = process.memory_info().rss / 1024 / 1024
+                        logger.info(f"[parse_programs_for_tvg_id] Memory after parsing 1 {epg.tvg_id} - {programs_processed} programs: {mem_after:.2f} MB (change: {mem_after-mem_before:.2f} MB)")
+                    except Exception as e:
+                        logger.warning(f"Error tracking memory: {e}")
+    
+            # Swap old programmes for the newly parsed ones atomically. If the insert
+            # fails (including a poisoned-connection blip), the transaction rolls back
+            # and the previous guide data for this channel is left untouched.
+            with transaction.atomic():
+                deleted_count = ProgramData.objects.filter(epg=epg).delete()[0]
+                if programs_to_create:
+                    for i in range(0, len(programs_to_create), _EPG_SWAP_BATCH_SIZE):
+                        ProgramData.objects.bulk_create(
+                            programs_to_create[i:i + _EPG_SWAP_BATCH_SIZE]
+                        )
+            logger.debug(
+                f"Replaced {deleted_count} program(s) with {len(programs_to_create)} "
+                f"for {epg.tvg_id}"
+            )
+            # Programme rows changed; drop XMLTV chunk cache so /output/epg
+            # does not keep serving the pre-import guide for this station.
+            from apps.output.streaming_chunk_cache import invalidate_epg_chunk_cache
+            invalidate_epg_chunk_cache()
             programs_to_create = None
             custom_props = None
             custom_properties_json = None
 
-
-        logger.info(f"Completed program parsing for tvg_id={epg.tvg_id}.")
-    finally:
-        # Reset internal caches and pools that lxml might be keeping
-        try:
-            etree.clear_error_log()
-        except:
-            pass
-        # Explicit cleanup of all potentially large objects
-        if source_file:
+            logger.info(f"Completed program parsing for tvg_id={epg.tvg_id}.")
+        finally:
+            # Reset internal caches and pools that lxml might be keeping
             try:
-                source_file.close()
+                etree.clear_error_log()
             except:
                 pass
-        source_file = None
-        program_parser = None
-        programs_to_create = None
-
-        epg_source = None
-        # Add comprehensive cleanup before releasing lock
-        cleanup_memory(log_usage=should_log_memory, force_collection=True)
-        # Memory tracking after processing
-        if process:
-            try:
-                mem_after = process.memory_info().rss / 1024 / 1024
-                logger.info(f"[parse_programs_for_tvg_id] Final memory usage {epg.tvg_id} - {programs_processed} programs: {mem_after:.2f} MB (change: {mem_after-mem_before:.2f} MB)")
-            except Exception as e:
-                logger.warning(f"Error tracking memory: {e}")
-            process = None
-        epg = None
-        programs_processed = None
-        lock_renewer.stop()
-        release_task_lock('parse_epg_programs', epg_id)
+            # Explicit cleanup of all potentially large objects
+            if source_file:
+                try:
+                    source_file.close()
+                except:
+                    pass
+            source_file = None
+            program_parser = None
+            programs_to_create = None
+    
+            epg_source = None
+            # Add comprehensive cleanup before releasing lock
+            cleanup_memory(log_usage=should_log_memory, force_collection=True)
+            # Memory tracking after processing
+            if process:
+                try:
+                    mem_after = process.memory_info().rss / 1024 / 1024
+                    logger.info(f"[parse_programs_for_tvg_id] Final memory usage {epg.tvg_id} - {programs_processed} programs: {mem_after:.2f} MB (change: {mem_after-mem_before:.2f} MB)")
+                except Exception as e:
+                    logger.warning(f"Error tracking memory: {e}")
+                process = None
+            epg = None
+            programs_processed = None
+            lock_renewer.stop()
+            release_task_lock('parse_epg_programs', epg_id)
+    finally:
+        _decr_source_tvg_parse_count(source_id)
 
 
 _EPG_PROGRAM_STAGING_TABLE = 'epg_program_staging'
@@ -1882,6 +1965,58 @@ def _flush_epg_program_staging_batch(programs_batch):
         )
 
 
+def _epg_ids_mapped_to_channels(epg_source):
+    """EPGData ids currently assigned to at least one channel on this source.
+
+    Includes ChannelOverride.epg_data so hand-assigned EPG on auto-synced
+    channels is treated as mapped for import and orphan cleanup.
+    """
+    from apps.channels.managers import epg_ids_mapped_to_channels
+
+    return epg_ids_mapped_to_channels(epg_source=epg_source)
+
+
+def _delete_orphaned_epg_programs(epg_source):
+    """
+    Remove programme rows for EPG entries that have no channel mapped now.
+
+    Uses live channel assignments, not the snapshot taken at bulk-parse start,
+    so channels matched mid-refresh are not treated as orphaned.
+    """
+    currently_mapped = _epg_ids_mapped_to_channels(epg_source)
+    unmapped_epg_ids = list(
+        EPGData.objects.filter(epg_source=epg_source)
+        .exclude(id__in=currently_mapped)
+        .values_list('id', flat=True)
+    )
+    if not unmapped_epg_ids:
+        return 0
+    orphaned_count = ProgramData.objects.filter(epg_id__in=unmapped_epg_ids).delete()[0]
+    if orphaned_count > 0:
+        logger.info(
+            f"Cleaned up {orphaned_count} orphaned programs for "
+            f"{len(unmapped_epg_ids)} unmapped EPG entries"
+        )
+    return orphaned_count
+
+
+def _dispatch_late_mapped_epg_parses(epg_source, bulk_parsed_epg_ids):
+    """
+    Queue per-channel parses for EPG rows mapped after bulk parse began.
+
+    Per-channel tasks triggered during refresh defer until refresh finishes;
+    this ensures they still run promptly even if a deferred retry is pending.
+    """
+    missed_epg_ids = _epg_ids_mapped_to_channels(epg_source) - bulk_parsed_epg_ids
+    if not missed_epg_ids:
+        return 0
+    logger.info(
+        f"Queueing per-channel program parse for {len(missed_epg_ids)} EPG row(s) "
+        f"mapped during bulk refresh of {epg_source.name}"
+    )
+    return dispatch_program_refresh_for_epg_ids(missed_epg_ids)
+
+
 def _swap_staged_epg_programs(mapped_epg_ids, epg_source, batch_size=_EPG_SWAP_BATCH_SIZE):
     """
     Atomically replace mapped programme rows with staged data.
@@ -1896,18 +2031,7 @@ def _swap_staged_epg_programs(mapped_epg_ids, epg_source, batch_size=_EPG_SWAP_B
     deleted_count = ProgramData.objects.filter(epg_id__in=mapped_epg_ids).delete()[0]
     logger.debug(f"Deleted {deleted_count} existing programs")
 
-    unmapped_epg_ids = list(
-        EPGData.objects.filter(epg_source=epg_source)
-        .exclude(id__in=mapped_epg_ids)
-        .values_list('id', flat=True)
-    )
-    if unmapped_epg_ids:
-        orphaned_count = ProgramData.objects.filter(epg_id__in=unmapped_epg_ids).delete()[0]
-        if orphaned_count > 0:
-            logger.info(
-                f"Cleaned up {orphaned_count} orphaned programs for "
-                f"{len(unmapped_epg_ids)} unmapped EPG entries"
-            )
+    _delete_orphaned_epg_programs(epg_source)
 
     if not _epg_program_staging_supported():
         raise RuntimeError('_swap_staged_epg_programs requires PostgreSQL staging support')
@@ -1952,13 +2076,7 @@ def _swap_parsed_epg_programs(mapped_epg_ids, epg_source, programs_to_create, ba
     """SQLite/dev fallback: atomic delete + bulk insert from an in-memory batch list."""
     with transaction.atomic():
         deleted_count = ProgramData.objects.filter(epg_id__in=mapped_epg_ids).delete()[0]
-        unmapped_epg_ids = list(
-            EPGData.objects.filter(epg_source=epg_source)
-            .exclude(id__in=mapped_epg_ids)
-            .values_list('id', flat=True)
-        )
-        if unmapped_epg_ids:
-            ProgramData.objects.filter(epg_id__in=unmapped_epg_ids).delete()
+        _delete_orphaned_epg_programs(epg_source)
         for i in range(0, len(programs_to_create), batch_size):
             ProgramData.objects.bulk_create(programs_to_create[i:i + batch_size])
     return deleted_count
@@ -2002,12 +2120,8 @@ def parse_programs_for_source(epg_source, tvg_id=None):
 
     try:
         # Only get EPG entries that are actually mapped to channels
-        mapped_epg_ids = set(
-            Channel.objects.filter(
-                epg_data__epg_source=epg_source,
-                epg_data__isnull=False
-            ).values_list('epg_data_id', flat=True)
-        )
+        # (Channel.epg_data or ChannelOverride.epg_data).
+        mapped_epg_ids = _epg_ids_mapped_to_channels(epg_source)
 
         if not mapped_epg_ids:
             total_epg_count = EPGData.objects.filter(epg_source=epg_source).count()
@@ -2030,6 +2144,8 @@ def parse_programs_for_source(epg_source, tvg_id=None):
 
         logger.info(f"Parsing programs for {mapped_count} MAPPED channels from source: {epg_source.name} "
                    f"(skipping {total_epg_count - mapped_count} unmapped EPG entries)")
+
+        title_max_length = ProgramData._meta.get_field('title').max_length
 
         # Get the file path
         file_path = epg_source.extracted_file_path if epg_source.extracted_file_path else epg_source.file_path
@@ -2150,7 +2266,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
                             epg_id=epg_id,
                             start_time=start_time,
                             end_time=end_time,
-                            title=title[:255],
+                            title=title[:title_max_length],
                             description=desc,
                             sub_title=sub_title,
                             tvg_id=channel_id,
@@ -2218,6 +2334,8 @@ def parse_programs_for_source(epg_source, tvg_id=None):
                 logger.info(
                     f"Atomic update complete: deleted {deleted_count}, inserted {total_programs} programs"
                 )
+                from apps.output.streaming_chunk_cache import invalidate_epg_chunk_cache
+                invalidate_epg_chunk_cache()
             except Exception as db_error:
                 logger.error(f"Database error during atomic update: {db_error}", exc_info=True)
                 epg_source.status = EPGSource.STATUS_ERROR
@@ -2285,6 +2403,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
         logger.info(f"Completed parsing programs for source: {epg_source.name} - "
                f"{total_programs:,} programs for {channels_with_programs} channels, "
                f"skipped {skipped_programs:,} programs for unmapped channels")
+        _dispatch_late_mapped_epg_parses(epg_source, mapped_epg_ids)
         return True
 
     except Exception as e:
@@ -2321,91 +2440,6 @@ def parse_programs_for_source(epg_source, tvg_id=None):
             logger.info(f"[parse_programs_for_source] Final memory usage: {final_memory:.2f} MB difference: {final_memory - initial_memory:.2f} MB")
             # Explicitly clear the process object to prevent potential memory leaks
             process = None
-
-
-def _sd_fetch_lineup_country(token, sd_headers_fn):
-    """Return country code prefix from the first subscribed lineup (poster metadata)."""
-    try:
-        lineups_response = requests.get(
-            f"{SD_BASE_URL}/lineups",
-            headers=sd_headers_fn(token),
-            timeout=30,
-        )
-        if lineups_response.ok:
-            for lineup in lineups_response.json().get('lineups', []):
-                lid = lineup.get('lineupID') or lineup.get('lineup') or ''
-                if '-' in lid:
-                    return lid.split('-')[0]
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Could not fetch lineups for country code: {e}")
-    return None
-
-
-def _sd_setup_single_epg_fetch(source, epg_id, token, sd_headers_fn):
-    """Build station_map / epg_id_map for a single mapped EPG entry."""
-    epg = EPGData.objects.filter(id=epg_id, epg_source=source).first()
-    if not epg or not epg.tvg_id:
-        msg = f"Schedules Direct EPG entry {epg_id} not found or missing station ID."
-        logger.error(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return None
-
-    sd_lineup_country = _sd_fetch_lineup_country(token, sd_headers_fn)
-
-    send_epg_update(
-        source.id, "parsing_programs", 15,
-        message=f"Fetching guide data for {epg.name or epg.tvg_id}...",
-    )
-    station_map = {epg.tvg_id: {'name': epg.name or epg.tvg_id, 'logo_url': epg.icon_url}}
-    epg_id_map = {epg.tvg_id: epg.id}
-    return station_map, epg_id_map, sd_lineup_country, epg
-
-
-def _sd_setup_mapped_guide_fetch(source, token, sd_headers_fn):
-    """Build station_map / epg_id_map for all channels mapped to this SD source."""
-    from apps.channels.models import Channel
-
-    mapped_epg_ids = set(
-        Channel.objects.filter(
-            epg_data__epg_source=source,
-            epg_data__isnull=False,
-        ).values_list('epg_data_id', flat=True)
-    )
-    if not mapped_epg_ids:
-        msg = "No channels mapped to this Schedules Direct source."
-        logger.info(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="idle", message=msg)
-        return None
-
-    station_map = {}
-    epg_id_map = {}
-    for epg in EPGData.objects.filter(id__in=mapped_epg_ids, epg_source=source):
-        if not epg.tvg_id:
-            continue
-        station_map[epg.tvg_id] = {
-            'name': epg.name or epg.tvg_id,
-            'logo_url': epg.icon_url,
-        }
-        epg_id_map[epg.tvg_id] = epg.id
-
-    if not station_map:
-        msg = "Mapped channels have no valid Schedules Direct station IDs."
-        logger.warning(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return None
-
-    sd_lineup_country = _sd_fetch_lineup_country(token, sd_headers_fn)
-    send_epg_update(
-        source.id, "parsing_programs", 15,
-        message=f"Fetching guide data for {len(station_map)} mapped stations...",
-    )
-    return station_map, epg_id_map, sd_lineup_country
 
 
 def dispatch_program_refresh_for_epg_ids(epg_ids):
@@ -2474,1466 +2508,6 @@ def dispatch_program_refresh_for_epg_ids(epg_ids):
     return dispatched
 
 
-@shared_task(time_limit=3600, soft_time_limit=3500)
-def fetch_sd_mapped_guide_batch(source_id, force=False, _defer_retry=0):
-    """
-    Fetch Schedules Direct guide data for all mapped stations on one source.
-
-    Used when bulk EPG assignment would otherwise queue many per-EPG tasks.
-    """
-    try:
-        source = EPGSource.objects.get(id=source_id)
-    except EPGSource.DoesNotExist:
-        logger.error(f"EPGSource {source_id} not found for SD mapped guide batch")
-        return
-
-    if source.source_type != 'schedules_direct':
-        return "Not a Schedules Direct source"
-
-    if not acquire_task_lock('sd_mapped_guide_fetch', source_id):
-        if _defer_retry < SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES:
-            logger.info(
-                f"SD mapped guide batch for source {source_id} already in progress, "
-                f"deferring retry {_defer_retry + 1}/"
-                f"{SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES}"
-            )
-            fetch_sd_mapped_guide_batch.apply_async(
-                args=[source_id],
-                kwargs={
-                    'force': force,
-                    '_defer_retry': _defer_retry + 1,
-                },
-                countdown=SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
-            )
-            return "Deferred - batch already in progress"
-        logger.warning(
-            f"SD mapped guide batch for source {source_id} still locked after "
-            f"{_defer_retry} deferrals; giving up"
-        )
-        return "Task already running"
-
-    lock_renewer = TaskLockRenewer('sd_mapped_guide_fetch', source_id)
-    lock_renewer.start()
-    try:
-        logger.info(f"Fetching Schedules Direct guide for mapped stations (source: {source.name})")
-        fetch_schedules_direct(source, mapped_guide_batch=True, force=force)
-        return "SD mapped guide batch complete"
-    finally:
-        lock_renewer.stop()
-        release_task_lock('sd_mapped_guide_fetch', source_id)
-
-
-@shared_task(time_limit=3600, soft_time_limit=3500)
-def fetch_sd_guide_for_epg(epg_id, force=False, _defer_retry=0):
-    """
-    Fetch Schedules Direct guide data for one mapped EPG entry (channel map flow).
-
-    Skips when ProgramData already exists so additional channels sharing the
-    same EPGData / tvg_id do not trigger redundant API calls.
-    """
-    epg = EPGData.objects.select_related('epg_source').filter(id=epg_id).first()
-    if not epg or not epg.epg_source or epg.epg_source.source_type != 'schedules_direct':
-        return "Not a Schedules Direct EPG entry"
-
-    if not force and ProgramData.objects.filter(epg_id=epg_id).exists():
-        logger.info(f"SD guide fetch skipped for EPG {epg_id}: ProgramData already present")
-        return "Guide data already present"
-
-    source_id = epg.epg_source_id
-    if is_task_lock_held('sd_mapped_guide_fetch', source_id):
-        if _defer_retry < SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES:
-            logger.info(
-                f"SD mapped batch in progress for source {source_id}; "
-                f"deferring single-EPG fetch for {epg_id} "
-                f"(retry {_defer_retry + 1}/{SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES})"
-            )
-            fetch_sd_guide_for_epg.apply_async(
-                args=[epg_id],
-                kwargs={
-                    'force': force,
-                    '_defer_retry': _defer_retry + 1,
-                },
-                countdown=SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
-            )
-            return "Deferred - mapped batch in progress"
-        logger.warning(
-            f"SD mapped batch still running for source {source_id} after "
-            f"{_defer_retry} deferrals; proceeding with single-EPG fetch for {epg_id}"
-        )
-
-    if not acquire_task_lock('parse_epg_programs', epg_id):
-        logger.info(f"SD guide fetch for EPG {epg_id} already in progress, skipping duplicate task")
-        return "Task already running"
-
-    lock_renewer = TaskLockRenewer('parse_epg_programs', epg_id)
-    lock_renewer.start()
-    try:
-        logger.info(f"Fetching Schedules Direct guide for EPG {epg_id} ({epg.tvg_id})")
-        fetch_schedules_direct(epg.epg_source, epg_id_only=epg_id, force=force)
-        return "SD guide fetch complete"
-    finally:
-        lock_renewer.stop()
-        release_task_lock('parse_epg_programs', epg_id)
-
-
-@shared_task(bind=True)
-def fetch_schedules_direct_stations(self, source_id):
-    """
-    Lightweight Celery task that runs a stations-only Schedules Direct fetch.
-    Called on initial source creation so EPGData entries exist for auto-matching
-    before the user commits to a full schedule/program fetch.
-    """
-    try:
-        source = EPGSource.objects.get(id=source_id)
-    except EPGSource.DoesNotExist:
-        logger.error(f"EPGSource {source_id} not found for SD stations fetch")
-        return
-    fetch_schedules_direct(source, stations_only=True)
-
-
-def fetch_schedules_direct(
-    source,
-    stations_only=False,
-    force=False,
-    epg_id_only=None,
-    mapped_guide_batch=False,
-):
-    """
-    Fetch EPG data from the Schedules Direct JSON API and persist it to the
-    EPGData / ProgramData models.
-
-    Authentication flow (as required by the SD API specification):
-      1. POST credentials to the token endpoint (password must be SHA1-hashed
-         as required by the Schedules Direct API specification.
-      2. Use the returned token for all subsequent requests via the 'token' header.
-      3. Tokens are valid for 24 hours; SD returns the current valid token if one
-         already exists for the account.
-
-    Data flow:
-      1. Fetch subscribed lineups for the account.
-      2. Fetch station metadata for each lineup.
-      3. Persist station metadata to EPGData.
-      4. If stations_only=True, stop here. Used on initial source creation so
-         the user can run Auto-match EPG before the full program fetch.
-      5. Fetch schedule grids in 14-day date-batched requests per station.
-      6. Fetch program metadata in batched requests (up to 5000 programIDs per request).
-      7. Persist channels to EPGData and programs to ProgramData.
-
-    Args:
-        source: EPGSource instance
-        stations_only: If True, only fetch and persist station metadata (no schedules/programs).
-                      Used on initial source creation to populate EPGData for auto-matching
-                      before channels are assigned.
-    """
-    import hashlib
-    from datetime import date
-
-    single_epg_fetch = epg_id_only is not None
-    lightweight_sd_fetch = single_epg_fetch or mapped_guide_batch
-
-    if single_epg_fetch:
-        logger.info(
-            f"Fetching Schedules Direct guide for EPG {epg_id_only} "
-            f"(source: {source.name})"
-        )
-    elif mapped_guide_batch:
-        logger.info(
-            f"Fetching Schedules Direct guide for mapped stations "
-            f"(source: {source.name})"
-        )
-    else:
-        logger.info(f"Fetching Schedules Direct data for source: {source.name}")
-
-    # -------------------------------------------------------------------------
-    # Validate credentials
-    # -------------------------------------------------------------------------
-    username = (source.username or '').strip()
-    password = (source.password or '').strip()
-
-    if not username or not password:
-        msg = "Schedules Direct source requires both a username and password."
-        logger.error(msg)
-        source.status = EPGSource.STATUS_ERROR
-        source.last_message = msg
-        source.save(update_fields=['status', 'last_message'])
-        send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-        return
-
-    # -------------------------------------------------------------------------
-    # Enforce 2-hour minimum interval between full fetches (not stations-only).
-    # Schedules Direct enforces rate limits of ~200 requests per 2-hour window.
-    # This prevents automated abuse regardless of how the refresh was triggered.
-    #
-    # Exception: if no SDScheduleMD5 records exist yet, this is the first full
-    # refresh after initial source creation (stations-only runs first and updates
-    # updated_at, which would otherwise incorrectly trigger this guard). Always
-    # allow the first full refresh through so guide data is immediately available.
-    # -------------------------------------------------------------------------
-    if not stations_only and not force and not lightweight_sd_fetch and source.updated_at:
-        from apps.epg.models import SDScheduleMD5 as _SDScheduleMD5
-        has_prior_full_refresh = _SDScheduleMD5.objects.filter(epg_source=source).exists()
-        if has_prior_full_refresh:
-            elapsed = (timezone.now() - source.updated_at).total_seconds()
-            min_interval_seconds = 2 * 3600  # 2 hours
-            if elapsed < min_interval_seconds:
-                remaining_minutes = int((min_interval_seconds - elapsed) / 60)
-                msg = (
-                    f"Schedules Direct refresh skipped. Minimum 2-hour interval not reached. "
-                    f"Last refreshed {int(elapsed / 60)} minutes ago. "
-                    f"Please wait {remaining_minutes} more minute(s)."
-                )
-                logger.warning(f"SD source {source.id}: {msg}")
-                source.status = EPGSource.STATUS_IDLE
-                source.last_message = msg
-                source.save(update_fields=['status', 'last_message'])
-                send_epg_update(source.id, "refresh", 100, status="idle", message=msg)
-                return
-        else:
-            logger.info(f"SD source {source.id}: No prior full refresh detected, skipping 2-hour guard for first full fetch.")
-    elif force and not stations_only and not lightweight_sd_fetch:
-        logger.info(f"SD source {source.id}: Force flag set, bypassing 2-hour refresh guard.")
-
-    # -------------------------------------------------------------------------
-    # Build SD-specific headers
-    # SD API spec requires the User-Agent to identify the application and version.
-    # SergeantPanda confirmed Dispatcharr should identify itself properly.
-    # -------------------------------------------------------------------------
-    from core.utils import dispatcharr_http_headers
-
-    def _sd_headers(token=None):
-        return dispatcharr_http_headers(token=token)
-
-    def _sd_post_refresh_tasks(mapped_epg_ids, program_metadata, today):
-        """Poster fetch, logo auto-apply, and pruning — runs even when schedules are unchanged."""
-        from apps.epg.models import SDProgramMD5
-
-        fetch_posters = (source.custom_properties or {}).get('fetch_posters', False)
-        poster_style = (source.custom_properties or {}).get('poster_style', SD_POSTER_STYLE_DEFAULT)
-        poster_program_ids = set()
-        if fetch_posters:
-            needs_poster_q = (
-                Q(custom_properties__isnull=True)
-                | ~Q(custom_properties__has_key='sd_icon')
-                | ~Q(custom_properties__sd_poster_style=poster_style)
-            )
-            poster_program_ids = set(
-                ProgramData.objects.filter(
-                    epg_id__in=mapped_epg_ids,
-                    program_id__isnull=False,
-                ).filter(needs_poster_q).values_list('program_id', flat=True)
-            )
-            if poster_program_ids:
-                logger.info(
-                    f"Poster fetch: {len(poster_program_ids)} programs need artwork "
-                    f"(missing, style change, or first fetch; style={poster_style})."
-                )
-
-        if fetch_posters and poster_program_ids:
-            logger.info("Poster fetch enabled, retrieving program artwork from Schedules Direct.")
-            send_epg_update(source.id, "parsing_programs", 98,
-                            message="Fetching program artwork...")
-            try:
-                artwork_lookup_ids = set()
-                pid_to_artwork_key = {}
-                for pid in poster_program_ids:
-                    if pid.startswith('EP'):
-                        sh_root = 'SH' + pid[2:10] + '0000'
-                        artwork_lookup_ids.add(sh_root)
-                        pid_to_artwork_key[pid] = sh_root
-                    else:
-                        artwork_lookup_ids.add(pid)
-                        pid_to_artwork_key[pid] = pid
-
-                artwork_map = {}
-                artwork_list = list(artwork_lookup_ids)
-                SD_ARTWORK_BATCH_SIZE = 500
-                total_art_batches = max(1, (len(artwork_list) + SD_ARTWORK_BATCH_SIZE - 1) // SD_ARTWORK_BATCH_SIZE)
-                logger.info(f"Fetching artwork index for {len(artwork_list)} unique program/series IDs "
-                            f"in {total_art_batches} batch(es).")
-
-                for batch_idx in range(total_art_batches):
-                    batch = artwork_list[batch_idx * SD_ARTWORK_BATCH_SIZE:(batch_idx + 1) * SD_ARTWORK_BATCH_SIZE]
-                    try:
-                        art_response = requests.post(
-                            f"{SD_BASE_URL}/metadata/programs/",
-                            json=batch,
-                            headers=_sd_headers(token),
-                            timeout=120,
-                        )
-                        art_response.raise_for_status()
-                        art_data = art_response.json()
-
-                        for entry in art_data:
-                            if not isinstance(entry, dict):
-                                continue
-                            entry_pid = entry.get('programID')
-                            images = entry.get('data') or []
-                            if not entry_pid or not images:
-                                continue
-                            images = [img for img in images if isinstance(img, dict)]
-                            if not images:
-                                continue
-
-                            poster_url = _sd_pick_poster_url(images, poster_style)
-                            if poster_url:
-                                if not poster_url.startswith('http'):
-                                    poster_url = f"{SD_BASE_URL}/image/{poster_url}"
-                                artwork_map[entry_pid] = poster_url
-
-                        logger.info(f"Artwork batch {batch_idx + 1}/{total_art_batches}: "
-                                    f"{len(artwork_map)} posters found so far.")
-                    except requests.exceptions.RequestException as e:
-                        logger.warning(f"Failed to fetch artwork batch {batch_idx + 1}: {e}")
-
-                if artwork_map:
-                    programs_to_update = []
-                    for prog in ProgramData.objects.filter(
-                        epg_id__in=mapped_epg_ids,
-                        program_id__in=poster_program_ids,
-                        program_id__isnull=False,
-                    ).only('id', 'program_id', 'custom_properties'):
-                        art_key = pid_to_artwork_key.get(prog.program_id)
-                        poster = artwork_map.get(art_key) if art_key else None
-                        if poster:
-                            cp = prog.custom_properties or {}
-                            cp['sd_icon'] = poster
-                            cp['sd_poster_style'] = poster_style
-                            prog.custom_properties = cp
-                            programs_to_update.append(prog)
-                    if programs_to_update:
-                        ProgramData.objects.bulk_update(
-                            programs_to_update, ['custom_properties'], batch_size=1000
-                        )
-                        logger.info(f"Updated {len(programs_to_update)} programs with poster artwork.")
-                    else:
-                        logger.info("No poster artwork matched committed programs.")
-                else:
-                    logger.info("No poster artwork found from Schedules Direct.")
-            except Exception as art_error:
-                logger.warning(f"Poster artwork fetch failed (non-fatal): {art_error}", exc_info=True)
-        elif fetch_posters:
-            logger.info("Poster fetch enabled but all mapped programs already have artwork.")
-
-        from apps.channels.utils import maybe_auto_apply_epg_logos
-        maybe_auto_apply_epg_logos(source)
-
-        try:
-            unmapped_epg_ids = list(
-                EPGData.objects.filter(epg_source=source).exclude(
-                    id__in=mapped_epg_ids,
-                ).values_list('id', flat=True)
-            )
-            if unmapped_epg_ids:
-                orphaned_count = ProgramData.objects.filter(
-                    epg_id__in=unmapped_epg_ids,
-                ).delete()[0]
-                if orphaned_count:
-                    logger.info(
-                        f"Cleaned up {orphaned_count} orphaned ProgramData records "
-                        f"for {len(unmapped_epg_ids)} unmapped EPG entries."
-                    )
-        except Exception as prune_err:
-            logger.warning(f"Failed to clean up orphaned SD ProgramData: {prune_err}")
-
-        today_utc = datetime(today.year, today.month, today.day, tzinfo=dt_timezone.utc)
-        try:
-            expired_count = ProgramData.objects.filter(epg_id__in=mapped_epg_ids, end_time__lt=today_utc).delete()[0]
-            if expired_count:
-                logger.info(f"Pruned {expired_count} expired SD ProgramData records (end_time before {today}).")
-        except Exception as prune_err:
-            logger.warning(f"Failed to prune expired SD ProgramData: {prune_err}")
-
-        try:
-            live_program_ids = set(
-                ProgramData.objects.filter(epg_id__in=mapped_epg_ids, program_id__isnull=False)
-                .values_list('program_id', flat=True)
-            )
-            pruned_prog_md5_count = SDProgramMD5.objects.filter(epg_source=source).exclude(
-                program_id__in=live_program_ids
-            ).delete()[0]
-            if pruned_prog_md5_count:
-                logger.info(f"Pruned {pruned_prog_md5_count} stale SDProgramMD5 records no longer referenced by live ProgramData.")
-        except Exception as prune_err:
-            logger.warning(f"Failed to prune stale SDProgramMD5 records: {prune_err}")
-
-    # -------------------------------------------------------------------------
-    # Step 1: Authenticate and obtain session token
-    # The SD API requires the password to be SHA1-hashed before transmission.
-    # This is a requirement of the Schedules Direct API specification, not an
-    # architectural choice.
-    # -------------------------------------------------------------------------
-    if not lightweight_sd_fetch:
-        source.status = EPGSource.STATUS_FETCHING
-        source.last_message = "Authenticating with Schedules Direct..."
-        source.save(update_fields=['status', 'last_message'])
-    send_epg_update(source.id, "parsing_programs", 2, message="Authenticating with Schedules Direct...")
-
-    try:
-        sha1_password = hashlib.sha1(password.encode('utf-8')).hexdigest()
-        token_response = requests.post(
-            f"{SD_BASE_URL}/token",
-            json={'username': username, 'password': sha1_password},
-            headers=_sd_headers(),
-            timeout=30,
-        )
-        token_response.raise_for_status()
-        token_data = token_response.json()
-
-        auth_code = token_data.get('code', 0)
-        if auth_code != 0:
-            if auth_code == 4007:
-                msg = "Schedules Direct: this application is not authorized. Please contact the Dispatcharr maintainers."
-            elif auth_code == 4004:
-                msg = "Schedules Direct: account locked due to too many failed login attempts. Try again in 15 minutes."
-            elif auth_code == 4009:
-                msg = "Schedules Direct: too many login attempts in 24 hours. Token is valid for 24 hours. Check for misconfiguration."
-            elif auth_code == 4001:
-                msg = "Schedules Direct: account has expired. Please renew your subscription at schedulesdirect.org."
-            elif auth_code == 4008:
-                msg = "Schedules Direct: account is inactive. Please log in to schedulesdirect.org to reactivate."
-            else:
-                msg = f"Schedules Direct authentication failed (code {auth_code}): {token_data.get('message', 'Unknown error')}"
-            logger.error(msg)
-            source.status = EPGSource.STATUS_ERROR
-            source.last_message = msg
-            source.save(update_fields=['status', 'last_message'])
-            send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-            return
-
-        token = token_data.get('token')
-        if not token:
-            msg = "Schedules Direct returned no token."
-            logger.error(msg)
-            source.status = EPGSource.STATUS_ERROR
-            source.last_message = msg
-            source.save(update_fields=['status', 'last_message'])
-            send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-            return
-
-        logger.info("Schedules Direct authentication successful.")
-
-    except requests.exceptions.RequestException as e:
-        msg = f"Network error authenticating with Schedules Direct: {e}"
-        logger.error(msg, exc_info=True)
-        source.status = EPGSource.STATUS_ERROR
-        source.last_message = msg
-        source.save(update_fields=['status', 'last_message'])
-        send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-        return
-
-    # -------------------------------------------------------------------------
-    # Step 2: Check account status (respect OFFLINE system status)
-    # -------------------------------------------------------------------------
-    try:
-        status_response = requests.get(
-            f"{SD_BASE_URL}/status",
-            headers=_sd_headers(token),
-            timeout=30,
-        )
-        status_response.raise_for_status()
-        status_data = status_response.json()
-        system_status = status_data.get('systemStatus', [{}])[0].get('status', 'Online')
-        if system_status == 'Offline':
-            # Per SD API spec: if system is offline, disconnect and do not
-            # retry for 1 hour. We set idle status rather than error since
-            # this is a temporary SD-side condition.
-            msg = "Schedules Direct system is currently offline. Per SD guidelines, retrying in 1 hour."
-            logger.warning(msg)
-            source.status = EPGSource.STATUS_IDLE
-            source.last_message = msg
-            source.save(update_fields=['status', 'last_message'])
-            send_epg_update(source.id, "refresh", 100, status="idle", message=msg)
-            return
-        logger.debug(f"Schedules Direct system status: {system_status}")
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Could not fetch SD system status, proceeding anyway: {e}")
-
-    station_map = None
-    epg_id_map = None
-    sd_lineup_country = None
-
-    if epg_id_only is not None:
-        setup = _sd_setup_single_epg_fetch(source, epg_id_only, token, _sd_headers)
-        if setup is None:
-            return
-        station_map, epg_id_map, sd_lineup_country, _single_epg = setup
-    elif mapped_guide_batch:
-        setup = _sd_setup_mapped_guide_fetch(source, token, _sd_headers)
-        if setup is None:
-            return
-        station_map, epg_id_map, sd_lineup_country = setup
-    else:
-        # -------------------------------------------------------------------------
-        # Step 3: Fetch subscribed lineups and build station map
-        # -------------------------------------------------------------------------
-        send_epg_update(source.id, "parsing_programs", 10, message="Fetching subscribed lineups...")
-        try:
-            lineups_response = requests.get(
-                f"{SD_BASE_URL}/lineups",
-                headers=_sd_headers(token),
-                timeout=30,
-            )
-            # SD returns 400 with code 4102 when no lineups are configured.
-            # This is a valid account state. The user needs to add lineups via
-            # the Manage Lineups UI. Treat as idle rather than error.
-            if lineups_response.status_code == 400:
-                sd_data = lineups_response.json()
-                if sd_data.get('code') == 4102:
-                    msg = "No lineups configured. Use the Manage Lineups option in the EPG source settings to add a lineup."
-                    logger.warning(f"SD source {source.id}: no lineups configured on account (4102).")
-                    source.status = EPGSource.STATUS_IDLE
-                    source.last_message = msg
-                    source.save(update_fields=['status', 'last_message'])
-                    send_epg_update(source.id, "refresh", 100, status="idle", message=msg)
-                    return
-            lineups_response.raise_for_status()
-            lineups_data = lineups_response.json()
-            lineups = [l for l in lineups_data.get('lineups', []) if not l.get('isDeleted', False)]
-            if not lineups:
-                msg = "No lineups configured. Use the Manage Lineups option in the EPG source settings to add a lineup."
-                logger.warning(f"SD source {source.id}: no active lineups found.")
-                source.status = EPGSource.STATUS_IDLE
-                source.last_message = msg
-                source.save(update_fields=['status', 'last_message'])
-                send_epg_update(source.id, "refresh", 100, status="idle", message=msg)
-                return
-            logger.info(f"Found {len(lineups)} lineup(s) in SD account.")
-
-            # Extract country from lineup IDs (format: "USA-NJ29486-X", "GBR-...", etc.)
-            sd_lineup_country = None
-            for l in lineups:
-                lid = l.get('lineupID') or l.get('lineup') or ''
-                if '-' in lid:
-                    sd_lineup_country = lid.split('-')[0]
-                    break
-            logger.debug(f"SD lineup country: {sd_lineup_country}")
-        except requests.exceptions.RequestException as e:
-            msg = f"Failed to fetch Schedules Direct lineups: {e}"
-            logger.error(msg, exc_info=True)
-            source.status = EPGSource.STATUS_ERROR
-            source.last_message = msg
-            source.save(update_fields=['status', 'last_message'])
-            send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-            return
-
-        # Build station metadata map: stationID -> {name, callsign, logo_url}
-        station_map = {}
-        send_epg_update(source.id, "parsing_programs", 18, message=f"Fetching station metadata for {len(lineups)} lineup(s)...")
-        for lineup in lineups:
-            lineup_id = lineup.get('lineupID') or lineup.get('lineup')
-            if not lineup_id:
-                continue
-            try:
-                detail_response = requests.get(
-                    f"{SD_BASE_URL}/lineups/{lineup_id}",
-                    headers=_sd_headers(token),
-                    timeout=30,
-                )
-                detail_response.raise_for_status()
-                detail_data = detail_response.json()
-                for station in detail_data.get('stations', []):
-                    sid = station.get('stationID')
-                    if not sid:
-                        continue
-                    logo_url = None
-                    logos = station.get('stationLogo') or station.get('logo') or []
-                    if isinstance(logos, list) and logos:
-                        # Read preferred logo style from source settings; default to 'dark'
-                        logo_style = (source.custom_properties or {}).get('logo_style', 'dark')
-                        preferred = next((l for l in logos if l.get('category') == logo_style), logos[0])
-                        logo_url = preferred.get('URL') or preferred.get('url')
-                    elif isinstance(logos, dict):
-                        logo_url = logos.get('URL') or logos.get('url')
-                    station_map[sid] = {
-                        'name': station.get('name', sid),
-                        'callsign': station.get('callsign', ''),
-                        'logo_url': logo_url,
-                    }
-                logger.debug(f"Fetched {len(detail_data.get('stations', []))} stations from lineup {lineup_id}")
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Failed to fetch lineup details for {lineup_id}: {e}")
-
-        if not station_map:
-            msg = "No stations found across all Schedules Direct lineups."
-            logger.warning(msg)
-            source.status = EPGSource.STATUS_ERROR
-            source.last_message = msg
-            source.save(update_fields=['status', 'last_message'])
-            send_epg_update(source.id, "refresh", 100, status="error", error=msg)
-            return
-
-        logger.info(f"Built station map with {len(station_map)} stations.")
-
-        # -------------------------------------------------------------------------
-        # Step 4: Persist station metadata to EPGData
-        # -------------------------------------------------------------------------
-        source.status = EPGSource.STATUS_PARSING
-        source.last_message = f"Syncing {len(station_map)} stations..."
-        source.save(update_fields=['status', 'last_message'])
-        send_epg_update(source.id, "parsing_programs", 28, message=f"Syncing {len(station_map)} stations to database...")
-
-        existing_epg_map = {
-            epg.tvg_id: epg
-            for epg in EPGData.objects.filter(epg_source=source)
-        }
-
-        epgs_to_create = []
-        epgs_to_update = []
-        icon_max_length = EPGData._meta.get_field('icon_url').max_length
-        name_max_length = EPGData._meta.get_field('name').max_length
-
-        for sid, info in station_map.items():
-            display_name = (info['name'] or sid)[:name_max_length]
-            logo = info['logo_url']
-            if logo and len(logo) > icon_max_length:
-                logo = None
-
-            if sid in existing_epg_map:
-                epg_obj = existing_epg_map[sid]
-                needs_update = False
-                if epg_obj.name != display_name:
-                    epg_obj.name = display_name
-                    needs_update = True
-                if epg_obj.icon_url != logo:
-                    epg_obj.icon_url = logo
-                    needs_update = True
-                if needs_update:
-                    epgs_to_update.append(epg_obj)
-            else:
-                epgs_to_create.append(EPGData(
-                    tvg_id=sid,
-                    name=display_name,
-                    icon_url=logo,
-                    epg_source=source,
-                ))
-
-        if epgs_to_create:
-            EPGData.objects.bulk_create(epgs_to_create, ignore_conflicts=True)
-            logger.info(f"Created {len(epgs_to_create)} new EPGData entries.")
-        if epgs_to_update:
-            EPGData.objects.bulk_update(epgs_to_update, ['name', 'icon_url'])
-            logger.info(f"Updated {len(epgs_to_update)} existing EPGData entries.")
-
-        gc.collect()
-
-        # Rebuild map with fresh DB ids for all stations
-        epg_id_map = {
-            epg.tvg_id: epg.id
-            for epg in EPGData.objects.filter(epg_source=source, tvg_id__in=list(station_map.keys()))
-        }
-
-        # Station sync complete. Send progress update before continuing into programs phase.
-        # We deliberately do NOT send parsing_channels at 100 with status=success here
-        # because that would cause the frontend to mark the source as complete and
-        # stop rendering progress updates for the subsequent program fetch phases.
-        send_epg_update(source.id, "parsing_programs", 30,
-                        message=f"Stations synced ({len(station_map)} stations). Preparing schedule fetch...")
-
-        # -------------------------------------------------------------------------
-        # Stations-only mode. Used on initial source creation.
-        # Stop here so the user can run Auto-match EPG before the full program fetch.
-        # -------------------------------------------------------------------------
-        if stations_only:
-            success_msg = (
-                f"{len(station_map)} stations loaded from Schedules Direct. "
-                f"Run Auto-match EPG to map your channels, then use the Refresh "
-                f"button to populate guide data."
-            )
-            source.status = EPGSource.STATUS_SUCCESS
-            source.last_message = success_msg
-            source.updated_at = timezone.now()
-            source.save(update_fields=['status', 'last_message', 'updated_at'])
-            send_epg_update(source.id, "parsing_channels", 100, status="success",
-                            message=success_msg, channels_count=len(station_map))
-            logger.info(f"Stations-only fetch complete for source: {source.name} ({len(station_map)} stations)")
-            return
-
-    # -------------------------------------------------------------------------
-    # Step 5: MD5-delta schedule fetch
-    # Only mapped channels need guide data. Fetch MD5 hashes and schedules for
-    # mapped stations only; never cache schedule MD5s for unmapped lineup entries.
-    # -------------------------------------------------------------------------
-    from django.utils.dateparse import parse_datetime
-
-    station_ids = list(station_map.keys())
-    today = date.today()
-    date_list = [(today + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(SD_DAYS_TO_FETCH)]
-
-    mapped_epg_ids = set(
-        Channel.objects.filter(
-            epg_data__epg_source=source,
-            epg_data__isnull=False,
-        ).values_list('epg_data_id', flat=True)
-    )
-    mapped_tvg_ids = set(
-        EPGData.objects.filter(
-            id__in=mapped_epg_ids,
-            epg_source=source,
-        ).values_list('tvg_id', flat=True)
-    )
-    mapped_station_ids = [sid for sid in station_ids if sid in mapped_tvg_ids]
-
-    # Prune expired schedule MD5s and drop cache for unmapped stations.
-    pruned_sched_md5_count = SDScheduleMD5.objects.filter(
-        epg_source=source, date__lt=today,
-    ).delete()[0]
-    if pruned_sched_md5_count:
-        logger.info(f"Pruned {pruned_sched_md5_count} expired SDScheduleMD5 records (before {today}).")
-
-    if mapped_tvg_ids:
-        unmapped_cache_pruned = SDScheduleMD5.objects.filter(
-            epg_source=source,
-        ).exclude(station_id__in=mapped_tvg_ids).delete()[0]
-    else:
-        unmapped_cache_pruned = SDScheduleMD5.objects.filter(epg_source=source).delete()[0]
-    if unmapped_cache_pruned:
-        logger.info(f"Pruned {unmapped_cache_pruned} SDScheduleMD5 records for unmapped lineup stations.")
-
-    if not mapped_station_ids:
-        logger.info("No channels mapped to this SD source; skipping schedule MD5 check and downloads.")
-        _sd_post_refresh_tasks(mapped_epg_ids, {}, today)
-        if single_epg_fetch:
-            msg = "No mapped channel found for this EPG entry; guide fetch skipped."
-            source.last_message = msg
-            source.save(update_fields=['last_message'])
-            send_epg_update(source.id, "parsing_programs", 100, status="idle", message=msg)
-            return
-        if mapped_guide_batch:
-            msg = "No mapped channels with guide data to fetch."
-            source.last_message = msg
-            source.save(update_fields=['last_message'])
-            send_epg_update(source.id, "parsing_programs", 100, status="idle", message=msg)
-            return
-        success_msg = (
-            f"{len(station_map)} lineup stations synced. "
-            "Map channels to EPG entries, then refresh to populate guide data."
-        )
-        source.status = EPGSource.STATUS_SUCCESS
-        source.last_message = success_msg
-        source.updated_at = timezone.now()
-        source.save(update_fields=['status', 'last_message', 'updated_at'])
-        send_epg_update(source.id, "parsing_programs", 100, status="success", message=success_msg)
-        return
-
-    send_epg_update(
-        source.id, "parsing_programs", 33,
-        message=f"Checking schedule MD5s for {len(mapped_station_ids)} mapped stations over {SD_DAYS_TO_FETCH} days...",
-    )
-
-    # Fetch MD5 hashes for mapped stations in batches of 5000
-    STATION_BATCH_SIZE = 5000
-    server_md5s = {}  # (station_id, date) -> {md5, last_modified}
-
-    logger.info(
-        f"Fetching schedule MD5s for {len(mapped_station_ids)} mapped stations "
-        f"(of {len(station_ids)} lineup stations) over {SD_DAYS_TO_FETCH} days."
-    )
-
-    station_batches = [
-        mapped_station_ids[i:i + STATION_BATCH_SIZE]
-        for i in range(0, len(mapped_station_ids), STATION_BATCH_SIZE)
-    ]
-    for batch in station_batches:
-        try:
-            md5_response = requests.post(
-                f"{SD_BASE_URL}/schedules/md5",
-                json=[{'stationID': sid, 'date': date_list} for sid in batch],
-                headers=_sd_headers(token),
-                timeout=120,
-            )
-            md5_response.raise_for_status()
-            md5_data = md5_response.json()
-            for sid, dates in md5_data.items():
-                for date_str, info in dates.items():
-                    if info.get('code', 0) == 0:
-                        server_md5s[(sid, date_str)] = {
-                            'md5': info.get('md5', ''),
-                            'last_modified': info.get('lastModified', ''),
-                        }
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to fetch schedule MD5s: {e}")
-
-    # Load our cached MD5s from DB (mapped stations only)
-    cached_md5s = {
-        (r.station_id, r.date.strftime('%Y-%m-%d')): r.md5
-        for r in SDScheduleMD5.objects.filter(
-            epg_source=source, station_id__in=mapped_station_ids,
-        )
-    }
-
-    changed_by_station = _sd_compute_schedule_changes_from_md5(
-        server_md5s, cached_md5s, date_list,
-    )
-
-    window_start = datetime(today.year, today.month, today.day, tzinfo=dt_timezone.utc)
-    window_end = window_start + timedelta(days=SD_DAYS_TO_FETCH)
-    dates_with_data = set()
-    if mapped_epg_ids:
-        for epg_id, start_time in ProgramData.objects.filter(
-            epg_id__in=mapped_epg_ids,
-            start_time__gte=window_start,
-            start_time__lt=window_end,
-        ).values_list('epg_id', 'start_time'):
-            dates_with_data.add((epg_id, start_time.date()))
-
-    stations_without_any_data = mapped_tvg_ids - set(
-        ProgramData.objects.filter(epg_id__in=mapped_epg_ids)
-        .values_list('tvg_id', flat=True).distinct()
-    )
-    backfilled_count = _sd_backfill_schedule_dates_without_data(
-        changed_by_station,
-        server_md5s,
-        date_list,
-        mapped_station_ids,
-        epg_id_map,
-        dates_with_data,
-        cached_md5s,
-        stations_without_any_data,
-    )
-    if backfilled_count:
-        logger.info(
-            f"Backfilling {backfilled_count} station/date combinations with no ProgramData "
-            f"in the {SD_DAYS_TO_FETCH}-day fetch window."
-        )
-
-    total_changed = sum(len(v) for v in changed_by_station.values())
-    total_possible = len(mapped_station_ids) * len(date_list)
-    logger.info(
-        f"Schedule MD5 check: {len(server_md5s)} hashes checked, "
-        f"{total_changed} station/date combinations to fetch (of {total_possible} possible)."
-    )
-    send_epg_update(source.id, "parsing_programs", 38,
-                    message=f"MD5 check complete: {len(changed_by_station)} stations have schedule updates.")
-
-    # schedules_by_station: stationID -> list of {programID, airDateTime, duration, ...}
-    schedules_by_station = {sid: [] for sid in mapped_station_ids}
-    program_ids_needed = set()
-
-    if not changed_by_station:
-        logger.info("No schedule changes detected, skipping schedule and program downloads.")
-        _sd_post_refresh_tasks(mapped_epg_ids, {}, today)
-        if lightweight_sd_fetch:
-            msg = "No schedule updates needed; guide data is up to date."
-            source.last_message = msg
-            source.save(update_fields=['last_message'])
-            send_epg_update(source.id, "parsing_programs", 100, status="success", message=msg)
-            return
-        send_epg_update(source.id, "parsing_programs", 100, status="success",
-                        message="No schedule changes detected since last refresh. Guide data is up to date.")
-        source.status = EPGSource.STATUS_SUCCESS
-        source.last_message = "No schedule changes detected. Guide data is up to date."
-        source.updated_at = timezone.now()
-        source.save(update_fields=['status', 'last_message', 'updated_at'])
-        return
-
-    # Download only changed schedules, batched by 7-day windows per station
-    SCHEDULE_BATCH_DAYS = 7
-    changed_station_ids = list(changed_by_station.keys())
-    date_batches = [date_list[i:i + SCHEDULE_BATCH_DAYS] for i in range(0, len(date_list), SCHEDULE_BATCH_DAYS)]
-    new_md5_records = []
-    updated_md5_records = []
-    existing_md5_map = {
-        (r.station_id, r.date.strftime('%Y-%m-%d')): r
-        for r in SDScheduleMD5.objects.filter(epg_source=source, station_id__in=changed_station_ids)
-    }
-
-    for batch_idx, date_batch in enumerate(date_batches):
-        # Notify frontend at the start of each batch so progress updates immediately
-        pre_progress = 38 + int((batch_idx / len(date_batches)) * 22)
-        logger.info(f"Fetching schedule batch {batch_idx + 1} of {len(date_batches)}...")
-        send_epg_update(source.id, "parsing_programs", min(59, pre_progress),
-                        message=f"Fetching schedules: batch {batch_idx + 1} of {len(date_batches)}...")
-        # Yield to gevent hub so the WebSocket update is delivered before the blocking request
-        try:
-            import gevent; gevent.sleep(0)
-        except ImportError:
-            pass
-        # Only include stations that have changes in this date batch
-        request_body = [
-            {'stationID': sid, 'date': [d for d in date_batch if d in changed_by_station.get(sid, [])]}
-            for sid in changed_station_ids
-            if any(d in changed_by_station.get(sid, []) for d in date_batch)
-        ]
-        if not request_body:
-            continue
-        try:
-            sched_response = requests.post(
-                f"{SD_BASE_URL}/schedules",
-                json=request_body,
-                headers=_sd_headers(token),
-                timeout=120,
-            )
-            sched_response.raise_for_status()
-            sched_data = sched_response.json()
-
-            for station_sched in sched_data:
-                sid = station_sched.get('stationID')
-                if not sid:
-                    continue
-                programs = station_sched.get('programs', [])
-                schedules_by_station.setdefault(sid, []).extend(programs)
-                for prog in programs:
-                    pid = prog.get('programID')
-                    if pid:
-                        program_ids_needed.add(pid)
-
-                # Update MD5 cache for this station/date
-                meta = station_sched.get('metadata', {})
-                start_date = meta.get('startDate')
-                md5_val = meta.get('md5', '')
-                last_mod_str = meta.get('modified', '')
-                if start_date and md5_val:
-                    key = (sid, start_date)
-                    last_mod = parse_datetime(last_mod_str) if last_mod_str else timezone.now()
-                    if key in existing_md5_map:
-                        rec = existing_md5_map[key]
-                        rec.md5 = md5_val
-                        rec.last_modified = last_mod
-                        updated_md5_records.append(rec)
-                    else:
-                        import datetime as dt_module
-                        try:
-                            date_obj = dt_module.date.fromisoformat(start_date)
-                            new_md5_records.append(SDScheduleMD5(
-                                epg_source=source,
-                                station_id=sid,
-                                date=date_obj,
-                                md5=md5_val,
-                                last_modified=last_mod,
-                            ))
-                        except ValueError:
-                            pass
-
-            progress = 38 + int(((batch_idx + 1) / len(date_batches)) * 22)
-            send_epg_update(source.id, "parsing_programs", min(60, progress),
-                            message=f"Fetching changed schedules: batch {batch_idx + 1}/{len(date_batches)} ({len(program_ids_needed):,} programs found)")
-
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to fetch schedule batch {batch_idx + 1}: {e}")
-
-    # Persist updated MD5 cache
-    if new_md5_records:
-        SDScheduleMD5.objects.bulk_create(new_md5_records, ignore_conflicts=True)
-        logger.info(f"Cached {len(new_md5_records)} new schedule MD5s.")
-    if updated_md5_records:
-        SDScheduleMD5.objects.bulk_update(updated_md5_records, ['md5', 'last_modified'])
-        logger.info(f"Updated {len(updated_md5_records)} existing schedule MD5s.")
-
-    if not program_ids_needed:
-        msg = "No schedule data returned from Schedules Direct."
-        logger.warning(msg)
-        source.status = EPGSource.STATUS_ERROR
-        source.last_message = msg
-        source.save(update_fields=['status', 'last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return
-
-    # -------------------------------------------------------------------------
-    # Step 6: MD5-delta program metadata fetch
-    # The schedule response includes an MD5 hash per program airing.
-    # Compare against our cached program MD5s to only download programs
-    # whose metadata has changed since our last fetch.
-    # -------------------------------------------------------------------------
-
-    # Build map of programID -> md5 from schedule data
-    schedule_program_md5s = {}  # programID -> md5 from schedule
-    for sid, airings in schedules_by_station.items():
-        for airing in airings:
-            pid = airing.get('programID')
-            md5 = airing.get('md5')
-            if pid and md5:
-                schedule_program_md5s[pid] = md5
-
-    # Load cached program MD5s from SDProgramMD5 table, keyed by programID
-    cached_prog_md5s = {
-        r.program_id: r.md5
-        for r in SDProgramMD5.objects.filter(
-            epg_source=source,
-            program_id__in=program_ids_needed,
-        ).only('program_id', 'md5')
-    }
-
-    programs_with_data = set()
-    if program_ids_needed:
-        programs_with_data = set(
-            ProgramData.objects.filter(
-                epg__epg_source=source,
-                program_id__in=program_ids_needed,
-            ).values_list('program_id', flat=True).distinct()
-        )
-
-    programs_to_fetch = _sd_programs_needing_metadata(
-        program_ids_needed,
-        schedule_program_md5s,
-        cached_prog_md5s,
-        programs_with_data,
-    )
-
-    logger.info(
-        f"Program MD5 delta: {len(program_ids_needed)} programs in schedules, "
-        f"{len(programs_to_fetch)} need downloading ({len(program_ids_needed) - len(programs_to_fetch)} unchanged).")
-
-    program_metadata = {}
-    program_id_list = list(programs_to_fetch)
-    total_batches = max(1, (len(program_id_list) + SD_PROGRAM_BATCH_SIZE - 1) // SD_PROGRAM_BATCH_SIZE)
-
-    if program_id_list:
-        logger.info(f"Fetching metadata for {len(program_id_list)} programs in {total_batches} batch(es).")
-        for batch_idx in range(total_batches):
-            # Notify frontend at the start of each batch so progress updates immediately
-            pre_progress = 60 + int((batch_idx / total_batches) * 20)
-            logger.info(f"Fetching program metadata batch {batch_idx + 1} of {total_batches} ({batch_idx * SD_PROGRAM_BATCH_SIZE:,} of {len(program_id_list):,} programs)...")
-            send_epg_update(source.id, "parsing_programs", min(79, pre_progress),
-                            message=f"Fetching program data: batch {batch_idx + 1} of {total_batches} ({batch_idx * SD_PROGRAM_BATCH_SIZE:,} of {len(program_id_list):,} programs)")
-            # Yield to gevent hub so the WebSocket update is delivered before the blocking request
-            try:
-                import gevent; gevent.sleep(0)
-            except ImportError:
-                pass
-            batch = program_id_list[batch_idx * SD_PROGRAM_BATCH_SIZE:(batch_idx + 1) * SD_PROGRAM_BATCH_SIZE]
-            try:
-                prog_response = requests.post(
-                    f"{SD_BASE_URL}/programs",
-                    json=batch,
-                    headers=_sd_headers(token),
-                    timeout=120,
-                )
-                prog_response.raise_for_status()
-                prog_data = prog_response.json()
-                for prog in prog_data:
-                    pid = prog.get('programID')
-                    if pid:
-                        program_metadata[pid] = prog
-
-                progress = 60 + int(((batch_idx + 1) / total_batches) * 20)
-                send_epg_update(source.id, "parsing_programs", min(80, progress),
-                                message=f"Fetching program details: batch {batch_idx + 1}/{total_batches} ({len(program_metadata):,} programs loaded)")
-                logger.debug(f"Fetched program metadata batch {batch_idx + 1}/{total_batches}")
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Failed to fetch program metadata batch {batch_idx + 1}: {e}")
-    else:
-        logger.info("All program metadata unchanged - skipping program download.")
-        send_epg_update(source.id, "parsing_programs", 80, message="Program metadata unchanged - using cached data.")
-
-    gc.collect()
-
-    # -------------------------------------------------------------------------
-    # Step 7: Build ProgramData records and persist atomically
-    # -------------------------------------------------------------------------
-    logger.info("Building program records...")
-    send_epg_update(source.id, "parsing_programs", 80)
-
-    # Cache existing program data for unchanged programs BEFORE surgical delete.
-    # When a station/date schedule MD5 changes, ALL airings are re-fetched, but only
-    # programs with changed program MD5s get metadata re-downloaded. The surgical delete
-    # wipes ALL ProgramData for changed dates, so unchanged programs lose their titles.
-    # This cache preserves their data for rebuilding.
-    unchanged_pids = set()
-    for sid, airings in schedules_by_station.items():
-        if sid not in mapped_tvg_ids:
-            continue
-        for airing in airings:
-            pid = airing.get('programID')
-            if pid and pid not in program_metadata:
-                unchanged_pids.add(pid)
-
-    existing_program_cache = {}
-    if unchanged_pids:
-        for pd in ProgramData.objects.filter(
-            epg__epg_source=source,
-            program_id__in=unchanged_pids,
-        ).only('program_id', 'title', 'description', 'sub_title', 'custom_properties'):
-            if pd.program_id not in existing_program_cache:
-                existing_program_cache[pd.program_id] = {
-                    'title': pd.title,
-                    'description': pd.description,
-                    'sub_title': pd.sub_title,
-                    'custom_properties': pd.custom_properties,
-                }
-        logger.info(f"Cached {len(existing_program_cache)} existing program records for unchanged programs.")
-
-    all_programs_to_create = []
-    total_programs = 0
-    skipped_unmapped = 0
-
-    for sid, airings in schedules_by_station.items():
-        if sid not in mapped_tvg_ids:
-            skipped_unmapped += len(airings)
-            continue
-
-        epg_db_id = epg_id_map.get(sid)
-        if not epg_db_id:
-            continue
-
-        for airing in airings:
-            pid = airing.get('programID')
-            air_time = airing.get('airDateTime')
-            duration_secs = airing.get('duration', 0)
-
-            if not pid or not air_time or not duration_secs:
-                continue
-
-            try:
-                start_dt = parse_schedules_direct_time(air_time)
-                end_dt = start_dt + timedelta(seconds=int(duration_secs))
-            except Exception as e:
-                logger.debug(f"Could not parse air time '{air_time}': {e}")
-                continue
-
-            meta = program_metadata.get(pid, {})
-            cached_prog = existing_program_cache.get(pid) if not meta else None
-
-            if cached_prog:
-                # Unchanged program — reuse cached data from before surgical delete
-                title = cached_prog['title'] or 'No Title'
-                desc = cached_prog['description'] or ''
-                episode_title = cached_prog['sub_title'] or ''
-                custom_props = cached_prog['custom_properties'] or {}
-            else:
-                titles = meta.get('titles', [{}])
-                title = titles[0].get('title120', '') if titles else ''
-                if not title:
-                    title = meta.get('episodeTitle150', '') or 'No Title'
-            title = title[:255]
-
-            if not cached_prog:
-                descriptions = meta.get('descriptions', {})
-                desc = ''
-                for key in ('description1000', 'description255', 'description100'):
-                    candidates = descriptions.get(key, [])
-                    if candidates:
-                        desc = candidates[0].get('description', '')
-                        if desc:
-                            break
-
-                episode_title = meta.get('episodeTitle150', '')
-
-                # Build custom_properties following the same pattern as the XMLTV parser
-                custom_props = {}
-
-                # Season/Episode — search all metadata entries, not just [0]
-                metadata_block = meta.get('metadata', [])
-                gracenote_meta = {}
-                for md_entry in metadata_block:
-                    if 'Gracenote' in md_entry:
-                        gracenote_meta = md_entry['Gracenote']
-                        break
-                if not gracenote_meta:
-                    # Fall back to TVmaze if Gracenote is absent
-                    for md_entry in metadata_block:
-                        if 'TVmaze' in md_entry:
-                            gracenote_meta = md_entry['TVmaze']
-                            break
-                season = gracenote_meta.get('season')
-                episode = gracenote_meta.get('episode')
-                if season:
-                    custom_props['season'] = int(season)
-                if episode:
-                    custom_props['episode'] = int(episode)
-                if season and episode:
-                    custom_props['onscreen_episode'] = f"S{int(season)} E{int(episode)}"
-
-                # Content rating — store full array, pick display rating by lineup country
-                content_rating = meta.get('contentRating', [])
-                if content_rating:
-                    custom_props['content_ratings'] = content_rating
-                    selected = None
-                    if sd_lineup_country:
-                        for cr in content_rating:
-                            if cr.get('country', '') == sd_lineup_country:
-                                selected = cr
-                                break
-                    if not selected:
-                        # Fall back to USA, then first available
-                        for cr in content_rating:
-                            if cr.get('country', '') == 'USA':
-                                selected = cr
-                                break
-                    if not selected:
-                        selected = content_rating[0]
-                    custom_props['rating'] = selected.get('code', '')
-                    custom_props['rating_system'] = selected.get('body', '')
-
-                # Content advisory — content warnings
-                content_advisory = meta.get('contentAdvisory', [])
-                if content_advisory:
-                    custom_props['content_advisory'] = content_advisory
-
-                # Categories — combine entityType, showType, and genres
-                categories = []
-                entity_type = meta.get('entityType', '')
-                show_type = meta.get('showType', '')
-                if entity_type:
-                    categories.append(entity_type)
-                if show_type and show_type != entity_type:
-                    categories.append(show_type)
-                genres = meta.get('genres', [])
-                categories.extend(genres)
-                if categories:
-                    custom_props['categories'] = categories
-
-                # Cast — top-billed only. SD's 'role' field = job type (Actor/Guest Star);
-                # SD's 'characterName' = the character played. We store characterName under
-                # the key 'role' to match the XMLTV parser convention
-                #
-                # Guest stars are stored with guest=True so the XMLTV generator emits
-                # <actor role="Character" guest="yes"> per the XMLTV DTD standard.
-                cast = meta.get('cast', [])
-                crew = meta.get('crew', [])
-                credits = {}
-                if cast:
-                    # Sort by billingOrder and cap at top-billed actors
-                    sorted_cast = sorted(
-                        [p for p in cast if p.get('name')],
-                        key=lambda p: int(p.get('billingOrder', '999'))
-                    )
-                    # Separate regular cast from guest stars (SD 'role' = job type here)
-                    main_cast = [p for p in sorted_cast if p.get('role', '').lower() != 'guest star']
-                    guest_stars = [p for p in sorted_cast if p.get('role', '').lower() == 'guest star']
-                    # Use main cast if available, otherwise fall back to full sorted list
-                    primary = main_cast[:6] if main_cast else sorted_cast[:6]
-                    actors = [
-                        {
-                            'name': p.get('name', ''),
-                            **(({'role': p['characterName']}) if p.get('characterName') else {}),
-                        }
-                        for p in primary
-                    ]
-                    # Append notable guest stars with XMLTV guest="yes" marker (cap at 3)
-                    actors += [
-                        {
-                            'name': p.get('name', ''),
-                            **(({'role': p['characterName']}) if p.get('characterName') else {}),
-                            'guest': True,
-                        }
-                        for p in guest_stars[:3]
-                    ]
-                    if actors:
-                        credits['actor'] = actors
-                if crew:
-                    for member in crew:
-                        role = member.get('role', '').lower()
-                        name = member.get('name', '')
-                        if not name:
-                            continue
-                        if 'director' in role:
-                            credits.setdefault('director', []).append(name)
-                        elif 'writer' in role or 'screenwriter' in role:
-                            credits.setdefault('writer', []).append(name)
-                        elif 'producer' in role:
-                            credits.setdefault('producer', []).append(name)
-                if credits:
-                    custom_props['credits'] = credits
-
-                # Airing flags
-                if airing.get('liveTapeDelay') == 'Live':
-                    custom_props['live'] = True
-                if airing.get('new'):
-                    custom_props['new'] = True
-                else:
-                    custom_props['previously_shown'] = True
-                if airing.get('premiere'):
-                    custom_props['premiere'] = True
-
-                # Original air date — full date, not just year
-                original_air_date = meta.get('originalAirDate', '')
-                movie_year = meta.get('movie', {}).get('year', '')
-                if original_air_date:
-                    custom_props['date'] = original_air_date
-                elif movie_year:
-                    custom_props['date'] = str(movie_year)
-
-                # Country of production
-                country = meta.get('country', [])
-                if country:
-                    custom_props['country'] = country[0] if len(country) == 1 else ', '.join(country)
-
-                # Runtime — program duration without commercials (seconds → store for display)
-                runtime_secs = meta.get('duration') or meta.get('movie', {}).get('duration')
-                if runtime_secs:
-                    runtime_mins = int(runtime_secs) // 60
-                    custom_props['length'] = {'value': str(runtime_mins), 'units': 'minutes'}
-
-                # Movie quality ratings → star_ratings (matches XMLTV key)
-                movie_data = meta.get('movie', {})
-                quality_ratings = movie_data.get('qualityRating', [])
-                if quality_ratings:
-                    star_ratings = []
-                    for qr in quality_ratings:
-                        rating_str = qr.get('rating', '')
-                        max_rating = qr.get('maxRating', '')
-                        if rating_str and max_rating:
-                            star_ratings.append({
-                                'value': f"{rating_str}/{max_rating}",
-                                'system': qr.get('ratingsBody', ''),
-                            })
-                    if star_ratings:
-                        custom_props['star_ratings'] = star_ratings
-
-                # Sports event details
-                event_details = meta.get('eventDetails', {})
-                if event_details:
-                    custom_props['event_details'] = event_details
-
-            all_programs_to_create.append(ProgramData(
-                epg_id=epg_db_id,
-                start_time=start_dt,
-                end_time=end_dt,
-                title=title,
-                sub_title=episode_title or None,
-                description=desc or None,
-                tvg_id=sid,
-                program_id=pid,
-                custom_properties=custom_props or None,
-            ))
-            total_programs += 1
-
-    logger.info(f"Built {total_programs} program records "
-                f"({skipped_unmapped} skipped for unmapped stations).")
-
-    send_epg_update(source.id, "parsing_programs", 88)
-
-    # Build a map of epg_db_id -> list of (day_start_utc, day_end_utc) for each changed date.
-    # Only programs that fall within changed station/date pairs will be deleted and replaced;
-    # programs for unchanged stations or unchanged dates are left intact.
-    import datetime as dt_module
-    epg_changed_date_ranges = {}
-    for sid, changed_date_strs in changed_by_station.items():
-        epg_db_id = epg_id_map.get(sid)
-        if not epg_db_id or epg_db_id not in mapped_epg_ids:
-            continue
-        ranges = []
-        for ds in changed_date_strs:
-            d = dt_module.date.fromisoformat(ds)
-            day_start = datetime(d.year, d.month, d.day, tzinfo=dt_timezone.utc)
-            ranges.append((day_start, day_start + timedelta(days=1)))
-        if ranges:
-            epg_changed_date_ranges[epg_db_id] = ranges
-
-    # Atomic delete (surgical) + bulk insert
-    BATCH_SIZE = 1000
-    try:
-        with transaction.atomic():
-            with connection.cursor() as cursor:
-                cursor.execute("SET LOCAL statement_timeout = '10min'")
-            total_deleted = 0
-            for epg_db_id, day_ranges in epg_changed_date_ranges.items():
-                q = Q()
-                for day_start, day_end in day_ranges:
-                    q |= Q(start_time__gte=day_start, start_time__lt=day_end)
-                cnt = ProgramData.objects.filter(epg_id=epg_db_id).filter(q).delete()[0]
-                total_deleted += cnt
-            logger.debug(f"Deleted {total_deleted} changed SD programs across {len(epg_changed_date_ranges)} stations.")
-            for i in range(0, len(all_programs_to_create), BATCH_SIZE):
-                ProgramData.objects.bulk_create(all_programs_to_create[i:i + BATCH_SIZE])
-                progress = 88 + int(((i + BATCH_SIZE) / max(len(all_programs_to_create), 1)) * 10)
-                send_epg_update(source.id, "parsing_programs", min(98, progress))
-
-        logger.info(f"Committed {total_programs} Schedules Direct programs to database.")
-
-        # Upsert SDProgramMD5 records for programs we just downloaded
-        # This updates the cache so future fetches can skip unchanged programs
-        if schedule_program_md5s:
-            md5_records = [
-                SDProgramMD5(
-                    epg_source=source,
-                    program_id=pid,
-                    md5=md5,
-                )
-                for pid, md5 in schedule_program_md5s.items()
-                if pid in program_metadata  # Only cache programs that were actually downloaded
-            ]
-            if md5_records:
-                SDProgramMD5.objects.bulk_create(
-                    md5_records,
-                    update_conflicts=True,
-                    unique_fields=['epg_source', 'program_id'],
-                    update_fields=['md5'],
-                )
-                logger.info(f"Cached {len(md5_records)} program MD5s for future delta detection.")
-
-    except Exception as db_error:
-        msg = f"Database error persisting Schedules Direct programs: {db_error}"
-        logger.error(msg, exc_info=True)
-        source.status = EPGSource.STATUS_ERROR
-        source.last_message = msg
-        source.save(update_fields=['status', 'last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return
-    finally:
-        all_programs_to_create = None
-        gc.collect()
-
-    # -------------------------------------------------------------------------
-    # Step 8–9: Posters, logo auto-apply, and pruning
-    # -------------------------------------------------------------------------
-    _sd_post_refresh_tasks(mapped_epg_ids, program_metadata, today)
-
-    # -------------------------------------------------------------------------
-    # Done
-    # -------------------------------------------------------------------------
-    if single_epg_fetch:
-        epg_label = EPGData.objects.filter(id=epg_id_only).values_list('name', flat=True).first()
-        success_msg = (
-            f"Fetched {total_programs:,} programs for "
-            f"{epg_label or epg_id_only} from Schedules Direct."
-        )
-        source.last_message = success_msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="success", message=success_msg)
-        log_system_event(
-            event_type='epg_refresh',
-            source_name=source.name,
-            programs=total_programs,
-            channels=1,
-            skipped_programs=skipped_unmapped,
-        )
-        logger.info(f"Schedules Direct single-EPG fetch complete for source: {source.name}")
-        return
-
-    if mapped_guide_batch:
-        success_msg = (
-            f"Fetched {total_programs:,} programs for "
-            f"{len(mapped_tvg_ids)} mapped stations from Schedules Direct "
-            f"({skipped_unmapped:,} programs skipped for unmapped stations)."
-        )
-        source.last_message = success_msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="success", message=success_msg)
-        log_system_event(
-            event_type='epg_refresh',
-            source_name=source.name,
-            programs=total_programs,
-            channels=len(mapped_tvg_ids),
-            skipped_programs=skipped_unmapped,
-        )
-        logger.info(f"Schedules Direct mapped guide batch complete for source: {source.name}")
-        return
-
-    success_msg = (
-        f"Successfully fetched {total_programs:,} programs for "
-        f"{len(mapped_tvg_ids)} mapped stations from Schedules Direct "
-        f"({skipped_unmapped:,} programs skipped for unmapped stations)."
-    )
-    source.status = EPGSource.STATUS_SUCCESS
-    source.last_message = success_msg
-    source.updated_at = timezone.now()
-    source.save(update_fields=['status', 'last_message', 'updated_at'])
-    send_epg_update(source.id, "parsing_programs", 100, status="success", message=success_msg)
-    log_system_event(
-        event_type='epg_refresh',
-        source_name=source.name,
-        programs=total_programs,
-        channels=len(mapped_tvg_ids),
-        skipped_programs=skipped_unmapped,
-    )
-    logger.info(f"Schedules Direct fetch complete for source: {source.name}")
-
-
-# -------------------------------
-# Helper parse functions
-# -------------------------------
 def parse_xmltv_time(time_str):
     try:
         # Basic format validation
@@ -3977,20 +2551,6 @@ def parse_xmltv_time(time_str):
         raise
 
 
-def parse_schedules_direct_time(time_str):
-    try:
-        dt_obj = datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%SZ')
-        return timezone.make_aware(dt_obj, timezone=dt_timezone.utc)
-    except Exception as e:
-        logger.error(f"Error parsing Schedules Direct time '{time_str}': {e}", exc_info=True)
-        raise
-
-
-# Re-export from utils to preserve backward compatibility for any callers
-from apps.epg.utils import extract_season_episode_from_description, _ONSCREEN_RE  # noqa: F401
-
-
-# Helper function to extract custom properties - moved to a separate function to clean up the code
 def extract_custom_properties(prog):
     # Create a new dictionary for each call
     custom_props = {}
@@ -4005,9 +2565,12 @@ def extract_custom_properties(prog):
     if keywords:
         custom_props['keywords'] = keywords
 
-    # Extract episode numbers
+    # Extract episode numbers. original-air-date is applied after previously-shown
+    # so previously-shown@start remains the preferred source when both exist.
+    original_air_from_episode_num = None
     for ep_num in prog.findall('episode-num'):
-        system = ep_num.get('system', '')
+        # XMLTV DTD defaults missing system to onscreen
+        system = ep_num.get('system') or 'onscreen'
         if system == 'xmltv_ns' and ep_num.text:
             # Parse XMLTV episode-num format (season.episode.part)
             parts = ep_num.text.split('.')
@@ -4038,6 +2601,8 @@ def extract_custom_properties(prog):
         elif system == 'dd_progid' and ep_num.text:
             # Store the dd_progid format
             custom_props['dd_progid'] = ep_num.text.strip()
+        elif system == 'original-air-date' and ep_num.text:
+            original_air_from_episode_num = ep_num.text.strip()
         # Add support for other systems like thetvdb.com, themoviedb.org, imdb.com
         elif system in ['thetvdb.com', 'themoviedb.org', 'imdb.com'] and ep_num.text:
             custom_props[f'{system}_id'] = ep_num.text.strip()
@@ -4214,6 +2779,10 @@ def extract_custom_properties(prog):
         if prev_shown_data:
             custom_props['previously_shown_details'] = prev_shown_data
 
+    # Fall back to episode-num system="original-air-date" only when start is absent.
+    # XMLTV <date> is intentionally not used here (production/copyright date).
+    fill_original_air_date_if_missing(custom_props, original_air_from_episode_num)
+
     return custom_props
 
 
@@ -4240,9 +2809,9 @@ def detect_file_format(file_path=None, content=None):
 
     Returns:
         tuple: (format_type, is_compressed, file_extension)
-        format_type: 'gzip', 'zip', 'xml', or 'unknown'
+        format_type: 'gzip', 'zip', 'xz', 'xml', or 'unknown'
         is_compressed: Boolean indicating if the file is compressed
-        file_extension: Appropriate file extension including dot (.gz, .zip, .xml)
+        file_extension: Appropriate file extension including dot (.gz, .zip, .xz, .xml)
     """
     # Default return values
     format_type = 'unknown'
@@ -4262,6 +2831,10 @@ def detect_file_format(file_path=None, content=None):
         if len(header) >= 2 and header[:2] == b'PK':
             return 'zip', True, '.zip'
 
+        # Check for xz magic number (fd 37 7a 58 5a 00)
+        if len(header) >= 6 and header[:6] == b'\xfd7zXZ\x00':
+            return 'xz', True, '.xz'
+
         # Check for XML - either standard XML header or XMLTV-specific tag
         if len(header) >= 5 and (b'<?xml' in header or b'<tv>' in header):
             return 'xml', False, '.xml'
@@ -4278,6 +2851,8 @@ def detect_file_format(file_path=None, content=None):
             return 'gzip', True, '.gz'
         elif lower_path.endswith('.zip'):
             return 'zip', True, '.zip'
+        elif lower_path.endswith('.xz'):
+            return 'xz', True, '.xz'
         elif lower_path.endswith('.xml'):
             return 'xml', False, '.xml'
 
@@ -4290,28 +2865,13 @@ def detect_file_format(file_path=None, content=None):
                 return 'gzip', True, '.gz'
             elif mime_type == 'application/zip':
                 return 'zip', True, '.zip'
+            elif mime_type == 'application/x-xz':
+                return 'xz', True, '.xz'
             elif mime_type == 'application/xml' or mime_type == 'text/xml':
                 return 'xml', False, '.xml'
 
     # If we reach here, we couldn't reliably determine the format
     return format_type, is_compressed, file_extension
-
-
-def generate_dummy_epg(source):
-    """
-    DEPRECATED: This function is no longer used.
-
-    Dummy EPG programs are now generated on-demand when they are requested
-    (during XMLTV export or EPG grid display), rather than being pre-generated
-    and stored in the database.
-
-    See: apps/output/views.py - generate_custom_dummy_programs()
-
-    This function remains for backward compatibility but should not be called.
-    """
-    logger.warning(f"generate_dummy_epg() called for {source.name} but this function is deprecated. "
-                   f"Dummy EPG programs are now generated on-demand.")
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -4391,7 +2951,7 @@ def _programme_to_dict(elem, start_time, end_time):
 def build_programme_index(source_id):
     """
     Scan the XML file with raw binary I/O to build a {tvg_id: [byte_offset, ...]} map.
-    Persists the result to EPGSource.programme_index. Most XMLTV files group programmes
+    Persists the result to the EPGSourceIndex table. Most XMLTV files group programmes
     by channel, but some split a channel across multiple non-contiguous blocks, so we
     record block starts up to _OFFSET_CAP and mark only channels that exceed the cap
     as interleaved.
@@ -4400,13 +2960,6 @@ def build_programme_index(source_id):
         source = EPGSource.objects.get(id=source_id)
     except EPGSource.DoesNotExist:
         logger.error(f'[build_programme_index] EPGSource {source_id} not found')
-        return
-    except (IndexError, ValueError, TypeError) as e:
-        logger.error(
-            f'[build_programme_index] Database schema error loading EPGSource {source_id}: {e}. '
-            f'This usually indicates missing migrations or database corruption. '
-            f'Run: python manage.py migrate epg'
-        )
         return
 
     file_path = _resolve_source_file(source)
@@ -4487,22 +3040,38 @@ def build_programme_index(source_id):
         'channels': index,
         'interleaved_channels': sorted(interleaved_channels),
     }
-    EPGSource.objects.filter(id=source_id).update(programme_index=result)
+    EPGSourceIndex.objects.update_or_create(
+        source_id=source_id, defaults={'data': result}
+    )
 
 
 @shared_task
-def build_programme_index_task(source_id):
-    """Celery wrapper. Locks so refresh and preview don't both build the same source. Releases on finish rather than waiting out the TTL."""
-    from core.utils import RedisClient
-
-    redis_client = RedisClient.get_client()
-    lock_key = f'building_programme_index_{source_id}'
-    if not redis_client.set(lock_key, '1', nx=True, ex=300):
+def build_programme_index_task(source_id, _defer_retry=0):
+    """Celery wrapper. Serializes index builds with other EPG file access on this source."""
+    if not acquire_task_lock(_EPG_SOURCE_FILE_LOCK, source_id):
+        if _defer_retry >= _EPG_PARSE_DEFER_MAX:
+            logger.warning(
+                f"Giving up on programme index build for source {source_id} "
+                f"after {_defer_retry} deferrals: file busy"
+            )
+            return
+        logger.debug(
+            f"EPG source file busy, deferring programme index build for source {source_id}"
+        )
+        build_programme_index_task.apply_async(
+            args=[source_id],
+            kwargs={'_defer_retry': _defer_retry + 1},
+            countdown=_EPG_TVG_PARSE_DEFER_SECONDS,
+        )
         return
+
+    lock_renewer = TaskLockRenewer(_EPG_SOURCE_FILE_LOCK, source_id)
+    lock_renewer.start()
     try:
         build_programme_index(source_id)
     finally:
-        redis_client.delete(lock_key)
+        lock_renewer.stop()
+        release_task_lock(_EPG_SOURCE_FILE_LOCK, source_id)
 
 
 def find_current_program_for_tvg_id(epg_or_id):
@@ -4534,9 +3103,8 @@ def find_current_program_for_tvg_id(epg_or_id):
         return None
 
     now = timezone.now()
-    # Force a fresh read of the DB-backed index to avoid using stale related-object
-    # state when an EPG refresh invalidates/rebuilds the index concurrently.
-    source.refresh_from_db(fields=['programme_index'])
+    # The property reads the EPGSourceIndex table fresh on each access, so a
+    # concurrent refresh invalidating/rebuilding the index can't serve stale state.
     index = source.programme_index
 
     if index is not None:

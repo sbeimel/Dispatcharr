@@ -131,16 +131,8 @@ class RedisKeys:
         return f"live:channel:{channel_id}:output:{fmt}:buffer:chunk_timestamps"
 
     @staticmethod
-    def stream_cooldown(stream_id, profile_id):
-        """Global cooldown key for stream+profile combination.
-        Works across all channels. No channel_id dependency.
-        TTL = stream_cooldown_minutes * 60. Redis auto-deletes after expiry."""
-        return f"live:cooldown:stream:{stream_id}:profile:{profile_id}"
-
-
-    @staticmethod
-    def stream_cooldown(stream_id, profile_id):
-        """Global cooldown key for stream+profile combination.
-        Works across all channels. No channel_id dependency.
-        TTL = stream_cooldown_minutes * 60. Redis auto-deletes after expiry."""
-        return f"live:cooldown:stream:{stream_id}:profile:{profile_id}"
+    def stream_cooldown(channel_id, stream_id, profile_id):
+        """Key for stream/profile combination cooldown tracking.
+        When a stream+profile combination fails, this key is set with TTL
+        to prevent immediate retry of the same combination."""
+        return f"live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown"

@@ -24,13 +24,15 @@ class ConfigHelper:
 
     @staticmethod
     def client_wait_timeout():
-        """Get client wait timeout in seconds"""
-        return ConfigHelper.get('CLIENT_WAIT_TIMEOUT', 30)
+        """Get client wait timeout in seconds from database or default"""
+        settings = Config.get_proxy_settings()
+        return settings.get("client_wait_timeout", 30)
 
     @staticmethod
     def stream_timeout():
-        """Get stream timeout in seconds"""
-        return ConfigHelper.get('STREAM_TIMEOUT', 60)
+        """Get stream timeout in seconds from database or default"""
+        settings = Config.get_proxy_settings()
+        return settings.get("stream_timeout", 60)
 
     @staticmethod
     def channel_shutdown_delay():
@@ -39,9 +41,8 @@ class ConfigHelper:
 
     @staticmethod
     def initial_behind_chunks():
-        """Get number of chunks to start behind from database or default"""
-        settings = Config.get_proxy_settings()
-        return settings.get("initial_behind_chunks", 4)
+        """Get number of chunks to start behind"""
+        return ConfigHelper.get('INITIAL_BEHIND_CHUNKS', 4)
 
     @staticmethod
     def new_client_behind_seconds():
@@ -76,28 +77,47 @@ class ConfigHelper:
     def max_retries():
         """Get maximum retry attempts from database or default"""
         settings = Config.get_proxy_settings()
-        return settings.get("max_retries", 2)
+        return settings.get("max_retries", 3)
+
+    @staticmethod
+    def retry_window_seconds():
+        """Reset the retry counter after this many seconds without a failure."""
+        settings = Config.get_proxy_settings()
+        return settings.get("retry_window_seconds", 1800)
+
+    @staticmethod
+    def stable_connection_threshold():
+        """Seconds of stable playback before switch rotation state resets."""
+        settings = Config.get_proxy_settings()
+        return settings.get("stable_connection_threshold", 30)
 
     @staticmethod
     def max_stream_switches():
         """Get maximum number of stream switch attempts from database or default"""
         settings = Config.get_proxy_settings()
-        return settings.get("max_stream_switches", 200)
+        return settings.get("max_stream_switches", 10)
+
+    @staticmethod
+    def failover_rotation_cooldown():
+        """Seconds to wait after exhausting all streams before wrapping rotation."""
+        settings = Config.get_proxy_settings()
+        return settings.get("failover_rotation_cooldown", 60)
 
     @staticmethod
     def retry_wait_interval():
         """Get wait interval between connection retries in seconds"""
-        return ConfigHelper.get('RETRY_WAIT_INTERVAL', 0.5)  # Default to 0.5 second
+        settings = Config.get_proxy_settings()
+        return settings.get("retry_wait_interval", 0.5)
 
     @staticmethod
     def url_switch_timeout():
-        """Get URL switch timeout in seconds from database or default"""
+        """Get URL switch timeout in seconds (max time allowed for a stream switch operation)"""
         settings = Config.get_proxy_settings()
         return settings.get("url_switch_timeout", 20)
 
     @staticmethod
     def failover_grace_period():
-        """Get failover grace period in seconds from database or default"""
+        """Get extra time (in seconds) to allow for stream switching before disconnecting clients"""
         settings = Config.get_proxy_settings()
         return settings.get("failover_grace_period", 20)
 
@@ -113,36 +133,20 @@ class ConfigHelper:
 
     @staticmethod
     def channel_init_grace_period():
-        """Get channel initialization grace period in seconds"""
+        """Max seconds to wait for initial buffer fill during channel startup."""
         return Config.get_channel_init_grace_period()
 
     @staticmethod
+    def channel_client_wait_period():
+        """Seconds to keep a ready channel alive waiting for the first client to connect."""
+        return Config.get_channel_client_wait_period()
+
+    @staticmethod
     def chunk_timeout():
-        """Get chunk timeout in seconds from database or default"""
+        """
+        Get chunk timeout in seconds (used for both socket and HTTP read timeouts).
+        This controls how long we wait for each chunk before timing out.
+        Set this higher (e.g., 30s) for slow providers that may have intermittent delays.
+        """
         settings = Config.get_proxy_settings()
         return settings.get("chunk_timeout", 5)
-
-    @staticmethod
-    def health_check_interval():
-        """Get health check interval in seconds from database or default"""
-        settings = Config.get_proxy_settings()
-        return settings.get("health_check_interval", 5)
-
-    @staticmethod
-    def chunk_batch_size():
-        """Get chunk batch size from database or default"""
-        settings = Config.get_proxy_settings()
-        return settings.get("chunk_batch_size", 5)
-
-    @staticmethod
-    def stream_cooldown_enabled():
-        """Get whether stream cooldown is enabled from database or default"""
-        settings = Config.get_proxy_settings()
-        return settings.get("stream_cooldown_enabled", False)
-
-    @staticmethod
-    def stream_cooldown_seconds():
-        """Get stream cooldown duration in seconds (converted from minutes) from database or default"""
-        settings = Config.get_proxy_settings()
-        minutes = settings.get("stream_cooldown_minutes", 10)
-        return int(minutes) * 60

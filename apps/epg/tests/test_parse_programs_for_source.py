@@ -13,6 +13,8 @@ from apps.epg.tasks import (
     parse_programs_for_source,
     _flush_epg_program_staging_batch,
     _swap_staged_epg_programs,
+    _delete_orphaned_epg_programs,
+    _dispatch_late_mapped_epg_parses,
     _EPG_PARSE_BATCH_SIZE,
 )
 
@@ -236,3 +238,102 @@ class ParseProgramsForSourceTests(TestCase):
 
         self.assertFalse(result)
         self.assertEqual(ProgramData.objects.get(epg=self.mapped_epg).title, 'Keep Me')
+
+    def test_orphan_cleanup_respects_channels_mapped_during_bulk_parse(self):
+        late_start = self.base_time - timedelta(days=1)
+        ProgramData.objects.create(
+            epg=self.unmapped_epg,
+            start_time=late_start,
+            end_time=late_start + timedelta(hours=1),
+            title='Late Match Programme',
+            tvg_id=self.unmapped_epg.tvg_id,
+        )
+        Channel.objects.create(
+            channel_number=2,
+            name='Late Mapped Channel',
+            epg_data=self.unmapped_epg,
+        )
+
+        deleted = _delete_orphaned_epg_programs(self.source)
+
+        self.assertEqual(deleted, 0)
+        self.assertEqual(ProgramData.objects.filter(epg=self.unmapped_epg).count(), 1)
+
+    @patch('apps.epg.tasks.dispatch_program_refresh_for_epg_ids', return_value=1)
+    def test_late_mapped_dispatches_per_channel_parse(self, mock_dispatch):
+        Channel.objects.create(
+            channel_number=2,
+            name='Late Mapped Channel',
+            epg_data=self.unmapped_epg,
+        )
+        bulk_snapshot = {self.mapped_epg.id}
+
+        dispatched = _dispatch_late_mapped_epg_parses(self.source, bulk_snapshot)
+
+        self.assertEqual(dispatched, 1)
+        mock_dispatch.assert_called_once_with({self.unmapped_epg.id})
+
+    @patch('apps.epg.tasks.log_system_event')
+    @patch('apps.epg.tasks.send_epg_update')
+    def test_override_only_epg_is_treated_as_mapped(self, _send_update, _log_event):
+        """Hand-assigned EPG on ChannelOverride must import ProgramData for XMLTV."""
+        from apps.channels.models import ChannelOverride
+
+        override_epg = EPGData.objects.create(
+            epg_source=self.source,
+            tvg_id='override.channel',
+            name='Override Channel',
+        )
+        channel = Channel.objects.create(
+            channel_number=9,
+            name='Provider Name',
+            epg_data=None,
+            auto_created=True,
+        )
+        ChannelOverride.objects.create(channel=channel, epg_data=override_epg)
+
+        programmes = (
+            _programme_xml('mapped.channel', 'Mapped Show', self.start, self.stop)
+            + _programme_xml('override.channel', 'Override Show', self.start, self.stop)
+            + _programme_xml('unmapped.channel', 'Skipped Show', self.start, self.stop)
+        )
+        self._configure_source_file(programmes)
+
+        result = parse_programs_for_source(self.source)
+
+        self.assertTrue(result)
+        self.assertEqual(ProgramData.objects.filter(epg=override_epg).count(), 1)
+        self.assertEqual(
+            ProgramData.objects.get(epg=override_epg).title,
+            'Override Show',
+        )
+        self.assertFalse(ProgramData.objects.filter(epg=self.unmapped_epg).exists())
+
+    def test_orphan_cleanup_keeps_override_mapped_programs(self):
+        from apps.channels.models import ChannelOverride
+
+        override_epg = EPGData.objects.create(
+            epg_source=self.source,
+            tvg_id='override.orphan',
+            name='Override Orphan Check',
+        )
+        channel = Channel.objects.create(
+            channel_number=9,
+            name='Provider Name',
+            epg_data=None,
+            auto_created=True,
+        )
+        ChannelOverride.objects.create(channel=channel, epg_data=override_epg)
+        late_start = self.base_time - timedelta(days=1)
+        ProgramData.objects.create(
+            epg=override_epg,
+            start_time=late_start,
+            end_time=late_start + timedelta(hours=1),
+            title='Override Programme',
+            tvg_id=override_epg.tvg_id,
+        )
+
+        deleted = _delete_orphaned_epg_programs(self.source)
+
+        self.assertEqual(deleted, 0)
+        self.assertEqual(ProgramData.objects.filter(epg=override_epg).count(), 1)

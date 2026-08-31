@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from 'react';
 import useUserAgentsStore from '../../store/userAgents';
 import useServerGroupsStore from '../../store/serverGroups';
+import usePlaylistsStore from '../../store/playlists';
 import M3UProfiles from './M3UProfiles';
 import {
   Box,
@@ -31,6 +32,8 @@ import { showNotification } from '../../utils/notificationUtils.js';
 import { addEPG } from '../../utils/forms/DummyEpgUtils.js';
 import {
   addPlaylist,
+  expDateFromPlaylist,
+  expDateKey,
   getPlaylist,
   prepareSubmitValues,
   updatePlaylist,
@@ -59,6 +62,16 @@ const M3U = ({
   const [serverGroupsManagerOpen, setServerGroupsManagerOpen] = useState(false);
   const [serverGroupsCreateOnOpen, setServerGroupsCreateOnOpen] =
     useState(false);
+
+  // Keep expiration in sync when the default profile is edited (store refreshes).
+  // Do not rebind the whole form to the live playlist or unsaved edits are wiped.
+  const accountId = playlist?.id ?? m3uAccount?.id;
+  const storeExpDate = usePlaylistsStore((s) => {
+    if (!accountId) return undefined;
+    const stored = s.playlists.find((p) => p.id === accountId);
+    if (!stored) return undefined;
+    return stored.exp_date ?? null;
+  });
 
   const form = useForm({
     mode: 'uncontrolled',
@@ -118,7 +131,7 @@ const M3U = ({
         proxy: m3uAccount.proxy || '',
         proxy_for_api: m3uAccount.proxy_for_api || false,
       });
-      setExpDate(m3uAccount.exp_date ? new Date(m3uAccount.exp_date) : null);
+      setExpDate(expDateFromPlaylist(m3uAccount.exp_date));
 
       // Determine schedule type from existing data
       setScheduleType(
@@ -132,7 +145,16 @@ const M3U = ({
       setScheduleType('interval');
       setExpDate(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [m3uAccount]);
+
+  useEffect(() => {
+    if (storeExpDate === undefined) return;
+    const next = expDateFromPlaylist(storeExpDate);
+    setExpDate((prev) =>
+      expDateKey(prev) === expDateKey(next) ? prev : next
+    );
+  }, [storeExpDate]);
 
   const handleNewPlaylist = async (newPlaylist, values, create_epg) => {
     if (create_epg) {
@@ -401,24 +423,6 @@ const M3U = ({
                   </>
                 }
               />
-              <NumberInput
-                min={0}
-                max={365}
-                label="Stale Stream Retention (days)"
-                description="Streams not seen for this many days will be removed"
-                {...form.getInputProps('stale_stream_days')}
-              />
-
-              {form.getValues().account_type == 'XC' && (
-                <NumberInput
-                  min={0}
-                  max={999}
-                  label="VOD Priority"
-                  description="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content."
-                  {...form.getInputProps('priority')}
-                  key={form.key('priority')}
-                />
-              )}
 
               <TextInput
                 label="HTTP Proxy"
@@ -437,6 +441,14 @@ const M3U = ({
 
               {form.getValues().account_type == 'XC' && (
                 <Box>
+                  <NumberInput
+                    min={0}
+                    max={999}
+                    label="VOD Priority"
+                    description="Priority for VOD provider selection (higher numbers = higher priority). Used when multiple providers offer the same content."
+                    {...form.getInputProps('priority')}
+                    key={form.key('priority')}
+                  />
 
                   <Group justify="space-between">
                     <Box>Enable VOD Scanning</Box>
@@ -544,6 +556,7 @@ const M3U = ({
             playlist={playlist}
             isOpen={profileModalOpen}
             onClose={() => setProfileModalOpen(false)}
+            pendingExpDate={expDate}
           />
           <M3UGroupFilter
             isOpen={groupFilterModalOpen}

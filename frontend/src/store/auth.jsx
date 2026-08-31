@@ -28,7 +28,7 @@ const useAuthStore = create((set, get) => ({
   isAuthenticated: false,
   isInitialized: false,
   isInitializing: false,
-  needsSuperuser: false,
+  isCheckingAuth: true,
   user: {
     username: '',
     email: '',
@@ -139,6 +139,7 @@ const useAuthStore = create((set, get) => ({
         isAuthenticated: true,
         isInitialized: true,
         isInitializing: false,
+        isCheckingAuth: false,
       });
 
       // Note: Logos are loaded after the Channels page tables finish loading
@@ -153,11 +154,18 @@ const useAuthStore = create((set, get) => ({
   accessToken: localStorage.getItem('accessToken') || null,
   refreshToken: localStorage.getItem('refreshToken') || null,
   tokenExpiration: localStorage.getItem('tokenExpiration') || null,
-  superuserExists: true,
+  superuserExists: null,
+  setupAllowed: null,
+  setupClientIp: '',
 
   setIsAuthenticated: (isAuthenticated) => set({ isAuthenticated }),
 
-  setSuperuserExists: (superuserExists) => set({ superuserExists }),
+  setSuperuserStatus: (status) =>
+    set({
+      superuserExists: status?.superuser_exists ?? true,
+      setupAllowed: status?.setup_allowed ?? null,
+      setupClientIp: status?.client_ip ?? '',
+    }),
 
   getToken: async () => {
     const tokenExpiration = localStorage.getItem('tokenExpiration');
@@ -232,6 +240,7 @@ const useAuthStore = create((set, get) => ({
       isAuthenticated: false,
       isInitialized: false,
       isInitializing: false,
+      isCheckingAuth: false,
       user: null,
     });
     localStorage.removeItem('accessToken');

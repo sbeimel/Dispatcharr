@@ -15,7 +15,7 @@ import useChannelsTableStore from './store/channelsTable';
 import useStreamsTableStore from './store/streamsTable';
 import useUsersStore from './store/users';
 import useConnectStore from './store/connect';
-import Limiter from './utils';
+import Limiter, { formatApiError } from './utils';
 
 // If needed, you can set a base host or keep it empty if relative requests
 const host = import.meta.env.DEV
@@ -23,22 +23,7 @@ const host = import.meta.env.DEV
   : '';
 
 const errorNotification = (message, error) => {
-  let errorMessage = '';
-
-  if (error.status) {
-    try {
-      // Try to format the error body if it's an object
-      if (typeof error.body === 'object') {
-        errorMessage = JSON.stringify(error.body, null, 2);
-      } else {
-        errorMessage = `${error.status} - ${error.body}`;
-      }
-    } catch (e) {
-      errorMessage = `${error.status} - ${String(error.body)}`;
-    }
-  } else {
-    errorMessage = error.message || 'Unknown error';
-  }
+  const errorMessage = formatApiError(error);
 
   notifications.show({
     title: 'Error',
@@ -100,6 +85,8 @@ const request = async (url, options = {}) => {
 
 export default class API {
   static lastQueryParams = new URLSearchParams();
+  // Shared by queryChannels/requeryChannels to drop stale, out-of-order responses.
+  static channelsRequestVersion = 0;
 
   /**
    * A static method so we can do:  await API.getAuthToken()
@@ -172,6 +159,10 @@ export default class API {
 
       return response;
     } catch (e) {
+      // Setup IP policy blocks are explained inline on SuperuserForm.
+      if (e?.status === 403 && e?.body?.setup_allowed === false) {
+        throw e;
+      }
       errorNotification('Failed to create superuser', e);
     }
   }
@@ -345,6 +336,7 @@ export default class API {
   }
 
   static async queryChannels(params) {
+    const requestVersion = ++API.channelsRequestVersion;
     try {
       API.lastQueryParams = params;
 
@@ -352,10 +344,16 @@ export default class API {
         `${host}/api/channels/channels/?${params.toString()}`
       );
 
-      useChannelsTableStore.getState().queryChannels(response, params);
+      if (requestVersion === API.channelsRequestVersion) {
+        useChannelsTableStore.getState().queryChannels(response, params);
+      }
 
       return response;
     } catch (e) {
+      if (requestVersion !== API.channelsRequestVersion) {
+        return;
+      }
+
       // Handle invalid page error by resetting to page 1 and retrying
       if (e.body?.detail === 'Invalid page.') {
         const currentPagination = useChannelsTableStore.getState().pagination;
@@ -376,7 +374,9 @@ export default class API {
             `${host}/api/channels/channels/?${newParams.toString()}`
           );
 
-          useChannelsTableStore.getState().queryChannels(response, newParams);
+          if (requestVersion === API.channelsRequestVersion) {
+            useChannelsTableStore.getState().queryChannels(response, newParams);
+          }
           return response;
         }
       }
@@ -424,6 +424,7 @@ export default class API {
   }
 
   static async requeryChannels() {
+    const requestVersion = ++API.channelsRequestVersion;
     try {
       const [response, ids] = await Promise.all([
         request(
@@ -432,13 +433,19 @@ export default class API {
         API.getAllChannelIds(API.lastQueryParams),
       ]);
 
-      useChannelsTableStore
-        .getState()
-        .queryChannels(response, API.lastQueryParams);
-      useChannelsTableStore.getState().setAllQueryIds(ids);
+      if (requestVersion === API.channelsRequestVersion) {
+        useChannelsTableStore
+          .getState()
+          .queryChannels(response, API.lastQueryParams);
+        useChannelsTableStore.getState().setAllQueryIds(ids);
+      }
 
       return response;
     } catch (e) {
+      if (requestVersion !== API.channelsRequestVersion) {
+        return;
+      }
+
       // Handle invalid page error by resetting to page 1 and retrying
       if (e.body?.detail === 'Invalid page.') {
         const currentPagination = useChannelsTableStore.getState().pagination;
@@ -461,8 +468,10 @@ export default class API {
             API.getAllChannelIds(newParams),
           ]);
 
-          useChannelsTableStore.getState().queryChannels(response, newParams);
-          useChannelsTableStore.getState().setAllQueryIds(ids);
+          if (requestVersion === API.channelsRequestVersion) {
+            useChannelsTableStore.getState().queryChannels(response, newParams);
+            useChannelsTableStore.getState().setAllQueryIds(ids);
+          }
 
           return response;
         }
@@ -625,11 +634,19 @@ export default class API {
     }
   }
 
-  static async deleteChannel(id) {
+  static async deleteChannel(id, { stopStream = false } = {}) {
     try {
-      await request(`${host}/api/channels/channels/${id}/`, {
-        method: 'DELETE',
-      });
+      const params = new URLSearchParams();
+      if (stopStream) {
+        params.set('stop_stream', 'true');
+      }
+      const query = params.toString();
+      await request(
+        `${host}/api/channels/channels/${id}/${query ? `?${query}` : ''}`,
+        {
+          method: 'DELETE',
+        }
+      );
 
       useChannelsStore.getState().removeChannels([id]);
       await API.requeryStreams();
@@ -639,11 +656,11 @@ export default class API {
   }
 
   // @TODO: the bulk delete endpoint is currently broken
-  static async deleteChannels(channel_ids) {
+  static async deleteChannels(channel_ids, { stopStream = false } = {}) {
     try {
       await request(`${host}/api/channels/channels/bulk-delete/`, {
         method: 'DELETE',
-        body: { channel_ids },
+        body: { channel_ids, stop_stream: Boolean(stopStream) },
       });
 
       useChannelsStore.getState().removeChannels(channel_ids);
@@ -2483,6 +2500,56 @@ export default class API {
     }
   }
 
+  static async getTimeshiftStats() {
+    try {
+      const response = await request(`${host}/proxy/catchup/stats/`);
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve catch-up stats', e);
+    }
+  }
+
+  static async getAllConnectionStats() {
+    try {
+      const response = await request(`${host}/proxy/stats/`);
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve connection stats', e);
+      throw e;
+    }
+  }
+
+  static async getCatchupPrograms(sessions) {
+    try {
+      const response = await request(`${host}/proxy/catchup/programs/`, {
+        method: 'POST',
+        body: { sessions },
+      });
+
+      return response;
+    } catch (e) {
+      console.error('Failed to retrieve catch-up programmes', e);
+      return { sessions: [] };
+    }
+  }
+
+  static async stopTimeshiftSession(sessionId) {
+    try {
+      const response = await request(`${host}/proxy/catchup/stop_client/`, {
+        method: 'POST',
+        body: {
+          session_id: sessionId,
+        },
+      });
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to stop catch-up session', e);
+    }
+  }
+
   static async stopVODClient(clientId) {
     try {
       const response = await request(`${host}/proxy/vod/stop_client/`, {
@@ -2636,7 +2703,7 @@ export default class API {
     }
   }
 
-  static async uploadLogo(file, name = null) {
+  static async uploadLogo(file, name = null, overwrite = false) {
     try {
       const formData = new FormData();
       formData.append('file', file);
@@ -2644,6 +2711,10 @@ export default class API {
       // Add custom name if provided
       if (name && name.trim()) {
         formData.append('name', name.trim());
+      }
+
+      if (overwrite) {
+        formData.append('overwrite', 'true');
       }
 
       // Add timeout handling for file uploads
@@ -2686,7 +2757,11 @@ export default class API {
         timeoutError.code = 'NETWORK_ERROR';
         throw timeoutError;
       }
-      errorNotification('Failed to upload logo', e);
+      // Skip the generic toast for an already-exists conflict — the caller
+      // handles that case with its own overwrite-confirmation prompt.
+      if (e.status !== 409 || !e.body?.already_exists) {
+        errorNotification('Failed to upload logo', e);
+      }
       throw e;
     }
   }
@@ -3191,11 +3266,12 @@ export default class API {
     }
   }
 
-  static async deleteSeriesRule(tvgId, title) {
+  static async deleteSeriesRule(tvgId, title, epgSourceId) {
     try {
       const params = new URLSearchParams();
       if (tvgId) params.set('tvg_id', tvgId);
       if (title) params.set('title', title);
+      if (epgSourceId) params.set('epg_source_id', String(epgSourceId));
       await request(`${host}/api/channels/series-rules/?${params}`, {
         method: 'DELETE',
       });
@@ -3247,13 +3323,19 @@ export default class API {
     tvg_id,
     title = null,
     scope = 'title',
+    epg_source_id,
   }) {
     try {
       const resp = await request(
         `${host}/api/channels/series-rules/bulk-remove/`,
         {
           method: 'POST',
-          body: { tvg_id, title, scope },
+          body: {
+            tvg_id,
+            title,
+            scope,
+            ...(epg_source_id ? { epg_source_id } : {}),
+          },
         }
       );
       notifications.show({ title: `Removed ${resp.removed || 0} scheduled` });

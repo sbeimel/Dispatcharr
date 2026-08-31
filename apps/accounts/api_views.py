@@ -6,13 +6,18 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view, permission_classes, action
 from rest_framework.response import Response
 from rest_framework import viewsets, status, serializers
-from rest_framework.throttling import AnonRateThrottle
 from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serializer
 from drf_spectacular.types import OpenApiTypes
 import json
 import secrets
 from .permissions import IsAdmin, Authenticated
-from dispatcharr.utils import network_access_allowed
+from .throttling import LoginRateThrottle
+from dispatcharr.utils import (
+    SETUP_ALLOWED_IP_ENV,
+    get_client_ip,
+    network_access_allowed,
+    setup_ip_allowed,
+)
 
 from .models import User
 from .serializers import UserSerializer, GroupSerializer, PermissionSerializer
@@ -21,8 +26,31 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 logger = logging.getLogger(__name__)
 
 
-class LoginRateThrottle(AnonRateThrottle):
-    scope = "login"
+def _setup_status_payload(request, *, superuser_exists):
+    """Build initialize-superuser JSON including client IP / setup gate info."""
+    payload = {"superuser_exists": superuser_exists}
+    if superuser_exists:
+        return payload
+
+    allowed, client_ip = setup_ip_allowed(request)
+    payload["client_ip"] = client_ip
+    payload["setup_allowed"] = allowed
+    return payload
+
+
+def _setup_forbidden_response(client_ip):
+    return JsonResponse(
+        {
+            "error": (
+                "Web setup is limited to local networks by default. "
+                f"Set {SETUP_ALLOWED_IP_ENV} to your IP to allow setup from this "
+                "network, or create the account with: python manage.py createsuperuser"
+            ),
+            "client_ip": client_ip,
+            "setup_allowed": False,
+        },
+        status=403,
+    )
 
 
 class TokenObtainPairView(TokenObtainPairView):
@@ -33,7 +61,7 @@ class TokenObtainPairView(TokenObtainPairView):
             # Log blocked login attempt due to network restrictions
             from core.utils import log_system_event
             username = request.data.get("username", 'unknown')
-            client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+            client_ip = get_client_ip(request) or "unknown"
             user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
             logger.info(f"Login blocked by network policy: user={username} ip={client_ip} ua={user_agent}")
             log_system_event(
@@ -50,7 +78,7 @@ class TokenObtainPairView(TokenObtainPairView):
 
         # Log login attempt
         from core.utils import log_system_event
-        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        client_ip = get_client_ip(request) or "unknown"
         user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
 
         try:
@@ -108,7 +136,7 @@ class TokenRefreshView(TokenRefreshView):
         if not network_access_allowed(request, "UI"):
             # Log blocked token refresh attempt due to network restrictions
             from core.utils import log_system_event
-            client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+            client_ip = get_client_ip(request) or "unknown"
             user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
             logger.info(f"Token refresh blocked by network policy: ip={client_ip} ua={user_agent}")
             log_system_event(
@@ -123,13 +151,21 @@ class TokenRefreshView(TokenRefreshView):
         return super().post(request, *args, **kwargs)
 
 
-@csrf_exempt  # In production, consider CSRF protection strategies or ensure this endpoint is only accessible when no superuser exists.
+@csrf_exempt  # Bootstrap only; POST is IP-gated and closes once an admin exists.
 def initialize_superuser(request):
     # If an admin-level user already exists, the system is configured
     if User.objects.filter(user_level__gte=10).exists():
-        return JsonResponse({"superuser_exists": True})
+        return JsonResponse(_setup_status_payload(request, superuser_exists=True))
 
     if request.method == "POST":
+        allowed, client_ip = setup_ip_allowed(request)
+        if not allowed:
+            logger.info(
+                "initialize-superuser POST blocked by setup IP policy: ip=%s",
+                client_ip,
+            )
+            return _setup_forbidden_response(client_ip)
+
         try:
             data = json.loads(request.body)
             username = data.get("username")
@@ -146,8 +182,9 @@ def initialize_superuser(request):
             return JsonResponse({"superuser_exists": True})
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
-    # For GET requests, indicate no superuser exists
-    return JsonResponse({"superuser_exists": False})
+
+    # GET: no admin yet. Include client IP so the UI can help remote / VPS setups.
+    return JsonResponse(_setup_status_payload(request, superuser_exists=False))
 
 
 # 🔹 1) Authentication APIs
@@ -186,7 +223,7 @@ class AuthViewSet(viewsets.ViewSet):
         # Log logout event before actually logging out
         from core.utils import log_system_event
         username = request.user.username if request.user and request.user.is_authenticated else 'unknown'
-        client_ip = request.META.get('REMOTE_ADDR', 'unknown')
+        client_ip = get_client_ip(request) or "unknown"
         user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
 
         log_system_event(
@@ -252,8 +289,16 @@ class UserViewSet(viewsets.ModelViewSet):
                 request.data.pop(key, None)
 
             # Strip admin-managed keys from custom_properties so users cannot
-            # set their own XC credentials or network rules via this endpoint.
-            ADMIN_ONLY_PROPS = {"xc_password", "allowed_networks"}
+            # set their own XC credentials, network rules, or catchup/VOD
+            # access via this endpoint.
+            ADMIN_ONLY_PROPS = {
+                "xc_password",
+                "allowed_networks",
+                "catchup_enabled",
+                "vod_movies_enabled",
+                "vod_series_enabled",
+                "dvr_access",
+            }
             cp = request.data.get("custom_properties")
             if isinstance(cp, dict):
                 for key in ADMIN_ONLY_PROPS:
@@ -267,13 +312,18 @@ class UserViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-# 🔹 3) Group Management APIs
+# 🔹 3) Group Management APIs (Django auth.Group; unused by the React UI)
 class GroupViewSet(viewsets.ModelViewSet):
-    """Handles CRUD operations for Groups"""
+    """CRUD for Django auth groups and their permissions.
+
+    Dispatcharr authorization uses ``user_level``, not these groups. The
+    endpoint is kept for compatibility but restricted to admins so
+    non-admins cannot invent auth groups or attach Django permissions.
+    """
 
     queryset = Group.objects.all()
     serializer_class = GroupSerializer
-    permission_classes = [Authenticated]
+    permission_classes = [IsAdmin]
 
     @extend_schema(
         description="Retrieve a list of groups",
@@ -358,9 +408,9 @@ class APIKeyViewSet(viewsets.ViewSet):
     responses={200: PermissionSerializer(many=True)},
 )
 @api_view(["GET"])
-@permission_classes([Authenticated])
+@permission_classes([IsAdmin])
 def list_permissions(request):
-    """Returns a list of all available permissions"""
+    """Returns a list of all available Django permissions (admin only)."""
     permissions = Permission.objects.all()
     serializer = PermissionSerializer(permissions, many=True)
     return Response(serializer.data)

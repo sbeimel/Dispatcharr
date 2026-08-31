@@ -16,6 +16,20 @@ import {
   savePlayerPrefs,
 } from '../utils/components/FloatingVideoUtils.js';
 
+// Native <video src> cannot send Authorization headers. Append ?token= at playback
+// time (not when building the URL in cards/modals) so the JWT is fresh. hls.js
+// paths authenticate via xhrSetup instead and do not need this helper.
+const withRecordingAuthToken = (url) => {
+  if (!url || typeof url !== 'string') return url;
+  if (!url.includes('/api/channels/recordings/')) return url;
+  const token = useAuthStore.getState().accessToken;
+  if (!token) return url;
+  const [base, query = ''] = url.split('?');
+  const params = new URLSearchParams(query);
+  params.set('token', token);
+  return `${base}?${params.toString()}`;
+};
+
 const ResizeHandles = ({ startResize }) => {
   const HANDLE_SIZE = 18;
   const HANDLE_OFFSET = 0;
@@ -132,6 +146,8 @@ export default function FloatingVideo() {
   // Ref kept in sync with videoSize state for use inside event handlers
   // where closures over state would be stale.
   const videoSizeRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimeoutRef = useRef(null);
 
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
@@ -166,6 +182,9 @@ export default function FloatingVideo() {
   const VISIBLE_MARGIN = 48; // keep part of the window visible when dragging
   const HEADER_HEIGHT = 38; // height of the close button header area
   const ERROR_HEIGHT = 45; // approximate height of error message area when displayed
+  const MAX_LIVE_RECONNECT_ATTEMPTS = 5;
+  const LIVE_RECONNECT_BASE_DELAY_MS = 1000;
+  const LIVE_RECONNECT_MAX_DELAY_MS = 10000;
 
   // Safely destroy the mpegts player to prevent errors
   const safeDestroyPlayer = () => {
@@ -207,6 +226,11 @@ export default function FloatingVideo() {
     if (overlayTimeoutRef.current) {
       clearTimeout(overlayTimeoutRef.current);
       overlayTimeoutRef.current = null;
+    }
+
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
   };
 
@@ -333,72 +357,75 @@ export default function FloatingVideo() {
     let hls = null;
 
     if (isHls && Hls.isSupported()) {
-      hls = new Hls({
-        // Open at the very beginning of the recording rather than the live
-        // edge.  Without this, an in-progress recording would start at "now"
-        // and hide everything already recorded.  hls.js applies this AFTER
-        // MEDIA_ATTACHED, so the listener-driven `seekToStart()` above is
-        // also kept as a safety net for the Safari native-HLS path and for
-        // edge cases where this initial-position logic loses to the user's
-        // first interaction.
-        startPosition: 0,
-        // Allow seeking back to the start of the recording, regardless of
-        // current playhead position.  Recordings can be hours long and the
-        // user may want to scrub anywhere; we explicitly disable buffer
-        // eviction by setting a very large back-buffer length.
-        backBufferLength: 90 * 60, // 90 minutes
-        maxBufferLength: 60,
-        maxMaxBufferLength: 600,
-        // For an in-progress recording, hls.js refreshes the playlist on
-        // its target-duration cadence; let it follow the live edge but keep
-        // the full DVR window seekable.
-        liveSyncDurationCount: 3,
-        liveMaxLatencyDurationCount: 10,
-        enableWorker: true,
-        lowLatencyMode: false,
-        // Inject the JWT into every playlist + segment XHR.  Read the token
-        // from the auth store at request time rather than capturing the
-        // closure value at hls.js init, so a refreshed access token mid-
-        // playback is picked up on the next segment fetch.
-        xhrSetup: (xhr) => {
-          const token = useAuthStore.getState().accessToken;
-          if (token) {
-            xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-          }
-        },
-      });
-      hls.on(Hls.Events.ERROR, (_evt, data) => {
-        if (data.fatal) {
-          // eslint-disable-next-line no-console
-          console.error('HLS fatal error:', data.type, data.details);
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            try {
-              hls.startLoad();
-            } catch {
-              // ignore
+      try {
+        hls = new Hls({
+          // Open at the very beginning of the recording rather than the live
+          // edge.  Without this, an in-progress recording would start at "now"
+          // and hide everything already recorded.  hls.js applies this AFTER
+          // MEDIA_ATTACHED, so the listener-driven `seekToStart()` above is
+          // also kept as a safety net for the Safari native-HLS path and for
+          // edge cases where this initial-position logic loses to the user's
+          // first interaction.
+          startPosition: 0,
+          // Allow seeking back to the start of the recording, regardless of
+          // current playhead position.  Recordings can be hours long and the
+          // user may want to scrub anywhere; we explicitly disable buffer
+          // eviction by setting a very large back-buffer length.
+          backBufferLength: 90 * 60, // 90 minutes
+          maxBufferLength: 60,
+          maxMaxBufferLength: 600,
+          // Leave liveMaxLatencyDurationCount at the hls.js default (Infinity).
+          // A finite value forces the playhead to the live edge during playback.
+          enableWorker: true,
+          lowLatencyMode: false,
+          // Inject the JWT into every playlist + segment XHR.  Read the token
+          // from the auth store at request time rather than capturing the
+          // closure value at hls.js init, so a refreshed access token mid-
+          // playback is picked up on the next segment fetch.
+          xhrSetup: (xhr) => {
+            const token = useAuthStore.getState().accessToken;
+            if (token) {
+              xhr.setRequestHeader('Authorization', `Bearer ${token}`);
             }
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            try {
-              hls.recoverMediaError();
-            } catch {
-              // ignore
+          },
+        });
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (data.fatal) {
+            // eslint-disable-next-line no-console
+            console.error('HLS fatal error:', data.type, data.details);
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              try {
+                hls.startLoad();
+              } catch {
+                // ignore
+              }
+            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              try {
+                hls.recoverMediaError();
+              } catch {
+                // ignore
+              }
+            } else {
+              setLoadError(`HLS playback error: ${data.details || data.type}`);
             }
-          } else {
-            setLoadError(`HLS playback error: ${data.details || data.type}`);
           }
-        }
-      });
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        hls.loadSource(streamUrl);
-      });
+        });
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          hls.loadSource(streamUrl);
+        });
+      } catch (error) {
+        setIsLoading(false);
+        setLoadError(`HLS initialization error: ${error.message}`);
+        return;
+      }
     } else if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
       // Safari path: native HLS support, including seekable DVR windows.
-      video.src = streamUrl;
+      video.src = withRecordingAuthToken(streamUrl);
       video.load();
     } else {
       // Plain progressive file (MKV/MP4): native HTML5.
-      video.src = streamUrl;
+      video.src = withRecordingAuthToken(streamUrl);
       video.load();
     }
 
@@ -486,40 +513,78 @@ export default function FloatingVideo() {
         videoRef.current.volume = savedVolume;
       if (typeof savedMuted === 'boolean') videoRef.current.muted = savedMuted;
 
+      // Active before load() so sync events from this instance pass the guard.
+      playerRef.current = player;
+
       player.on(mpegts.Events.LOADING_COMPLETE, () => {
+        // Ignore events from a player that reconnect already replaced.
+        if (playerRef.current !== player) return;
         setIsLoading(false);
       });
 
       player.on(mpegts.Events.METADATA_ARRIVED, () => {
+        if (playerRef.current !== player) return;
         setIsLoading(false);
       });
 
       player.on(mpegts.Events.ERROR, (errorType, errorDetail) => {
+        if (playerRef.current !== player) return;
         setIsLoading(false);
 
-        if (errorType !== 'NetworkError' || !errorDetail?.includes('aborted')) {
-          console.error('Player error:', errorType, errorDetail);
+        if (errorType === 'NetworkError' && errorDetail?.includes('aborted')) {
+          return;
+        }
 
+        console.error('Player error:', errorType, errorDetail);
+
+        // mpegts.js has no partial recovery; NetworkError is the only transient
+        // class worth a full destroy + rebuild.
+        if (
+          errorType === 'NetworkError' &&
+          reconnectAttemptsRef.current < MAX_LIVE_RECONNECT_ATTEMPTS
+        ) {
+          if (reconnectTimeoutRef.current) return;
+
+          reconnectAttemptsRef.current += 1;
+          const attempt = reconnectAttemptsRef.current;
+          const delay = Math.min(
+            LIVE_RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
+            LIVE_RECONNECT_MAX_DELAY_MS
+          );
+
+          // Destroy first (frees the failed session); set message after because
+          // safeDestroyPlayer clears loadError.
+          safeDestroyPlayer();
+          setLoadError(
+            `Connection lost, reconnecting... (attempt ${attempt}/${MAX_LIVE_RECONNECT_ATTEMPTS})`
+          );
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            initializeLivePlayer();
+          }, delay);
+        } else {
           setLoadError(getLivePlayerErrorMessage(errorType, errorDetail));
         }
       });
 
-      player.load();
-
       player.on(mpegts.Events.MEDIA_INFO, () => {
+        if (playerRef.current !== player) return;
         setIsLoading(false);
+        reconnectAttemptsRef.current = 0;
         try {
           player.play().catch((e) => {
+            if (playerRef.current !== player) return;
             console.log('Auto-play prevented:', e);
             setLoadError('Auto-play was prevented. Click play to start.');
           });
         } catch (e) {
+          if (playerRef.current !== player) return;
           console.log('Error during play:', e);
           setLoadError(`Playback error: ${e.message}`);
         }
       });
 
-      playerRef.current = player;
+      player.load();
     } catch (error) {
       setIsLoading(false);
       console.error('Error initializing player:', error);
@@ -545,6 +610,7 @@ export default function FloatingVideo() {
 
     // Clean up any existing player
     safeDestroyPlayer();
+    reconnectAttemptsRef.current = 0;
 
     // Initialize the appropriate player based on content type
     if (contentType === 'vod') {

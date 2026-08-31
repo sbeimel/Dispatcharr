@@ -293,7 +293,8 @@ class ChannelSummaryEffectiveValuesTests(TestCase):
     def test_summary_returns_effective_values(self):
         response = self.client.get("/api/channels/channels/summary/")
         self.assertEqual(response.status_code, 200)
-        row = next(r for r in response.data if r["id"] == self.channel.id)
+        data = response.json()
+        row = next(r for r in data if r["id"] == self.channel.id)
         self.assertEqual(row["name"], "Override Name")
         self.assertEqual(row["channel_number"], 99.0)
         self.assertEqual(row["channel_group_id"], self.other_group.id)
@@ -341,6 +342,53 @@ class ChannelManagerEffectiveValuesTests(TestCase):
             helper_row.effective_channel_group_id,
             shortcut_row.effective_channel_group_id,
         )
+
+
+class EpgIdsMappedToChannelsTests(TestCase):
+    """Programme import must treat ChannelOverride.epg_data as a mapping."""
+
+    def test_includes_override_only_assignment(self):
+        from apps.channels.managers import (
+            epg_ids_mapped_to_channels,
+            is_epg_mapped_to_channel,
+        )
+        from apps.epg.models import EPGSource, EPGData
+
+        group = ChannelGroup.objects.create(name="Mapped Override Group")
+        source = EPGSource.objects.create(name="Mapped Override Src", source_type="xmltv")
+        epg = EPGData.objects.create(
+            name="Override Station",
+            epg_source=source,
+            tvg_id="override.map",
+        )
+        channel = Channel.objects.create(
+            channel_number=1.0,
+            name="Provider",
+            channel_group=group,
+            epg_data=None,
+            auto_created=True,
+        )
+        ChannelOverride.objects.create(channel=channel, epg_data=epg)
+
+        self.assertEqual(epg_ids_mapped_to_channels(epg_source=source), {epg.id})
+        self.assertTrue(is_epg_mapped_to_channel(epg))
+
+    def test_excludes_unmapped_epg(self):
+        from apps.channels.managers import (
+            epg_ids_mapped_to_channels,
+            is_epg_mapped_to_channel,
+        )
+        from apps.epg.models import EPGSource, EPGData
+
+        source = EPGSource.objects.create(name="Unmapped Src", source_type="xmltv")
+        epg = EPGData.objects.create(
+            name="Unmapped Station",
+            epg_source=source,
+            tvg_id="unmapped.map",
+        )
+
+        self.assertEqual(epg_ids_mapped_to_channels(epg_source=source), set())
+        self.assertFalse(is_epg_mapped_to_channel(epg))
 
 
 class SeriesRuleAPITests(TestCase):
@@ -409,6 +457,39 @@ class SeriesRuleAPITests(TestCase):
         self.assertEqual(len(resp.data["rules"]), 1)
         self.assertEqual(resp.data["rules"][0]["mode"], "new")
 
+    def test_create_rule_stores_epg_source_id(self):
+        resp = self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 11,
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rules"][0]["epg_source_id"], 11)
+
+    def test_saving_sourced_rule_upgrades_legacy_unsourced_rule(self):
+        """Re-saving a legacy (tvg_id, title) rule with epg_source_id updates it."""
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+        }, format="json")
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 11,
+        }, format="json")
+        resp = self.client.get(self.rules_url)
+        self.assertEqual(len(resp.data["rules"]), 1)
+        self.assertEqual(resp.data["rules"][0]["epg_source_id"], 11)
+
+    def test_two_sources_same_title_are_distinct_rules(self):
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 11,
+        }, format="json")
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 12,
+        }, format="json")
+        resp = self.client.get(self.rules_url)
+        self.assertEqual(len(resp.data["rules"]), 2)
+
     # --- DELETE (query params) ---
 
     def test_delete_rule_by_tvg_id_and_title(self):
@@ -431,6 +512,123 @@ class SeriesRuleAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["rules"], [])
+
+    def test_delete_with_epg_source_id_removes_legacy_unsourced_rule(self):
+        """DVR card deletes pass program.epg_source_id even when the rule has none."""
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+        }, format="json")
+        resp = self.client.delete(
+            self.rules_url + "?tvg_id=ch.1&title=Show+A&epg_source_id=11"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rules"], [])
+
+    def test_delete_with_epg_source_id_leaves_other_source(self):
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 11,
+        }, format="json")
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 12,
+        }, format="json")
+        resp = self.client.delete(
+            self.rules_url + "?tvg_id=ch.1&title=Show+A&epg_source_id=11"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["rules"]), 1)
+        self.assertEqual(resp.data["rules"][0]["epg_source_id"], 12)
+
+    def test_delete_sourced_rule_leaves_other_source_recordings(self):
+        """Deleting one sourced rule does not remove the other source's upcoming list."""
+        from apps.channels.models import Recording
+
+        group = ChannelGroup.objects.create(name="G-src")
+        channel = Channel.objects.create(
+            channel_number=11, name="ChSrc", channel_group=group
+        )
+        now = timezone.now()
+        keep = Recording.objects.create(
+            channel=channel,
+            start_time=now + timedelta(hours=1),
+            end_time=now + timedelta(hours=2),
+            custom_properties={
+                "program": {
+                    "tvg_id": "ch.1",
+                    "title": "Show A",
+                    "epg_source_id": 12,
+                }
+            },
+        )
+        Recording.objects.create(
+            channel=channel,
+            start_time=now + timedelta(hours=3),
+            end_time=now + timedelta(hours=4),
+            custom_properties={
+                "program": {
+                    "tvg_id": "ch.1",
+                    "title": "Show A",
+                    "epg_source_id": 11,
+                }
+            },
+        )
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 11,
+        }, format="json")
+        self.client.post(self.rules_url, {
+            "tvg_id": "ch.1", "title": "Show A", "mode": "all",
+            "epg_source_id": 12,
+        }, format="json")
+        resp = self.client.delete(
+            self.rules_url + "?tvg_id=ch.1&title=Show+A&epg_source_id=11"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["removed"], 1)
+        self.assertEqual(list(Recording.objects.values_list("id", flat=True)), [keep.id])
+
+    def test_bulk_remove_sourced_leaves_other_source_recordings(self):
+        from apps.channels.models import Recording
+
+        group = ChannelGroup.objects.create(name="G-bulk-src")
+        channel = Channel.objects.create(
+            channel_number=12, name="ChBulkSrc", channel_group=group
+        )
+        now = timezone.now()
+        keep = Recording.objects.create(
+            channel=channel,
+            start_time=now + timedelta(hours=1),
+            end_time=now + timedelta(hours=2),
+            custom_properties={
+                "program": {
+                    "tvg_id": "ch.1",
+                    "title": "Show A",
+                    "epg_source_id": 12,
+                }
+            },
+        )
+        Recording.objects.create(
+            channel=channel,
+            start_time=now + timedelta(hours=3),
+            end_time=now + timedelta(hours=4),
+            custom_properties={
+                "program": {
+                    "tvg_id": "ch.1",
+                    "title": "Show A",
+                    "epg_source_id": 11,
+                }
+            },
+        )
+        resp = self.client.post(self.bulk_remove_url, {
+            "tvg_id": "ch.1",
+            "title": "Show A",
+            "scope": "title",
+            "epg_source_id": 11,
+        }, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["removed"], 1)
+        self.assertEqual(list(Recording.objects.values_list("id", flat=True)), [keep.id])
 
     def test_delete_only_removes_matching_rule(self):
         """Delete by (tvg_id, title) leaves other rules intact."""
@@ -504,3 +702,117 @@ class SeriesRuleAPITests(TestCase):
     def test_bulk_remove_requires_tvg_id_or_title(self):
         resp = self.client.post(self.bulk_remove_url, {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class ChannelListIncludeStreamsQueryTests(TestCase):
+    """include_streams=true must not issue one stream query per channel."""
+
+    def setUp(self):
+        from apps.channels.models import ChannelStream, Stream
+        from apps.m3u.models import M3UAccount
+
+        self.user = User.objects.create_user(username="list_admin", password="x")
+        self.user.user_level = 10
+        self.user.save()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.account = M3UAccount.objects.create(
+            name="list-test-account",
+            account_type="XC",
+            username="user",
+            password="pass",
+        )
+        self.group = ChannelGroup.objects.create(name=f"List Group {self.id}")
+
+    def _add_channel_with_stream(self, number):
+        from apps.channels.models import ChannelStream, Stream
+
+        channel = Channel.objects.create(
+            channel_number=float(number),
+            name=f"Channel {number}",
+            channel_group=self.group,
+        )
+        stream = Stream.objects.create(
+            name=f"Stream {number}",
+            url=f"http://example.com/{number}.ts",
+            m3u_account=self.account,
+        )
+        ChannelStream.objects.create(channel=channel, stream=stream, order=0)
+        return channel
+
+    def _query_count_for_list(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get(
+                "/api/channels/channels/",
+                {"page": 1, "page_size": 50, "include_streams": "true"},
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return len(ctx.captured_queries)
+
+    def test_include_streams_query_count_stable_as_channels_grow(self):
+        self._add_channel_with_stream(1)
+        self._add_channel_with_stream(2)
+        self._add_channel_with_stream(3)
+        q_small = self._query_count_for_list()
+
+        self._add_channel_with_stream(4)
+        self._add_channel_with_stream(5)
+        self._add_channel_with_stream(6)
+        self._add_channel_with_stream(7)
+        q_large = self._query_count_for_list()
+
+        self.assertEqual(
+            q_small,
+            q_large,
+            "include_streams list should use prefetched channelstream_set, "
+            "not one streams M2M query per channel",
+        )
+
+
+class ChannelListOnlyCatchupFilterTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="catchup_filter", password="x")
+        self.user.user_level = 10
+        self.user.save()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.catchup_channel = Channel.objects.create(
+            channel_number=1.0,
+            name="Catch-up Channel",
+            is_catchup=True,
+            catchup_days=7,
+        )
+        self.live_channel = Channel.objects.create(
+            channel_number=2.0,
+            name="Live Channel",
+            is_catchup=False,
+        )
+
+    def test_only_catchup_returns_catchup_channels(self):
+        response = self.client.get(
+            "/api/channels/channels/",
+            {"only_catchup": "true", "page": 1, "page_size": 50},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        ids = {row["id"] for row in response.data["results"]}
+        self.assertEqual(ids, {self.catchup_channel.id})
+
+    def test_only_catchup_does_not_force_distinct(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = self.client.get(
+                "/api/channels/channels/",
+                {"only_catchup": "true", "page": 1, "page_size": 50},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        sql = " ".join(q["sql"] for q in ctx.captured_queries).upper()
+        self.assertNotIn("DISTINCT", sql)

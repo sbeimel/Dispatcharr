@@ -5,6 +5,26 @@ import json
 
 logger = logging.getLogger(__name__)
 
+
+def normalize_server_url(url):
+    """Normalize server URL: strip XC API endpoints and query params, preserve base path."""
+    if not url:
+        return url
+
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(url.strip())
+    path = parsed.path.rstrip('/')
+
+    # XC API endpoints are always .php files; legitimate base paths never are.
+    # Stripping the trailing segment when it ends in .php handles any pasted API URL.
+    last_segment = path.rsplit('/', 1)[-1]
+    if last_segment.endswith('.php'):
+        path = path[:-(len(last_segment) + 1)] if '/' in path else ''
+
+    return urlunparse((parsed.scheme, parsed.netloc, path, '', '', ''))
+
+
 class Client:
     """Xtream Codes API Client with robust error handling"""
 
@@ -30,11 +50,12 @@ class Client:
         # Create persistent session
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': user_agent_string})
-        
+
         # Configure proxy if provided
-        if proxy:
-            self.session.proxies = {'http': proxy, 'https': proxy}
-            logger.info(f"XC Client using HTTP proxy: {proxy}")
+        if self.proxy:
+            from core.utils import sanitize_proxy_url
+            self.session.proxies = {'http': self.proxy, 'https': self.proxy}
+            logger.info(f"XCClient using proxy: {sanitize_proxy_url(self.proxy)}")
 
         # Configure connection pooling
         adapter = requests.adapters.HTTPAdapter(
@@ -49,25 +70,15 @@ class Client:
         self.server_info = None
 
     def _normalize_url(self, url):
-        """Normalize server URL: strip XC API endpoints and query params, preserve base path."""
-        if not url:
+        normalized = normalize_server_url(url)
+        if not normalized:
             raise ValueError("Server URL cannot be empty")
-
-        from urllib.parse import urlparse, urlunparse
-
-        parsed = urlparse(url.strip())
-        path = parsed.path.rstrip('/')
-
-        # XC API endpoints are always .php files; legitimate base paths never are.
-        # Stripping the trailing segment when it ends in .php handles any pasted API URL.
-        last_segment = path.rsplit('/', 1)[-1]
-        if last_segment.endswith('.php'):
-            path = path[:-(len(last_segment) + 1)] if '/' in path else ''
-
-        return urlunparse((parsed.scheme, parsed.netloc, path, '', '', ''))
+        return normalized
 
     def _make_request(self, endpoint, params=None):
-        """Make request with detailed error handling"""
+        """Make request with detailed error handling and proxy-specific errors"""
+        from core.utils import sanitize_proxy_url
+        
         try:
             url = f"{self.server_url}/{endpoint}"
             logger.debug(f"XC API Request: {url} with params: {params}")
@@ -109,10 +120,34 @@ class Client:
                 raise ValueError(error_msg)
 
             return data
+        except requests.exceptions.ProxyError as e:
+            error_msg = f"Proxy connection error for {url}: {e}"
+            logger.error(error_msg)
+            if self.proxy:
+                logger.error(f"Check proxy configuration: {sanitize_proxy_url(self.proxy)}")
+            raise
+        except requests.exceptions.ConnectTimeout as e:
+            error_msg = f"Connection timeout for {url}: {e}"
+            logger.error(error_msg)
+            if self.proxy:
+                logger.error(f"Proxy may be slow or unreachable: {sanitize_proxy_url(self.proxy)}")
+            raise
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 407:
+                error_msg = f"Proxy authentication required (407) for {url}"
+                logger.error(error_msg)
+                if self.proxy:
+                    logger.error(f"Check proxy credentials: {sanitize_proxy_url(self.proxy)}")
+            else:
+                error_msg = f"HTTP error for {url}: {e}"
+                logger.error(error_msg)
+            raise
         except requests.RequestException as e:
             error_msg = f"XC API Request failed: {str(e)}"
             logger.error(error_msg)
             logger.error(f"Request details: URL={url}, Params={params}")
+            if self.proxy:
+                logger.error(f"Using proxy: {sanitize_proxy_url(self.proxy)}")
             raise
         except ValueError as e:
             # This could be from JSON parsing or our explicit raises

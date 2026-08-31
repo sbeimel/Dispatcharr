@@ -14,9 +14,18 @@ import {
 } from '@mantine/core';
 import API from '../api';
 import useConnectStore from '../store/connect';
-import { SquarePlus, Webhook, FileCode, Logs } from 'lucide-react';
+import { SquarePlus, Webhook, FileCode } from 'lucide-react';
 import ConnectionForm from '../components/forms/Connection';
+import ConnectLogsSection from '../components/ConnectLogsSection';
 import { SUBSCRIPTION_EVENTS } from '../constants';
+
+const deleteConnectIntegration = (id) => {
+  return API.deleteConnectIntegration(id);
+};
+
+const updateConnectIntegration = (id, values) => {
+  return API.updateConnectIntegration(id, values);
+};
 
 export default function ConnectPage() {
   const { integrations, isLoading, fetchIntegrations } = useConnectStore();
@@ -40,54 +49,73 @@ export default function ConnectPage() {
 
   const deleteConnection = async (id) => {
     console.log('Deleting connection', id);
-    await API.deleteConnectIntegration(id);
+    await deleteConnectIntegration(id);
   };
 
   return (
-    <Box p="md">
-      <Button
-        leftSection={<SquarePlus size={18} />}
-        variant="light"
-        size="sm"
-        onClick={() => newConnection()}
-        p={10}
-        color={theme.tailwind.green[5]}
-        style={{
-          borderWidth: '1px',
-          borderColor: theme.tailwind.green[5],
-          color: 'white',
-        }}
-      >
-        New Connection
-      </Button>
-      {isLoading && <div>Loading...</div>}
-      {!isLoading && (
-        <Box
+    <>
+      <Box p="md" pb={120}>
+        <Button
+          leftSection={<SquarePlus size={18} />}
+          variant="light"
+          size="sm"
+          onClick={() => newConnection()}
+          p={10}
+          color={theme.tailwind.green[5]}
           style={{
-            gap: '1rem',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))',
-            alignContent: 'start',
+            borderWidth: '1px',
+            borderColor: theme.tailwind.green[5],
+            color: 'white',
           }}
-          display="grid"
-          py={10}
         >
-          {integrations.map((i) => (
-            <IntegrationRow
-              key={i.id}
-              integration={i}
-              editConnection={editConnection}
-              deleteConnection={deleteConnection}
-            />
-          ))}
-        </Box>
-      )}
+          New Connection
+        </Button>
+        {isLoading && <div>Loading...</div>}
+        {!isLoading && (
+          <Box
+            style={{
+              gap: '1rem',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(400px, 1fr))',
+              alignContent: 'start',
+            }}
+            display="grid"
+            py={10}
+          >
+            {integrations.map((i) => (
+              <IntegrationRow
+                key={i.id}
+                integration={i}
+                editConnection={editConnection}
+                deleteConnection={deleteConnection}
+              />
+            ))}
+          </Box>
+        )}
 
-      <ConnectionForm
-        connection={connection}
-        isOpen={isConnectionModalOpen}
-        onClose={() => setIsConnectionModalOpen(false)}
-      />
-    </Box>
+        <ConnectionForm
+          connection={connection}
+          isOpen={isConnectionModalOpen}
+          onClose={() => setIsConnectionModalOpen(false)}
+        />
+      </Box>
+
+      {/* Logs Section - Fixed at bottom, like SystemEvents on the Stats page */}
+      <Box
+        style={{
+          zIndex: 100,
+          pointerEvents: 'none',
+        }}
+        pos="fixed"
+        bottom={0}
+        left="var(--app-shell-navbar-width, 0)"
+        right={0}
+        p={'0 1rem 1rem 1rem'}
+      >
+        <Box style={{ pointerEvents: 'auto' }}>
+          <ConnectLogsSection integrations={integrations} />
+        </Box>
+      </Box>
+    </>
   );
 }
 
@@ -99,14 +127,13 @@ function IntegrationRow({ integration, editConnection, deleteConnection }) {
 
   const toggleIntegration = async () => {
     try {
-      await API.updateConnectIntegration(integration.id, {
+      await updateConnectIntegration(integration.id, {
         ...integration,
         enabled: !enabled,
       });
       setEnabled(!enabled);
     } catch (error) {
       console.error('Failed to update integration', error);
-    } finally {
     }
   };
 

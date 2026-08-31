@@ -6,7 +6,7 @@ import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import useSettingsStore from '../store/settings';
-import useLocalStorage from '../hooks/useLocalStorage';
+import useBrowserStorage from '../hooks/useBrowserStorage';
 
 dayjs.extend(duration);
 dayjs.extend(relativeTime);
@@ -18,7 +18,12 @@ export const convertToMs = (dateTime) => dayjs(dateTime).valueOf();
 
 export const convertToSec = (dateTime) => dayjs(dateTime).unix();
 
-export const initializeTime = (dateTime, format = null, locale = null, strict = false) => {
+export const initializeTime = (
+  dateTime,
+  format = null,
+  locale = null,
+  strict = false
+) => {
   if (format && locale) {
     return dayjs(dateTime, format, locale, strict);
   } else if (format) {
@@ -26,7 +31,7 @@ export const initializeTime = (dateTime, format = null, locale = null, strict = 
   } else {
     return dayjs(dateTime);
   }
-}
+};
 
 export const startOfDay = (dateTime) => dayjs(dateTime).startOf('day');
 
@@ -90,7 +95,8 @@ export const setMinute = (dateTime, value) => dayjs(dateTime).minute(value);
 
 export const setSecond = (dateTime, value) => dayjs(dateTime).second(value);
 
-export const setMillisecond = (dateTime, value) => dayjs(dateTime).millisecond(value);
+export const setMillisecond = (dateTime, value) =>
+  dayjs(dateTime).millisecond(value);
 
 export const getMonth = (dateTime) => dayjs(dateTime).month();
 
@@ -120,7 +126,7 @@ export const roundToNearest = (dateTime, minutes) => {
 
 export const useUserTimeZone = () => {
   const settings = useSettingsStore((s) => s.settings);
-  const [timeZone, setTimeZone] = useLocalStorage(
+  const [timeZone, setTimeZone] = useBrowserStorage(
     'time-zone',
     dayjs.tz?.guess
       ? dayjs.tz.guess()
@@ -168,8 +174,8 @@ export const RECURRING_DAY_OPTIONS = [
 ];
 
 export const useDateTimeFormat = () => {
-  const [timeFormatSetting] = useLocalStorage('time-format', '12h');
-  const [dateFormatSetting] = useLocalStorage('date-format', 'mdy');
+  const [timeFormatSetting] = useBrowserStorage('time-format', '12h');
+  const [dateFormatSetting] = useBrowserStorage('date-format', 'mdy');
   // Use user preference for time format
   const timeFormat = timeFormatSetting === '12h' ? 'h:mma' : 'HH:mm';
   const dateFormat = dateFormatSetting === 'mdy' ? 'MMM D' : 'D MMM';
@@ -372,3 +378,41 @@ export const MONTH_ABBR = [
   'nov',
   'dec',
 ];
+
+/**
+ * @param {number} seconds
+ * @param {object} [options]
+ * @param {'hms'|'hm'|'m'|'human'} [options.precision='hms'] - Segments to include
+ * @param {boolean} [options.alwaysShowHours=false] - Always include hours segment
+ * @param {string|null} [options.zeroValue=null] - Return this when seconds is 0/falsy
+ */
+export const formatDuration = (seconds, options = {}) => {
+  const {
+    precision = 'hms',
+    alwaysShowHours = false,
+    zeroValue = null,
+  } = options;
+
+  if (!seconds || seconds === 0) return zeroValue ?? '0:00';
+
+  const abs = Math.abs(seconds);
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = Math.floor(abs % 60);
+
+  const mm = m.toString().padStart(2, '0');
+  const ss = s.toString().padStart(2, '0');
+  const hh = h.toString().padStart(2, '0');
+
+  switch (precision) {
+    case 'human':
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    case 'm':
+      return `${Math.floor(abs / 60)}`;
+    case 'hm':
+      return alwaysShowHours || h > 0 ? `${hh}:${mm}` : `${m}`;
+    case 'hms':
+    default:
+      return alwaysShowHours || h > 0 ? `${hh}:${mm}:${ss}` : `${m}:${ss}`;
+  }
+};

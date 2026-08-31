@@ -1,22 +1,8 @@
-# Generated migration for proxy field
+# Generated migration for HTTP Proxy support
+# Adds proxy field to M3UAccount model
+# Date: 2026-06-18
+
 from django.db import migrations, models
-
-
-def add_proxy_field(apps, schema_editor):
-    """Idempotent migration - checks if column exists before adding"""
-    with schema_editor.connection.cursor() as cursor:
-        cursor.execute("""
-            SELECT COUNT(*) FROM information_schema.columns 
-            WHERE table_name='m3u_m3uaccount' AND column_name='proxy'
-        """)
-        exists = cursor.fetchone()[0] > 0
-    
-    if not exists:
-        with schema_editor.connection.cursor() as cursor:
-            cursor.execute("""
-                ALTER TABLE m3u_m3uaccount 
-                ADD COLUMN proxy VARCHAR(255) DEFAULT '' NULL
-            """)
 
 
 class Migration(migrations.Migration):
@@ -26,5 +12,20 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(add_proxy_field, migrations.RunPython.noop),
+        # Use RunSQL for idempotent migration (safe to run multiple times)
+        migrations.RunSQL(
+            sql="""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'm3u_m3uaccount' AND column_name = 'proxy'
+                ) THEN
+                    ALTER TABLE m3u_m3uaccount ADD COLUMN proxy VARCHAR(255);
+                END IF;
+            END
+            $$;
+            """,
+            reverse_sql="ALTER TABLE m3u_m3uaccount DROP COLUMN IF EXISTS proxy;",
+        ),
     ]

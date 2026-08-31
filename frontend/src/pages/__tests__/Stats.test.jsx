@@ -9,16 +9,15 @@ import {
 } from '@testing-library/react';
 import StatsPage from '../Stats';
 import useStreamProfilesStore from '../../store/streamProfiles';
-import useLocalStorage from '../../hooks/useLocalStorage';
+import useBrowserStorage from '../../hooks/useBrowserStorage';
 import useChannelsStore from '../../store/channels';
 import useLogosStore from '../../store/logos';
 import {
-  fetchActiveChannelStats,
+  fetchAllConnectionStats,
   getCurrentPrograms,
   getClientStats,
   getCombinedConnections,
   getStatsByChannelId,
-  getVODStats,
   stopChannel,
   stopClient,
   stopVODClient,
@@ -28,7 +27,11 @@ import {
 vi.mock('../../store/channels');
 vi.mock('../../store/logos');
 vi.mock('../../store/streamProfiles');
-vi.mock('../../hooks/useLocalStorage');
+vi.mock('../../hooks/useBrowserStorage', () => ({
+  readStoredJSON: (key, defaultValue) => defaultValue,
+  writeStoredJSON: vi.fn(),
+  default: vi.fn((key, defaultValue) => [defaultValue, vi.fn()]),
+}));
 
 vi.mock('../../components/SystemEvents', () => ({
   default: () => <div data-testid="system-events">SystemEvents</div>,
@@ -91,8 +94,7 @@ vi.mock('@mantine/core', () => ({
 //mock stats utils
 vi.mock('../../utils/pages/StatsUtils', () => {
   return {
-    fetchActiveChannelStats: vi.fn(),
-    getVODStats: vi.fn(),
+    fetchAllConnectionStats: vi.fn(),
     getCurrentPrograms: vi.fn(),
     getClientStats: vi.fn(),
     getCombinedConnections: vi.fn(),
@@ -136,6 +138,12 @@ describe('StatsPage', () => {
     ],
   };
 
+  const mockCombinedStats = {
+    live: mockChannelStats,
+    vod: mockVODStats,
+    catchup: { timeshift_sessions: [], total_connections: 0 },
+  };
+
   const mockProcessedChannelHistory = {
     1: { id: 1, uuid: 'channel-1', connections: 2 },
     2: { id: 2, uuid: 'channel-2', connections: 1 },
@@ -160,6 +168,8 @@ describe('StatsPage', () => {
   let mockSetChannelStats;
   let mockSetRefreshInterval;
   let mockSetVodStats;
+  let mockSetTimeshiftStats;
+  let mockEnableLogoRendering;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -167,6 +177,8 @@ describe('StatsPage', () => {
     mockSetChannelStats = vi.fn();
     mockSetRefreshInterval = vi.fn();
     mockSetVodStats = vi.fn();
+    mockSetTimeshiftStats = vi.fn();
+    mockEnableLogoRendering = vi.fn();
 
     // Setup store mocks
     useChannelsStore.mockImplementation((selector) => {
@@ -177,6 +189,8 @@ describe('StatsPage', () => {
         setChannelStats: mockSetChannelStats,
         activeVodConnections: mockVODStats.vod_connections,
         setVodStats: mockSetVodStats,
+        activeTimeshiftSessions: [],
+        setTimeshiftStats: mockSetTimeshiftStats,
       };
       return selector ? selector(state) : state;
     });
@@ -191,15 +205,15 @@ describe('StatsPage', () => {
     useLogosStore.mockImplementation((selector) => {
       const state = {
         logos: mockLogos,
+        enableLogoRendering: mockEnableLogoRendering,
       };
       return selector ? selector(state) : state;
     });
 
-    useLocalStorage.mockReturnValue([5, mockSetRefreshInterval]);
+    useBrowserStorage.mockReturnValue([5, mockSetRefreshInterval]);
 
     // Setup API mocks
-    fetchActiveChannelStats.mockResolvedValue(mockChannelStats);
-    getVODStats.mockResolvedValue(mockVODStats);
+    fetchAllConnectionStats.mockResolvedValue(mockCombinedStats);
     getCurrentPrograms.mockResolvedValue({});
     getStatsByChannelId.mockReturnValue(mockProcessedChannelHistory);
     getClientStats.mockReturnValue(mockClients);
@@ -220,9 +234,16 @@ describe('StatsPage', () => {
       render(<StatsPage />);
 
       await waitFor(() => {
-        expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
-        expect(getVODStats).toHaveBeenCalledTimes(1);
+        expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
+        expect(mockSetChannelStats).toHaveBeenCalledWith(mockChannelStats);
+        expect(mockSetVodStats).toHaveBeenCalledWith(mockVODStats);
       });
+    });
+
+    it('enables lazy logo rendering on mount', () => {
+      render(<StatsPage />);
+
+      expect(mockEnableLogoRendering).toHaveBeenCalledOnce();
     });
 
     it('displays connection counts', async () => {
@@ -270,7 +291,7 @@ describe('StatsPage', () => {
     });
 
     it('displays disabled message when interval is 0', async () => {
-      useLocalStorage.mockReturnValue([0, mockSetRefreshInterval]);
+      useBrowserStorage.mockReturnValue([0, mockSetRefreshInterval]);
       render(<StatsPage />);
 
       await screen.findByText('Refreshing disabled');
@@ -283,16 +304,14 @@ describe('StatsPage', () => {
 
       render(<StatsPage />);
 
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
-      expect(getVODStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       // Advance timers by 5 seconds
       await act(async () => {
         vi.advanceTimersByTime(5000);
       });
 
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(2);
-      expect(getVODStats).toHaveBeenCalledTimes(2);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(2);
 
       vi.useRealTimers();
     });
@@ -300,20 +319,18 @@ describe('StatsPage', () => {
     it('does not poll when interval is 0 but still fetches once on mount', async () => {
       vi.useFakeTimers();
 
-      useLocalStorage.mockReturnValue([0, mockSetRefreshInterval]);
+      useBrowserStorage.mockReturnValue([0, mockSetRefreshInterval]);
       render(<StatsPage />);
 
       // Should still fetch once on mount even with interval = 0
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
-      expect(getVODStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       await act(async () => {
         vi.advanceTimersByTime(10000);
       });
 
       // Should not have polled — count stays at 1
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
-      expect(getVODStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       vi.useRealTimers();
     });
@@ -323,7 +340,7 @@ describe('StatsPage', () => {
 
       const { unmount } = render(<StatsPage />);
 
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       unmount();
 
@@ -332,7 +349,7 @@ describe('StatsPage', () => {
       });
 
       // Should not fetch again after unmount
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       vi.useRealTimers();
     });
@@ -342,14 +359,13 @@ describe('StatsPage', () => {
     it('refreshes stats when Refresh Now button is clicked', async () => {
       render(<StatsPage />);
 
-      expect(fetchActiveChannelStats).toHaveBeenCalledTimes(1);
+      expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
 
       const refreshButton = screen.getByText('Refresh Now');
       fireEvent.click(refreshButton);
 
       await waitFor(() => {
-        expect(fetchActiveChannelStats).toHaveBeenCalledTimes(2);
-        expect(getVODStats).toHaveBeenCalledTimes(2);
+        expect(fetchAllConnectionStats).toHaveBeenCalledTimes(2);
       });
     });
   });
@@ -410,14 +426,14 @@ describe('StatsPage', () => {
       render(<StatsPage />);
 
       await waitFor(() => {
-        expect(getVODStats).toHaveBeenCalledTimes(1);
+        expect(fetchAllConnectionStats).toHaveBeenCalledTimes(1);
       });
 
       const stopButton = await screen.findByTestId('stop-vod-client-client-1');
       fireEvent.click(stopButton);
 
       await waitFor(() => {
-        expect(getVODStats).toHaveBeenCalledTimes(2);
+        expect(fetchAllConnectionStats).toHaveBeenCalledTimes(2);
       });
     });
   });
@@ -453,35 +469,17 @@ describe('StatsPage', () => {
   });
 
   describe('Error Handling', () => {
-    it('handles fetchActiveChannelStats error gracefully', async () => {
+    it('handles fetchAllConnectionStats error gracefully', async () => {
       const consoleError = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
-      fetchActiveChannelStats.mockRejectedValue(new Error('API Error'));
+      fetchAllConnectionStats.mockRejectedValue(new Error('API Error'));
 
       render(<StatsPage />);
 
       await waitFor(() => {
         expect(consoleError).toHaveBeenCalledWith(
-          'Error fetching channel stats:',
-          expect.any(Error)
-        );
-      });
-
-      consoleError.mockRestore();
-    });
-
-    it('handles getVODStats error gracefully', async () => {
-      const consoleError = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-      getVODStats.mockRejectedValue(new Error('VOD API Error'));
-
-      render(<StatsPage />);
-
-      await waitFor(() => {
-        expect(consoleError).toHaveBeenCalledWith(
-          'Error fetching VOD stats:',
+          'Error fetching connection stats:',
           expect.any(Error)
         );
       });
@@ -511,7 +509,10 @@ describe('StatsPage', () => {
           { content_uuid: 'vod-2', connections: [{ client_id: 'c2' }] },
         ],
       };
-      getVODStats.mockResolvedValue(multiVODStats);
+      fetchAllConnectionStats.mockResolvedValue({
+        ...mockCombinedStats,
+        vod: multiVODStats,
+      });
 
       useChannelsStore.mockImplementation((selector) => {
         const state = {
@@ -521,6 +522,8 @@ describe('StatsPage', () => {
           setChannelStats: mockSetChannelStats,
           activeVodConnections: multiVODStats.vod_connections,
           setVodStats: mockSetVodStats,
+          activeTimeshiftSessions: [],
+          setTimeshiftStats: mockSetTimeshiftStats,
         };
         return selector ? selector(state) : state;
       });

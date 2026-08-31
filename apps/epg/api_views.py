@@ -1,4 +1,3 @@
-import hashlib
 import logging
 import os
 import re
@@ -8,10 +7,14 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from apps.epg.sd_api import (
+    SchedulesDirectPosterMixin,
+    SchedulesDirectSourceMixin,
+)
 from rest_framework.decorators import action
 from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serializer
 from drf_spectacular.types import OpenApiTypes
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from datetime import timedelta
@@ -32,6 +35,7 @@ from apps.accounts.permissions import (
     permission_classes_by_action,
     permission_classes_by_method,
 )
+from core.utils import safe_upload_path
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +43,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────
 # 1) EPG Source API (CRUD)
 # ─────────────────────────────
-class EPGSourceViewSet(viewsets.ModelViewSet):
+class EPGSourceViewSet(SchedulesDirectSourceMixin, viewsets.ModelViewSet):
     """
     API endpoint that allows EPG sources to be viewed or edited.
     """
@@ -50,6 +54,8 @@ class EPGSourceViewSet(viewsets.ModelViewSet):
     serializer_class = EPGSourceSerializer
 
     def get_permissions(self):
+        if self.action == "upload":
+            return [IsAdmin()]
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
@@ -57,15 +63,13 @@ class EPGSourceViewSet(viewsets.ModelViewSet):
                 if self.request.method == 'GET':
                     return [IsStandardUser()]
                 return [IsAdmin()]
-            return [Authenticated()]
+            return [IsAdmin()]
 
     def get_queryset(self):
         from django.db.models import Exists, OuterRef
         from apps.channels.models import Channel
         return EPGSource.objects.select_related(
             "refresh_task__crontab", "refresh_task__interval"
-        ).defer(
-            'programme_index'
         ).annotate(
             has_channels=Exists(
                 Channel.objects.filter(epg_data__epg_source_id=OuterRef('pk'))
@@ -84,8 +88,12 @@ class EPGSourceViewSet(viewsets.ModelViewSet):
             )
 
         file = request.FILES["file"]
-        file_name = file.name
-        file_path = os.path.join("/data/uploads/epgs", file_name)
+        try:
+            file_path = safe_upload_path(file.name, "/data/uploads/epgs")
+        except ValueError:
+            return Response(
+                {"error": "Invalid filename"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb+") as destination:
@@ -120,368 +128,20 @@ class EPGSourceViewSet(viewsets.ModelViewSet):
         return super().partial_update(request, *args, **kwargs)
 
 
-    def _sd_authenticate(self, source):
-        """
-        Authenticate with Schedules Direct using stored credentials.
-        Returns (token, None) on success or (None, Response) on failure.
-        """
-        import hashlib
-        import requests as http_requests
-        from apps.epg.tasks import SD_BASE_URL
-        from core.utils import dispatcharr_http_headers
-
-        username = (source.username or '').strip()
-        password = (source.password or '').strip()
-        if not username or not password:
-            return None, Response(
-                {"error": "Username and password are required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        sha1_password = hashlib.sha1(password.encode('utf-8')).hexdigest()
-        try:
-            auth_response = http_requests.post(
-                f"{SD_BASE_URL}/token",
-                json={'username': username, 'password': sha1_password},
-                headers=dispatcharr_http_headers(),
-                timeout=15,
-            )
-            auth_response.raise_for_status()
-            token = auth_response.json().get('token')
-            if not token:
-                return None, Response(
-                    {"error": "Authentication failed. Check your credentials."},
-                    status=status.HTTP_401_UNAUTHORIZED
-                )
-            return token, None
-        except http_requests.exceptions.RequestException as e:
-            return None, Response(
-                {"error": f"Authentication failed: {str(e)}"},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-    def _get_sd_reset_at(self, source):
-        """Retrieve stored reset timestamp from EPGSource model field."""
-        reset_at_str = (source.custom_properties or {}).get('sd_changes_reset_at')
-        return reset_at_str
-
-    def _get_sd_changes_remaining(self, source):
-        """
-        Retrieve stored changesRemaining from EPGSource model field.
-        If a reset timestamp exists and has passed (midnight UTC), clears the
-        lockout automatically so the user can make adds again.
-        """
-        from django.utils import timezone
-
-        cp = source.custom_properties or {}
-        changes_remaining = cp.get('sd_changes_remaining')
-        reset_at_str = cp.get('sd_changes_reset_at')
-        from django.utils.dateparse import parse_datetime
-        reset_at = parse_datetime(reset_at_str) if reset_at_str else None
-
-        # If we have a reset timestamp and it has passed, clear the lockout
-        if changes_remaining == 0 and reset_at:
-            if timezone.now() >= reset_at:
-                cp = source.custom_properties or {}
-                cp.pop('sd_changes_remaining', None)
-                cp.pop('sd_changes_reset_at', None)
-                source.custom_properties = cp
-                source.save(update_fields=['custom_properties'])
-                return None
-
-        return changes_remaining
-
-    def _save_sd_changes_remaining(self, source, changes_remaining):
-        """Persist changesRemaining to EPGSource model field."""
-        cp = source.custom_properties or {}
-        cp['sd_changes_remaining'] = changes_remaining
-        source.custom_properties = cp
-        source.save(update_fields=['custom_properties'])
-
-    def _save_sd_lockout(self, source):
-        """
-        Persist a hard lockout to EPGSource custom_properties when SD returns
-        4100 MAX_LINEUP_CHANGES_REACHED. SD lineup change counters reset at
-        00:00Z (midnight UTC) per SD's documented behavior — error 4100 states
-        "lineup changes for today" and all SD rate counters reset at midnight UTC.
-        Lockout clears automatically when the next midnight UTC passes.
-        """
-        from django.utils import timezone
-        from datetime import datetime, timedelta, timezone as dt_timezone
-
-        now = timezone.now()
-        # Calculate next midnight UTC — SD resets at 00:00Z not on a rolling window
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0,
-            tzinfo=dt_timezone.utc
-        )
-        reset_at = tomorrow
-
-        cp = source.custom_properties or {}
-        cp['sd_changes_remaining'] = 0
-        cp['sd_changes_reset_at'] = reset_at.isoformat()
-        source.custom_properties = cp
-        source.save(update_fields=['custom_properties'])
-        logger.warning(
-            f"SD source {source.id}: daily add limit reached (4100). "
-            f"Lockout set until {reset_at.isoformat()}."
-        )
-
-    def _fetch_sd_countries(self):
-        """Fetch the SD country list (token not required; User-Agent is)."""
-        import requests as http_requests
-        from apps.epg.tasks import SD_BASE_URL
-        from core.utils import dispatcharr_http_headers
-
-        try:
-            resp = http_requests.get(
-                f"{SD_BASE_URL}/available/countries",
-                headers=dispatcharr_http_headers(content_type=None),
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except http_requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to fetch SD countries: {e}")
-            return None
-
-    @action(detail=True, methods=["get", "post", "delete"], url_path="sd-lineups")
-    def sd_lineups(self, request, pk=None):
-        """
-        GET    — list lineups currently on the SD account
-        POST   — add a lineup (body: {"lineup": "USA-NJ29486-X"})
-        DELETE — remove a lineup (body: {"lineup": "USA-NJ29486-X"})
-        """
-        import requests as http_requests
-        from apps.epg.tasks import SD_BASE_URL
-        from core.utils import dispatcharr_http_headers
-
-        source = self.get_object()
-        if source.source_type != 'schedules_direct':
-            return Response(
-                {"error": "This action is only available for Schedules Direct sources."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        token, error = self._sd_authenticate(source)
-        if error:
-            return error
-
-        headers = dispatcharr_http_headers(token=token)
-
-        if request.method == "GET":
-            countries = self._fetch_sd_countries()
-            try:
-                resp = http_requests.get(
-                    f"{SD_BASE_URL}/lineups",
-                    headers=headers,
-                    timeout=15,
-                )
-                if resp.status_code == 400:
-                    sd_data = resp.json()
-                    sd_code = sd_data.get('code')
-                    if sd_code == 4102:
-                        return Response({
-                            "lineups": [],
-                            "max_lineups": 4,
-                            "changes_remaining": self._get_sd_changes_remaining(source),
-                            "changes_reset_at": self._get_sd_reset_at(source),
-                            "notice": "No lineups are currently configured on this Schedules Direct account. Use the search below to add one.",
-                            "countries": countries,
-                        })
-                resp.raise_for_status()
-                data = resp.json()
-                lineups = [l for l in data.get('lineups', []) if not l.get('isDeleted', False)]
-                return Response({
-                    "lineups": lineups,
-                    "max_lineups": 4,
-                    "changes_remaining": self._get_sd_changes_remaining(source),
-                    "changes_reset_at": self._get_sd_reset_at(source),
-                    "countries": countries,
-                })
-            except http_requests.exceptions.RequestException as e:
-                return Response(
-                    {"error": f"Failed to fetch lineups: {str(e)}"},
-                    status=status.HTTP_502_BAD_GATEWAY
-                )
-
-        elif request.method == "POST":
-            lineup_id = request.data.get('lineup')
-            if not lineup_id:
-                return Response({"error": "lineup field is required."}, status=status.HTTP_400_BAD_REQUEST)
-            try:
-                resp = http_requests.put(
-                    f"{SD_BASE_URL}/lineups/{lineup_id}",
-                    headers=headers,
-                    timeout=15,
-                )
-                sd_data = resp.json()
-                sd_code = sd_data.get('code')
-
-                if resp.status_code == 400 or resp.status_code == 403:
-                    if sd_code == 4100:
-                        self._save_sd_lockout(source)
-                        return Response({
-                            "error": "daily_limit_reached",
-                            "message": "You have reached your daily Schedules Direct lineup addition limit. SD allows 6 adds per 24-hour period. Resets at midnight UTC.",
-                            "changes_remaining": 0,
-                            "docs_url": "https://github.com/SchedulesDirect/JSON-Service/wiki/API-20141201#tasks-your-client-must-perform",
-                        }, status=status.HTTP_200_OK)
-                    if sd_code == 4101:
-                        return Response({
-                            "error": "max_lineups_reached",
-                            "message": "Your Schedules Direct account has reached the maximum of 4 lineups. Remove one before adding another.",
-                            "changes_remaining": self._get_sd_changes_remaining(source),
-                        }, status=status.HTTP_200_OK)
-                    if sd_code == 2100:
-                        return Response({
-                            "error": "duplicate_lineup",
-                            "message": "This lineup is already on your Schedules Direct account.",
-                            "changes_remaining": self._get_sd_changes_remaining(source),
-                        }, status=status.HTTP_200_OK)
-                    return Response({
-                        "error": sd_data.get('message', 'Failed to add lineup.'),
-                        "changes_remaining": self._get_sd_changes_remaining(source),
-                    }, status=status.HTTP_200_OK)
-
-                resp.raise_for_status()
-
-                # Persist changesRemaining to custom_properties
-                changes_remaining = sd_data.get('changesRemaining')
-                if changes_remaining is not None:
-                    self._save_sd_changes_remaining(source, changes_remaining)
-
-                logger.info(
-                    f"SD lineup added for source {source.id}: {lineup_id}. "
-                    f"changesRemaining: {changes_remaining}"
-                )
-
-                # Re-fetch stations so the new lineup's stations are available for matching
-                from apps.epg.tasks import fetch_schedules_direct_stations
-                fetch_schedules_direct_stations.delay(source.id)
-
-                return Response({
-                    **sd_data,
-                    "changes_remaining": changes_remaining,
-                })
-            except http_requests.exceptions.RequestException as e:
-                return Response(
-                    {"error": f"Failed to add lineup: {str(e)}"},
-                    status=status.HTTP_502_BAD_GATEWAY
-                )
-
-        elif request.method == "DELETE":
-            lineup_id = request.data.get('lineup')
-            if not lineup_id:
-                return Response({"error": "lineup field is required."}, status=status.HTTP_400_BAD_REQUEST)
-            try:
-                resp = http_requests.delete(
-                    f"{SD_BASE_URL}/lineups/{lineup_id}",
-                    headers=headers,
-                    timeout=15,
-                )
-                if resp.status_code == 400:
-                    sd_data = resp.json()
-                    sd_code = sd_data.get('code')
-                    if sd_code == 2103:
-                        return Response({
-                            "response": "OK",
-                            "code": 0,
-                            "message": "Lineup not found on account — already removed.",
-                            "changes_remaining": self._get_sd_changes_remaining(source),
-                        })
-                resp.raise_for_status()
-                sd_data = resp.json()
-                # SD returns changesRemaining on deletes — persist it
-                changes_remaining = sd_data.get('changesRemaining')
-                if changes_remaining is not None:
-                    self._save_sd_changes_remaining(source, changes_remaining)
-                logger.info(f"SD lineup deleted for source {source.id}: {lineup_id}")
-                return Response({
-                    **sd_data,
-                    "changes_remaining": self._get_sd_changes_remaining(source),
-                })
-            except http_requests.exceptions.RequestException as e:
-                return Response(
-                    {"error": f"Failed to remove lineup: {str(e)}"},
-                    status=status.HTTP_502_BAD_GATEWAY
-                )
-
-    @action(detail=True, methods=["post"], url_path="sd-lineups/search")
-    def sd_lineups_search(self, request, pk=None):
-        """
-        Search available headends/lineups by country and postal code.
-        Body: {"country": "USA", "postalcode": "07030"}
-        Returns a flat list of lineups across all matching headends.
-        """
-        import requests as http_requests
-        from apps.epg.tasks import SD_BASE_URL
-        from core.utils import dispatcharr_http_headers
-
-        source = self.get_object()
-        if source.source_type != 'schedules_direct':
-            return Response(
-                {"error": "This action is only available for Schedules Direct sources."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        country = request.data.get('country', '').strip()
-        postalcode = request.data.get('postalcode', '').strip()
-        if not country or not postalcode:
-            return Response(
-                {"error": "country and postalcode are required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        token, error = self._sd_authenticate(source)
-        if error:
-            return error
-
-        headers = dispatcharr_http_headers(token=token)
-
-        try:
-            resp = http_requests.get(
-                f"{SD_BASE_URL}/headends",
-                params={'country': country, 'postalcode': postalcode},
-                headers=headers,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            headends = resp.json()
-            lineups = []
-            for headend in headends:
-                for lineup in headend.get('lineups', []):
-                    lineups.append({
-                        'lineup': lineup.get('lineup'),
-                        'name': lineup.get('name'),
-                        'transport': headend.get('transport'),
-                        'location': headend.get('location'),
-                        'headend': headend.get('headend'),
-                    })
-            return Response({"lineups": lineups})
-        except http_requests.exceptions.RequestException as e:
-            return Response(
-                {"error": f"Failed to search headends: {str(e)}"},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-# ─────────────────────────────
-# 2) Program API (CRUD)
-# ─────────────────────────────
 class ProgramSearchPagination(PageNumberPagination):
     page_size = 50
     page_size_query_param = 'page_size'
     max_page_size = 500
 
 
-class ProgramViewSet(viewsets.ModelViewSet):
+class ProgramViewSet(SchedulesDirectPosterMixin, viewsets.ModelViewSet):
     """Handles CRUD operations for EPG programs"""
 
     queryset = ProgramData.objects.select_related("epg").all()
     serializer_class = ProgramDataSerializer
 
-    # Per-source in-memory caches (token and error state)
-    _sd_poster_token_cache: dict = {}
-    _sd_poster_error_cache: dict = {}
+    # Short process-local cooldown for transient poster errors (auth/network).
+    # Image download limits are persisted on the EPG source (shared across workers).
 
     def get_permissions(self):
         if self.action == 'poster':
@@ -500,98 +160,6 @@ class ProgramViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
-
-    @action(detail=True, methods=['get'], url_path='poster', permission_classes=[AllowAny])
-    def poster(self, request, pk=None):
-        """Proxy endpoint for SD program poster images. Nginx caches the response."""
-        import requests as http_requests
-        from apps.epg.tasks import SD_BASE_URL
-        from core.utils import dispatcharr_http_headers
-
-        program = self.get_object()
-        poster_sd_url = (program.custom_properties or {}).get('sd_icon')
-        if not poster_sd_url:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        source = program.epg.epg_source if program.epg else None
-        if not source or source.source_type != 'schedules_direct':
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        error_cache = ProgramViewSet._sd_poster_error_cache.get(source.id)
-        if error_cache and time.time() < error_cache['until']:
-            return Response(
-                {'error': f"SD temporarily unavailable: {error_cache['reason']}"},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        cached = ProgramViewSet._sd_poster_token_cache.get(source.id)
-        token = cached['token'] if cached and time.time() < cached['expires'] else None
-
-        if not token:
-            sha1_password = hashlib.sha1(source.password.encode('utf-8')).hexdigest()
-            try:
-                auth_resp = http_requests.post(
-                    f"{SD_BASE_URL}/token",
-                    json={'username': source.username, 'password': sha1_password},
-                    headers=dispatcharr_http_headers(),
-                    timeout=10,
-                )
-                auth_data = auth_resp.json()
-                token = auth_data.get('token')
-                if not token:
-                    ProgramViewSet._sd_poster_error_cache[source.id] = {
-                        'until': time.time() + 3600,
-                        'reason': auth_data.get('message', 'Authentication failed'),
-                    }
-                    return Response(status=status.HTTP_502_BAD_GATEWAY)
-                token_expires = auth_data.get('tokenExpires', time.time() + 86400)
-                ProgramViewSet._sd_poster_token_cache[source.id] = {
-                    'token': token,
-                    'expires': token_expires,
-                }
-            except http_requests.exceptions.RequestException:
-                ProgramViewSet._sd_poster_error_cache[source.id] = {
-                    'until': time.time() + 300,
-                    'reason': 'Network error reaching Schedules Direct',
-                }
-                return Response(status=status.HTTP_502_BAD_GATEWAY)
-
-        try:
-            img_resp = http_requests.get(
-                poster_sd_url,
-                headers=dispatcharr_http_headers(token=token, content_type=None),
-                timeout=15,
-                allow_redirects=True,
-            )
-            if img_resp.status_code in (401, 403):
-                ProgramViewSet._sd_poster_token_cache.pop(source.id, None)
-                ProgramViewSet._sd_poster_error_cache[source.id] = {
-                    'until': time.time() + 3600,
-                    'reason': f'SD returned {img_resp.status_code}',
-                }
-                return Response(status=status.HTTP_502_BAD_GATEWAY)
-            if img_resp.status_code == 400:
-                try:
-                    err_code = img_resp.json().get('code')
-                except Exception:
-                    err_code = None
-                if err_code == 5002:
-                    ProgramViewSet._sd_poster_error_cache[source.id] = {
-                        'until': time.time() + 3600,
-                        'reason': 'Daily image download limit reached (SD error 5002)',
-                    }
-                return Response(status=status.HTTP_429_TOO_MANY_REQUESTS)
-            if img_resp.status_code != 200:
-                return Response(status=status.HTTP_502_BAD_GATEWAY)
-
-            from django.http import HttpResponse
-            content_type = img_resp.headers.get('Content-Type', 'image/jpeg')
-            response = HttpResponse(img_resp.content, content_type=content_type)
-            response['Cache-Control'] = 'public, max-age=86400'
-            return response
-
-        except http_requests.exceptions.RequestException:
-            return Response(status=status.HTTP_502_BAD_GATEWAY)
 
     def list(self, request, *args, **kwargs):
         logger.debug("Listing all EPG programs.")
@@ -814,6 +382,32 @@ class ProgramViewSet(viewsets.ModelViewSet):
 # ─────────────────────────────
 # 3) EPG Grid View
 # ─────────────────────────────
+def custom_dummy_channels_queryset():
+    """Channels backed by a dummy EPG source, ready for on-demand generation.
+
+    Streams are prefetched in channelstream order because dummy sources configured
+    with name_source='stream' resolve their regex input by stream index; without the
+    explicit ordering the prefetch cache would fall back to Stream's own ordering
+    and pick the wrong title.
+    """
+    from apps.channels.models import Channel, Stream
+    from apps.channels.managers import with_effective_values
+
+    return with_effective_values(
+        Channel.objects.filter(epg_data__epg_source__source_type='dummy')
+        .select_related('epg_data__epg_source')
+        .prefetch_related(
+            Prefetch(
+                'streams',
+                queryset=Stream.objects.only('id', 'name').order_by(
+                    'channelstream__order'
+                ),
+            )
+        )
+        .distinct()
+    )
+
+
 class EPGGridAPIView(APIView):
     """Returns all programs airing in the next 24 hours including currently running ones and recent ones"""
 
@@ -845,36 +439,13 @@ class EPGGridAPIView(APIView):
 
         # Generate dummy programs for channels that have no EPG data OR dummy EPG sources
         from apps.channels.models import Channel
-        from apps.epg.models import EPGSource
-        from django.db.models import Q
+        from apps.channels.managers import with_effective_values
 
         # Get channels with no EPG data at all (standard dummy)
-        channels_without_epg = Channel.objects.filter(Q(epg_data__isnull=True))
-
-        # Get channels with custom dummy EPG sources (generate on-demand with patterns)
-        channels_with_custom_dummy = Channel.objects.filter(
-            epg_data__epg_source__source_type='dummy'
-        ).select_related('epg_data__epg_source').distinct()
-
-        # Log what we found
-        without_count = channels_without_epg.count()
-        custom_count = channels_with_custom_dummy.count()
-
-        if without_count > 0:
-            channel_names = [f"{ch.name} (ID: {ch.id})" for ch in channels_without_epg]
-            logger.debug(
-                f"EPGGridAPIView: Channels needing standard dummy EPG: {', '.join(channel_names)}"
-            )
-
-        if custom_count > 0:
-            channel_names = [f"{ch.name} (ID: {ch.id})" for ch in channels_with_custom_dummy]
-            logger.debug(
-                f"EPGGridAPIView: Channels needing custom dummy EPG: {', '.join(channel_names)}"
-            )
-
-        logger.debug(
-            f"EPGGridAPIView: Found {without_count} channels needing standard dummy, {custom_count} needing custom dummy EPG."
+        channels_without_epg = with_effective_values(
+            Channel.objects.filter(epg_data__isnull=True)
         )
+        channels_with_custom_dummy = custom_dummy_channels_queryset()
 
         # Serialize the regular programs using .values() to bypass DRF overhead
         programs_qs = programs.values(
@@ -904,191 +475,71 @@ class EPGGridAPIView(APIView):
             f"EPGGridAPIView: Found {len(serialized_programs)} program(s), including recently ended, currently running, and upcoming shows."
         )
 
-        # Humorous program descriptions based on time of day - same as in output/views.py
-        time_descriptions = {
-            (0, 4): [
-                "Late Night with {channel} - Where insomniacs unite!",
-                "The 'Why Am I Still Awake?' Show on {channel}",
-                "Counting Sheep - A {channel} production for the sleepless",
-            ],
-            (4, 8): [
-                "Dawn Patrol - Rise and shine with {channel}!",
-                "Early Bird Special - Coffee not included",
-                "Morning Zombies - Before coffee viewing on {channel}",
-            ],
-            (8, 12): [
-                "Mid-Morning Meetings - Pretend you're paying attention while watching {channel}",
-                "The 'I Should Be Working' Hour on {channel}",
-                "Productivity Killer - {channel}'s daytime programming",
-            ],
-            (12, 16): [
-                "Lunchtime Laziness with {channel}",
-                "The Afternoon Slump - Brought to you by {channel}",
-                "Post-Lunch Food Coma Theater on {channel}",
-            ],
-            (16, 20): [
-                "Rush Hour - {channel}'s alternative to traffic",
-                "The 'What's For Dinner?' Debate on {channel}",
-                "Evening Escapism - {channel}'s remedy for reality",
-            ],
-            (20, 24): [
-                "Prime Time Placeholder - {channel}'s finest not-programming",
-                "The 'Netflix Was Too Complicated' Show on {channel}",
-                "Family Argument Avoider - Courtesy of {channel}",
-            ],
-        }
-
-        # Generate and append dummy programs
-        dummy_programs = []
-
-        # Import the function from output.views
-        from apps.output.views import generate_dummy_programs as gen_dummy_progs
-
-        # Handle channels with CUSTOM dummy EPG sources (with patterns)
-        for channel in channels_with_custom_dummy:
-            # For dummy EPGs, ALWAYS use channel UUID to ensure unique programs per channel
-            # This prevents multiple channels assigned to the same dummy EPG from showing identical data
-            # Each channel gets its own unique program data even if they share the same EPG source
-            dummy_tvg_id = str(channel.uuid)
-
-            try:
-                # Get the custom dummy EPG source
-                epg_source = channel.epg_data.epg_source if channel.epg_data else None
-
-                logger.debug(f"Generating custom dummy programs for channel: {channel.name} (ID: {channel.id})")
-
-                # Determine which name to parse based on custom properties
-                name_to_parse = channel.name
-                if epg_source and epg_source.custom_properties:
-                    custom_props = epg_source.custom_properties
-                    name_source = custom_props.get('name_source')
-
-                    if name_source == 'stream':
-                        # Get the stream index (1-based from user, convert to 0-based)
-                        stream_index = custom_props.get('stream_index', 1) - 1
-
-                        # Get streams ordered by channelstream order
-                        channel_streams = channel.streams.all().order_by('channelstream__order')
-
-                        if channel_streams.exists() and 0 <= stream_index < channel_streams.count():
-                            stream = list(channel_streams)[stream_index]
-                            name_to_parse = stream.name
-                            logger.debug(f"Using stream name for parsing: {name_to_parse} (stream index: {stream_index})")
-                        else:
-                            logger.warning(f"Stream index {stream_index} not found for channel {channel.name}, falling back to channel name")
-                    elif name_source == 'channel':
-                        logger.debug(f"Using channel name for parsing: {name_to_parse}")
-
-                # Generate programs using custom patterns from the dummy EPG source
-                # Use the same tvg_id that will be set in the program data
-                generated = gen_dummy_progs(
-                    channel_id=dummy_tvg_id,
-                    channel_name=name_to_parse,
-                    num_days=1,
-                    program_length_hours=4,
-                    epg_source=epg_source
-                )
-
-                # Custom dummy should always return data (either from patterns or fallback)
-                if generated:
-                    logger.debug(f"Generated {len(generated)} custom dummy programs for {channel.name}")
-                    # Convert generated programs to API format
-                    for program in generated:
-                        prog_custom = program.get('custom_properties') or {}
-                        dummy_program = {
-                            "id": f"dummy-custom-{channel.id}-{program['start_time'].hour}",
-                            "epg": {"tvg_id": dummy_tvg_id, "name": channel.name},
-                            "start_time": program['start_time'].isoformat(),
-                            "end_time": program['end_time'].isoformat(),
-                            "title": program['title'],
-                            "description": program['description'],
-                            "tvg_id": dummy_tvg_id,
-                            "sub_title": program.get('sub_title'),
-                            "custom_properties": prog_custom if prog_custom else None,
-                            "season": None,
-                            "episode": None,
-                            "is_new": prog_custom.get('new', False),
-                            "is_live": bool(prog_custom.get('live')),
-                            "is_premiere": False,
-                            "is_finale": False,
-                        }
-                        dummy_programs.append(dummy_program)
-                else:
-                    logger.warning(f"No programs generated for custom dummy EPG channel: {channel.name}")
-
-            except Exception as e:
-                logger.error(
-                    f"Error creating custom dummy programs for channel {channel.name} (ID: {channel.id}): {str(e)}"
-                )
-
-        # Handle channels with NO EPG data (standard dummy with humorous descriptions)
-        for channel in channels_without_epg:
-            # For channels with no EPG, use UUID to ensure uniqueness (matches frontend logic)
-            # The frontend uses: tvgRecord?.tvg_id ?? channel.uuid
-            # Since there's no EPG data, it will fall back to UUID
-            dummy_tvg_id = str(channel.uuid)
-
-            try:
-                logger.debug(f"Generating standard dummy programs for channel: {channel.name} (ID: {channel.id})")
-
-                # Create programs every 4 hours for the next 24 hours with humorous descriptions
-                for hour_offset in range(0, 24, 4):
-                    # Use timedelta for time arithmetic instead of replace() to avoid hour overflow
-                    start_time = now + timedelta(hours=hour_offset)
-                    # Set minutes/seconds to zero for clean time blocks
-                    start_time = start_time.replace(minute=0, second=0, microsecond=0)
-                    end_time = start_time + timedelta(hours=4)
-
-                    # Get the hour for selecting a description
-                    hour = start_time.hour
-                    day = 0  # Use 0 as we're only doing 1 day
-
-                    # Find the appropriate time slot for description
-                    for time_range, descriptions in time_descriptions.items():
-                        start_range, end_range = time_range
-                        if start_range <= hour < end_range:
-                            # Pick a description using the sum of the hour and day as seed
-                            # This makes it somewhat random but consistent for the same timeslot
-                            description = descriptions[
-                                (hour + day) % len(descriptions)
-                            ].format(channel=channel.name)
-                            break
-                    else:
-                        # Fallback description if somehow no range matches
-                        description = f"Placeholder program for {channel.name} - EPG data went on vacation"
-
-                    # Create a dummy program in the same format as regular programs
-                    dummy_program = {
-                        "id": f"dummy-standard-{channel.id}-{hour_offset}",
-                        "epg": {"tvg_id": dummy_tvg_id, "name": channel.name},
-                        "start_time": start_time.isoformat(),
-                        "end_time": end_time.isoformat(),
-                        "title": f"{channel.name}",
-                        "description": description,
-                        "tvg_id": dummy_tvg_id,
-                        "sub_title": None,
-                        "custom_properties": None,
-                        "season": None,
-                        "episode": None,
-                        "is_new": False,
-                        "is_live": False,
-                        "is_premiere": False,
-                        "is_finale": False,
-                    }
-                    dummy_programs.append(dummy_program)
-
-            except Exception as e:
-                logger.error(
-                    f"Error creating standard dummy programs for channel {channel.name} (ID: {channel.id}): {str(e)}"
-                )
-
-        # Combine regular and dummy programs
-        all_programs = list(serialized_programs) + dummy_programs
-        logger.debug(
-            f"EPGGridAPIView: Returning {len(all_programs)} total programs (including {len(dummy_programs)} dummy programs)."
+        # Generate and append dummy programs for channels without real EPG data.
+        from apps.output.dummy_epg import (
+            dummy_program_to_api_dict,
+            generate_dummy_programs,
+            resolve_channel_parse_name,
         )
 
-        return Response({"data": all_programs}, status=status.HTTP_200_OK)
+        dummy_programs = []
+
+        for queryset, id_prefix, custom_source in (
+            (channels_with_custom_dummy, 'dummy-custom', True),
+            (channels_without_epg, 'dummy-standard', False),
+        ):
+            for channel in queryset:
+                dummy_tvg_id = str(channel.uuid)
+                effective_name = channel.effective_name
+                if custom_source:
+                    epg_source = channel.epg_data.epg_source if channel.epg_data else None
+                    channel_name = resolve_channel_parse_name(
+                        channel, epg_source, fallback_name=effective_name
+                    )
+                else:
+                    epg_source = None
+                    channel_name = effective_name
+                try:
+                    generated = generate_dummy_programs(
+                        channel_id=dummy_tvg_id,
+                        channel_name=channel_name,
+                        num_days=1,
+                        program_length_hours=4,
+                        epg_source=epg_source,
+                        export_lookback=one_hour_ago,
+                        export_cutoff=twenty_four_hours_later,
+                    )
+                    for program in generated or []:
+                        dummy_programs.append(
+                            dummy_program_to_api_dict(
+                                channel,
+                                program,
+                                dummy_tvg_id=dummy_tvg_id,
+                                program_id_prefix=id_prefix,
+                            )
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Error creating %s programs for channel %s (ID: %s): %s",
+                        id_prefix,
+                        channel.name,
+                        channel.id,
+                        e,
+                    )
+
+        # Combine regular and dummy programs in place to avoid copying the large list
+        serialized_programs.extend(dummy_programs)
+        logger.debug(
+            f"EPGGridAPIView: Returning {len(serialized_programs)} total programs (including {len(dummy_programs)} dummy programs)."
+        )
+
+        # The grid materializes tens of thousands of program dicts plus the
+        # rendered JSON; trim once the response is sent so worker RSS does not
+        # ratchet up per request.
+        from core.utils import spawn_memory_trim
+        response = Response({"data": serialized_programs}, status=status.HTTP_200_OK)
+        response._resource_closers.append(spawn_memory_trim)
+        return response
 
 
 # ─────────────────────────────
@@ -1119,18 +570,24 @@ class EPGImportAPIView(APIView):
         epg_id = request.data.get("id", None)
         force = bool(request.data.get("force", False))
 
-        # Check if this is a dummy EPG source
-        try:
+        # Reject dummy sources with a narrow existence query, no full row load.
+        if epg_id is not None:
             from .models import EPGSource
-            epg_source = EPGSource.objects.get(id=epg_id)
-            if epg_source.source_type == 'dummy':
-                logger.info(f"EPGImportAPIView: Skipping refresh for dummy EPG source {epg_id}")
+
+            if EPGSource.objects.filter(
+                id=epg_id, source_type="dummy"
+            ).exists():
+                logger.info(
+                    "EPGImportAPIView: Skipping refresh for dummy EPG source %s",
+                    epg_id,
+                )
                 return Response(
-                    {"success": False, "message": "Dummy EPG sources do not require refreshing."},
+                    {
+                        "success": False,
+                        "message": "Dummy EPG sources do not require refreshing.",
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        except EPGSource.DoesNotExist:
-            pass  # Let the task handle the missing source
 
         refresh_epg_data.delay(epg_id, force=force)  # Trigger Celery task
         logger.info("EPGImportAPIView: Task dispatched to refresh EPG data.")
@@ -1230,10 +687,9 @@ class CurrentProgramsAPIView(APIView):
             # Limit to 50 IDs per request
             epg_data_ids = epg_data_ids[:50]
 
-            # Defer the multi-MB programme_index the JOIN would pull once per row. The lookup reads it via a targeted refresh_from_db
-            epg_data_entries = EPGData.objects.select_related('epg_source').defer(
-                'epg_source__programme_index'
-            ).filter(id__in=epg_data_ids)
+            epg_data_entries = EPGData.objects.select_related('epg_source').filter(
+                id__in=epg_data_ids
+            )
 
             # Batch-fetch current programs for all requested EPG entries in one query
             db_programs = ProgramData.objects.filter(
@@ -1274,12 +730,15 @@ class CurrentProgramsAPIView(APIView):
 
             return Response(current_programs, status=status.HTTP_200_OK)
 
-        # Otherwise, use channel-based query
-        # Import Channel model
+        # Otherwise, use channel-based query. Honour ChannelOverride.epg_data
+        # via Coalesce; filtering on Channel.epg_data alone skips override-only
+        # assignments (editor Current Program uses epg_data_ids and is fine).
+        from django.db.models.functions import Coalesce
         from apps.channels.models import Channel
 
-        # Build query for channels with EPG data
-        query = Channel.objects.filter(epg_data__isnull=False)
+        query = Channel.objects.annotate(
+            effective_epg_data_id=Coalesce("override__epg_data_id", "epg_data_id"),
+        ).exclude(effective_epg_data_id__isnull=True)
 
         if channel_uuids is not None:
             if not isinstance(channel_uuids, list):
@@ -1289,16 +748,11 @@ class CurrentProgramsAPIView(APIView):
                 )
             query = query.filter(uuid__in=channel_uuids)
 
-        # Get channels with EPG data
-        channels = query.select_related('epg_data')
-
-        # Build list of current programs
         current_programs = []
 
-        for channel in channels:
-            # Query for current program
+        for channel in query:
             program = ProgramData.objects.select_related("epg").filter(
-                epg=channel.epg_data,
+                epg_id=channel.effective_epg_data_id,
                 start_time__lte=now,
                 end_time__gt=now
             ).first()

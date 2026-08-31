@@ -7,17 +7,33 @@ class BaseConfig:
     CHUNK_SIZE = 8192
     CLIENT_POLL_INTERVAL = 0.1
     MAX_RETRIES = 3
+    RETRY_WINDOW_SECONDS = 1800  # Reset retry counter after this long without a failure
+    STABLE_CONNECTION_THRESHOLD = 30  # Seconds of uptime before switch rotation state resets
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
+    FAILOVER_ROTATION_COOLDOWN = 60 # Wait this long after exhausting all streams before wrapping back to the top.
+    
+    # Stream Cooldown System (prevents rapid retries of failed stream/profile combinations)
+    STREAM_COOLDOWN_ENABLED = False  # Default: disabled (no breaking changes)
+    STREAM_COOLDOWN_MINUTES = 10  # How long to cooldown a failed stream/profile combo
+    
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
 
-    # Cache for proxy settings (class-level, shared across all instances)
+    # Cache for proxy settings (class-level, shared across all instances).
+    # Backed by CoreSettings Redis group cache; this local copy avoids Redis
+    # chatter inside the proxy hot path. Cleared when proxy_settings is saved.
     _proxy_settings_cache = None
     _proxy_settings_cache_time = 0
     _proxy_settings_cache_ttl = 10  # Cache for 10 seconds
+
+    @classmethod
+    def clear_proxy_settings_cache(cls):
+        """Drop process-local proxy settings (called on CoreSettings invalidate)."""
+        cls._proxy_settings_cache = None
+        cls._proxy_settings_cache_time = 0
 
     @classmethod
     def get_proxy_settings(cls):
@@ -42,17 +58,9 @@ class BaseConfig:
                 "buffering_speed": 1.0,
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
-                "channel_init_grace_period": 5,
+                "channel_init_grace_period": 60,
+                "channel_client_wait_period": 5,
                 "new_client_behind_seconds": 5,
-                "max_retries": 2,
-                "url_switch_timeout": 20,
-                "max_stream_switches": 200,
-                "connection_timeout": 10,
-                "failover_grace_period": 20,
-                "chunk_timeout": 5,
-                "initial_behind_chunks": 4,
-                "chunk_batch_size": 5,
-                "health_check_interval": 5,
                 "stream_cooldown_enabled": False,
                 "stream_cooldown_minutes": 10,
             }
@@ -144,9 +152,15 @@ class TSConfig(BaseConfig):
 
     @classmethod
     def get_channel_init_grace_period(cls):
-        """Get channel init grace period from database or default"""
+        """Max seconds to wait for initial buffer fill during channel startup."""
         settings = cls.get_proxy_settings()
-        return settings.get("channel_init_grace_period", 5)
+        return settings.get("channel_init_grace_period", 60)
+
+    @classmethod
+    def get_channel_client_wait_period(cls):
+        """Seconds to keep a ready channel alive waiting for the first client to connect."""
+        settings = cls.get_proxy_settings()
+        return settings.get("channel_client_wait_period", 5)
 
     # Dynamic property access for these settings
     @property
@@ -165,5 +179,19 @@ class TSConfig(BaseConfig):
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
 
+    @property
+    def CHANNEL_CLIENT_WAIT_PERIOD(self):
+        return self.get_channel_client_wait_period()
 
-
+    @classmethod
+    def stream_cooldown_enabled(cls):
+        """Get stream cooldown enabled flag from database or default"""
+        settings = cls.get_proxy_settings()
+        return settings.get("stream_cooldown_enabled", False)
+    
+    @classmethod
+    def stream_cooldown_seconds(cls):
+        """Get stream cooldown duration in seconds (converts minutes to seconds)"""
+        settings = cls.get_proxy_settings()
+        minutes = settings.get("stream_cooldown_minutes", 10)
+        return int(minutes) * 60

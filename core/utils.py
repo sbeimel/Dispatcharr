@@ -1,3 +1,4 @@
+import json
 import redis
 import logging
 import time
@@ -7,7 +8,6 @@ from pathlib import Path
 import re
 from django.conf import settings
 from redis.exceptions import ConnectionError, TimeoutError
-from django.core.cache import cache
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.core.validators import URLValidator
@@ -33,18 +33,22 @@ def dispatcharr_dvr_user_agent(recording_id):
     return f'Dispatcharr-DVR/recording-{recording_id}'
 
 
-def dispatcharr_http_headers(*, token=None, content_type='application/json'):
+def dispatcharr_http_headers(*, token=None, content_type='application/json', route_to=None):
     """
     Build HTTP headers for outbound Dispatcharr requests.
 
     content_type=None omits Content-Type (e.g. simple GET proxies).
     token is included when authenticating with Schedules Direct.
+    route_to is an optional Schedules Direct load-balancer steer value
+    (e.g. "debug"); only set when coordinated with Schedules Direct support.
     """
     headers = {'User-Agent': dispatcharr_user_agent()}
     if content_type:
         headers['Content-Type'] = content_type
     if token:
         headers['token'] = token
+    if route_to:
+        headers['RouteTo'] = route_to
     return headers
 
 
@@ -71,47 +75,139 @@ def natural_sort_key(text):
 
     return [convert(c) for c in re.split('([0-9]+)', text)]
 
+
+def custom_properties_as_dict(value):
+    """
+    Normalize a JSONField-backed custom_properties value into a dict.
+
+    Historical rows (TextField era and early JSONField migration) may store a
+    JSON-encoded string instead of an object. API clients can also submit a
+    string value because JSONField accepts any JSON type. Call this before
+    reading or merging custom_properties.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            logger.warning(
+                "custom_properties stored as non-JSON string; ignoring: %r",
+                value[:100],
+            )
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    if value is None:
+        return {}
+    return {}
+
+
+def ensure_custom_properties_dict(value):
+    """
+    Return a dict for read/merge/bulk-write paths. Dict values pass through
+    without re-parsing. Use model ``save()`` (not this) as the canonical
+    normalizer for ORM writes that go through ``save()``.
+    """
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    return custom_properties_as_dict(value)
+
+
+def truncate_with_warning(value, max_length, *, label):
+    """Clamp a string to ``max_length``, logging a warning when truncated.
+
+    Used for provider-supplied CharField values (logo names, stream names,
+    EPG titles, etc.) so oversized input cannot abort bulk inserts with
+    ``value too long for type character varying(...)``.
+
+    ``max_length`` and ``label`` are required. Pass the model field limit
+    (e.g. ``Logo._meta.get_field("name").max_length``) and a short label
+    for log context (e.g. ``"Logo name"``).
+    """
+    if value is None:
+        return value
+    if not isinstance(value, str):
+        value = str(value)
+    if len(value) <= max_length:
+        return value
+    logger.warning(
+        "%s too long (%s > %s), truncating: %s...",
+        label,
+        len(value),
+        max_length,
+        value[:80],
+    )
+    return value[:max_length]
+
+
 class RedisClient:
     _client = None
     _buffer = None
     _pubsub_client = None
 
     @classmethod
+    def _connection_pool_kwargs(cls, decode_responses=True, socket_timeout=5):
+        """Build kwargs for a process-local BlockingConnectionPool."""
+        redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
+        redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
+        redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
+        redis_password = os.environ.get("REDIS_PASSWORD", getattr(settings, 'REDIS_PASSWORD', ''))
+        redis_user = os.environ.get("REDIS_USER", getattr(settings, 'REDIS_USER', ''))
+
+        socket_connect_timeout = getattr(settings, 'REDIS_SOCKET_CONNECT_TIMEOUT', 5)
+        health_check_interval = getattr(settings, 'REDIS_HEALTH_CHECK_INTERVAL', 30)
+        socket_keepalive = getattr(settings, 'REDIS_SOCKET_KEEPALIVE', True)
+        retry_on_timeout = getattr(settings, 'REDIS_RETRY_ON_TIMEOUT', True)
+        max_connections = int(getattr(settings, 'REDIS_MAX_CONNECTIONS', 50))
+        pool_timeout = float(getattr(settings, 'REDIS_POOL_TIMEOUT', 20))
+        ssl_params = getattr(settings, 'REDIS_SSL_PARAMS', {})
+
+        return {
+            'host': redis_host,
+            'port': redis_port,
+            'db': redis_db,
+            'password': redis_password if redis_password else None,
+            'username': redis_user if redis_user else None,
+            'socket_timeout': socket_timeout,
+            'socket_connect_timeout': socket_connect_timeout,
+            'socket_keepalive': socket_keepalive,
+            'health_check_interval': health_check_interval,
+            'retry_on_timeout': retry_on_timeout,
+            'decode_responses': decode_responses,
+            'max_connections': max_connections,
+            'timeout': pool_timeout,
+            **ssl_params,
+        }
+
+    @classmethod
+    def _make_client(cls, decode_responses=True, socket_timeout=5):
+        """Create a Redis client backed by a bounded BlockingConnectionPool."""
+        from redis.connection import BlockingConnectionPool
+
+        pool = BlockingConnectionPool(
+            **cls._connection_pool_kwargs(
+                decode_responses=decode_responses,
+                socket_timeout=socket_timeout,
+            )
+        )
+        return redis.Redis(connection_pool=pool)
+
+    @classmethod
     def _init_client(cls, decode_responses=True, max_retries=5, retry_interval=1):
         retry_count = 0
         while retry_count < max_retries:
             try:
-                # Get connection parameters from settings or environment
                 redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
                 redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
                 redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
-                redis_password = os.environ.get("REDIS_PASSWORD", getattr(settings, 'REDIS_PASSWORD', ''))
-                redis_user = os.environ.get("REDIS_USER", getattr(settings, 'REDIS_USER', ''))
-
-                # Use standardized settings
-                socket_timeout = getattr(settings, 'REDIS_SOCKET_TIMEOUT', 5)
-                socket_connect_timeout = getattr(settings, 'REDIS_SOCKET_CONNECT_TIMEOUT', 5)
-                health_check_interval = getattr(settings, 'REDIS_HEALTH_CHECK_INTERVAL', 30)
-                socket_keepalive = getattr(settings, 'REDIS_SOCKET_KEEPALIVE', True)
-                retry_on_timeout = getattr(settings, 'REDIS_RETRY_ON_TIMEOUT', True)
-
-                # TLS params from settings (empty dict when TLS is disabled)
                 ssl_params = getattr(settings, 'REDIS_SSL_PARAMS', {})
 
-                # Create Redis client with better defaults
-                client = redis.Redis(
-                    host=redis_host,
-                    port=redis_port,
-                    db=redis_db,
-                    password=redis_password if redis_password else None,
-                    username=redis_user if redis_user else None,
-                    socket_timeout=socket_timeout,
-                    socket_connect_timeout=socket_connect_timeout,
-                    socket_keepalive=socket_keepalive,
-                    health_check_interval=health_check_interval,
-                    retry_on_timeout=retry_on_timeout,
+                # Bounded pool: gevent concurrency must not open unbounded Redis fds.
+                client = cls._make_client(
                     decode_responses=decode_responses,
-                    **ssl_params
+                    socket_timeout=getattr(settings, 'REDIS_SOCKET_TIMEOUT', 5),
                 )
 
                 # Validate connection with ping
@@ -122,6 +218,13 @@ class RedisClient:
                 try:
                     client.config_set('save', '')  # Disable RDB snapshots
                     client.config_set('appendonly', 'no')  # Disable AOF logging
+
+                    # Close idle clients after REDIS_IDLE_TIMEOUT seconds with
+                    # no commands (0 = disabled). Blocked Celery BRPOP waiters
+                    # are exempt. Best-effort: managed Redis may reject CONFIG SET.
+                    idle_timeout = int(getattr(settings, 'REDIS_IDLE_TIMEOUT', 300))
+                    if idle_timeout > 0:
+                        client.config_set('timeout', str(idle_timeout))
 
                     # Disable protected mode when in debug mode
                     if os.environ.get('DISPATCHARR_DEBUG', '').lower() == 'true':
@@ -188,39 +291,15 @@ class RedisClient:
         """Get Redis client optimized for PubSub operations"""
         if cls._pubsub_client is None:
             retry_count = 0
+            ssl_params = getattr(settings, 'REDIS_SSL_PARAMS', {})
             while retry_count < max_retries:
                 try:
-                    # Get connection parameters from settings or environment
                     redis_host = os.environ.get("REDIS_HOST", getattr(settings, 'REDIS_HOST', 'localhost'))
                     redis_port = int(os.environ.get("REDIS_PORT", getattr(settings, 'REDIS_PORT', 6379)))
                     redis_db = int(os.environ.get("REDIS_DB", getattr(settings, 'REDIS_DB', 0)))
-                    redis_password = os.environ.get("REDIS_PASSWORD", getattr(settings, 'REDIS_PASSWORD', ''))
-                    redis_user = os.environ.get("REDIS_USER", getattr(settings, 'REDIS_USER', ''))
 
-                    # Use standardized settings but without socket timeouts for PubSub
-                    # Important: socket_timeout is None for PubSub operations
-                    socket_connect_timeout = getattr(settings, 'REDIS_SOCKET_CONNECT_TIMEOUT', 5)
-                    socket_keepalive = getattr(settings, 'REDIS_SOCKET_KEEPALIVE', True)
-                    health_check_interval = getattr(settings, 'REDIS_HEALTH_CHECK_INTERVAL', 30)
-                    retry_on_timeout = getattr(settings, 'REDIS_RETRY_ON_TIMEOUT', True)
-
-                    ssl_params = getattr(settings, 'REDIS_SSL_PARAMS', {})
-
-                    # Create Redis client with PubSub-optimized settings - no timeout
-                    client = redis.Redis(
-                        host=redis_host,
-                        port=redis_port,
-                        db=redis_db,
-                        password=redis_password if redis_password else None,
-                        username=redis_user if redis_user else None,
-                        socket_timeout=None,  # Critical: No timeout for PubSub operations
-                        socket_connect_timeout=socket_connect_timeout,
-                        socket_keepalive=socket_keepalive,
-                        health_check_interval=health_check_interval,
-                        retry_on_timeout=retry_on_timeout,
-                        decode_responses=True,
-                        **ssl_params
-                    )
+                    # socket_timeout=None is required so PubSub listens do not time out.
+                    client = cls._make_client(decode_responses=True, socket_timeout=None)
 
                     # Validate connection with ping
                     client.ping()
@@ -354,6 +433,17 @@ def _is_gevent_monkey_patched():
         return gevent.monkey.is_module_patched('threading')
     except Exception:
         return False
+
+
+def _cooperative_yield():
+    """Yield to the gevent hub during CPU-bound loops (no-op otherwise)."""
+    if not _is_gevent_monkey_patched():
+        return
+    try:
+        import gevent
+        gevent.sleep(0)
+    except ImportError:
+        pass
 
 
 def _is_celery_worker_context():
@@ -506,13 +596,34 @@ def monitor_memory_usage(func):
         return result
     return wrapper
 
-def cleanup_memory(log_usage=False, force_collection=True):
+def trim_c_allocator_heap():
+    """Return unused C heap pages to the OS where supported (glibc malloc_trim)."""
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc_name = ctypes.util.find_library("c")
+        if not libc_name:
+            return False
+        libc = ctypes.CDLL(libc_name)
+        if not hasattr(libc, "malloc_trim"):
+            return False
+        libc.malloc_trim(0)
+        return True
+    except Exception:
+        logger.debug("malloc_trim unavailable or failed", exc_info=True)
+        return False
+
+
+def cleanup_memory(log_usage=False, force_collection=True, trim_heap=False):
     """
     Comprehensive memory cleanup function to reduce memory footprint
 
     Args:
         log_usage: Whether to log memory usage before and after cleanup
         force_collection: Whether to force garbage collection
+        trim_heap: Return freed C heap pages to the OS. Only use after DB
+            connections are closed (e.g. Celery task_postrun).
     """
     logger.trace("Starting memory cleanup django memory cleanup")
     # Skip logging if log level is not set to debug or more verbose (like trace)
@@ -547,7 +658,32 @@ def cleanup_memory(log_usage=False, force_collection=True):
             logger.debug(f"Memory after cleanup: {after_mem:.2f} MB (change: {after_mem-before_mem:.2f} MB)")
         except (ImportError, Exception):
             pass
+    if trim_heap:
+        trim_c_allocator_heap()
     logger.trace("Memory cleanup complete for django")
+
+
+def spawn_memory_trim(close_connections=False):
+    """Reclaim a request's heap pages: GC, then return freed C pages to the OS.
+
+    On gevent uWSGI workers the trim runs in a spawned greenlet so it never
+    blocks the caller; Celery prefork workers (no gevent hub) run it inline.
+    Set close_connections=True when called from a streaming generator's teardown
+    so the pooled DB connection is released first.
+    """
+    def _run():
+        cleanup_memory(force_collection=True, trim_heap=True)
+
+    if close_connections:
+        from django.db import close_old_connections
+        close_old_connections()
+
+    if _is_gevent_monkey_patched():
+        import gevent
+        gevent.spawn(_run)
+    else:
+        _run()
+
 
 def safe_upload_path(filename: str, base_dir) -> str:
     """Return a safe absolute path for an uploaded file within base_dir.
@@ -561,6 +697,31 @@ def safe_upload_path(filename: str, base_dir) -> str:
     if not file_path.is_relative_to(base):
         raise ValueError("Invalid filename.")
     return str(file_path)
+
+
+def resolve_safe_local_data_path(path: str, allowed_roots=("/data/logos",)):
+    """Return a realpath under one of *allowed_roots*, or None if unsafe.
+
+    Rejects path traversal (``/data/../etc/passwd``), symlinks that escape
+    the allowlisted roots, and non-``/data`` paths. Used by logo cache
+    endpoints that must remain AllowAny for player clients.
+    """
+    if not path or not isinstance(path, str):
+        return None
+    if not path.startswith("/data"):
+        return None
+    try:
+        real = Path(path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    for root in allowed_roots:
+        try:
+            root_real = Path(root).resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if real == root_real or real.is_relative_to(root_real):
+            return str(real)
+    return None
 
 
 def is_protected_path(file_path):
@@ -613,7 +774,7 @@ def validate_flexible_url(value):
         # Matches: http://hostname, https://hostname/, http://hostname:port/path/to/file.xml, rtp://192.168.2.1,  rtsp://192.168.178.1, udp://239.0.0.1:1234
         # Also matches FQDNs for rtsp/rtp/udp protocols: rtsp://FQDN/path?query=value
         # Also supports authentication: rtsp://user:pass@hostname/path
-        non_fqdn_pattern = r'^(rts?p|https?|udp)://([a-zA-Z0-9_\-\.]+:[^\s@]+@)?([a-zA-Z0-9]([a-zA-Z0-9\-\.]{0,61}[a-zA-Z0-9])?|[0-9.]+)?(\:[0-9]+)?(/[^\s]*)?$'
+        non_fqdn_pattern = r'^(rts?p|https?|udp)://([a-zA-Z0-9_\-\.]+:[^\s@]+@)?([a-zA-Z0-9]([a-zA-Z0-9_\-\.]{0,61}[a-zA-Z0-9])?|[0-9.]+)?(\:[0-9]+)?(/[^\s]*)?$'
         non_fqdn_match = re.match(non_fqdn_pattern, value)
 
         if non_fqdn_match:
@@ -702,7 +863,8 @@ def dispatch_event_system(event_type, channel_id=None, channel_name=None, **deta
         # Don't fail main path if connect dispatch fails
         pass
     finally:
-        close_old_connections()
+        if _should_use_sync_websocket_send() or _is_gevent_monkey_patched():
+            close_old_connections()
 
 
 def _dispatch_system_event_integrations(
@@ -747,7 +909,7 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
 
     Args:
         event_type: Type of event (e.g., 'channel_start', 'client_connect')
-        channel_id: Optional UUID of the channel (or stream_hash for stream preview)
+        channel_id: Optional UUID of the channel (or stream_hash for preview mode)
         channel_name: Optional name of the channel
         **details: Additional details to store in the event (stored as JSON)
 
@@ -760,23 +922,25 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
     import uuid as uuid_module
 
     try:
-        # Validate channel_id is a valid UUID
-        # Stream preview uses stream_hash (not UUID format) - store as detail instead
-        safe_channel_id = None
-        if channel_id is not None:
+        # Validate channel_id is a valid UUID before DB query
+        # Stream preview uses stream_hash (SHA256) instead of UUID - store in details instead
+        validated_channel_id = None
+        if channel_id:
             try:
+                # Try to parse as UUID
                 uuid_module.UUID(str(channel_id))
-                safe_channel_id = channel_id
+                validated_channel_id = channel_id
             except (ValueError, AttributeError):
-                # Not a valid UUID (e.g., stream_hash for stream preview)
-                # Store as detail instead of channel_id
-                details['stream_hash'] = str(channel_id)
-                logger.debug(f"channel_id '{channel_id}' is not a valid UUID, storing as stream_hash in details")
+                # channel_id is not a valid UUID (e.g. stream_hash in preview mode)
+                # Store in details instead of channel_id field
+                if 'stream_hash' not in details:
+                    details['stream_hash'] = str(channel_id)
+                validated_channel_id = None
         
         # Create the event
         SystemEvent.objects.create(
             event_type=event_type,
-            channel_id=safe_channel_id,
+            channel_id=validated_channel_id,
             channel_name=channel_name,
             details=details
         )
@@ -784,7 +948,7 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
         # Connect integrations and plugin event hooks (non-blocking on gevent uWSGI)
         _dispatch_system_event_integrations(
             event_type,
-            channel_id=safe_channel_id,
+            channel_id=channel_id,
             channel_name=channel_name,
             **details,
         )
@@ -792,11 +956,9 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
         # Get max events from settings (default 100)
         try:
             from .models import CoreSettings
-            system_settings = CoreSettings.objects.filter(key='system_settings').first()
-            if system_settings and isinstance(system_settings.value, dict):
-                max_events = int(system_settings.value.get('max_system_events', 100))
-            else:
-                max_events = 100
+            max_events = int(
+                CoreSettings.get_system_settings().get("max_system_events", 100) or 100
+            )
         except Exception:
             max_events = 100
 
@@ -814,7 +976,8 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
     finally:
         # geventpool keeps checked-out connections until close(); release promptly
         # when logging from proxy greenlets/threads outside a normal request cycle.
-        close_old_connections()
+        if _is_gevent_monkey_patched():
+            close_old_connections()
 
 
 def _send_async(channel_layer, group, message):
@@ -978,3 +1141,89 @@ def send_notification_dismissed(notification_key):
         )
     except Exception as e:
         logger.error(f"Failed to send notification dismissed event: {e}")
+
+
+# ================================================================================
+# HTTP Proxy Utility Functions
+# ================================================================================
+# Added: 2026-06-18
+# Purpose: Validate and sanitize proxy URLs for security and reliability
+
+
+def sanitize_proxy_url(proxy_url):
+    """Remove credentials from proxy URL for safe logging.
+    
+    Args:
+        proxy_url: Proxy URL that may contain username:password
+        
+    Returns:
+        Sanitized URL with credentials replaced by ***
+        
+    Example:
+        sanitize_proxy_url("http://user:pass@proxy:8080")
+        Returns: "http://***:***@proxy:8080"
+    """
+    if not proxy_url:
+        return proxy_url
+    
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(proxy_url)
+        
+        if parsed.username or parsed.password:
+            # Replace credentials with ***
+            if parsed.port:
+                netloc = f"***:***@{parsed.hostname}:{parsed.port}"
+            else:
+                netloc = f"***:***@{parsed.hostname}"
+            
+            sanitized = parsed._replace(netloc=netloc)
+            return urlunparse(sanitized)
+    except Exception:
+        return "[invalid proxy URL]"
+    
+    return proxy_url
+
+
+def validate_proxy_url(proxy_url):
+    """Validate proxy URL format.
+    
+    Args:
+        proxy_url: Proxy URL string to validate
+        
+    Raises:
+        ValidationError: If URL format is invalid or uses unsupported protocol
+    """
+    from django.core.exceptions import ValidationError as DjangoValidationError
+    from urllib.parse import urlparse
+    
+    if not proxy_url or not proxy_url.strip():
+        return  # Empty proxy is valid (means no proxy)
+    
+    try:
+        parsed = urlparse(proxy_url)
+        
+        # Validate protocol
+        if parsed.scheme not in ('http', 'https', 'socks5', 'socks5h'):
+            raise DjangoValidationError(
+                f"Proxy URL must use http://, https://, socks5://, or socks5h:// protocol. "
+                f"Got: {parsed.scheme or '(none)'}"
+            )
+        
+        # Validate netloc (host required)
+        if not parsed.netloc:
+            raise DjangoValidationError(
+                "Proxy URL must include hostname and optional port "
+                "(e.g., http://proxy.example.com:8080)"
+            )
+        
+        # Validate hostname is not empty
+        if not parsed.hostname:
+            raise DjangoValidationError(
+                "Proxy URL must include a valid hostname"
+            )
+        
+    except DjangoValidationError:
+        raise
+    except Exception as e:
+        raise DjangoValidationError(f"Invalid proxy URL format: {e}")

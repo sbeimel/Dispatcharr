@@ -7,6 +7,7 @@ the correct post-fix behavior. Comments call out the failure mode and the
 fix location.
 """
 from unittest import skipUnless
+from unittest.mock import MagicMock, patch
 
 from django.db import connection
 from django.test import TestCase, TransactionTestCase
@@ -16,7 +17,10 @@ from apps.channels.models import (
     Channel,
     ChannelGroup,
     ChannelGroupM3UAccount,
+    ChannelProfile,
+    ChannelProfileMembership,
     ChannelStream,
+    Logo,
     Stream,
 )
 from apps.m3u.models import M3UAccount
@@ -273,15 +277,36 @@ class AccountDeleteCleanupTests(TestCase):
 
 class ChannelDeleteStopsProxyTests(TestCase):
     """
-    Issue #870: When an auto-sync refresh deletes a channel that has an
-    active proxy session, the session's Redis state survives, making the UI
-    "Stop" button fail with 'Channel not found'. Fix is a pre_delete signal
-    on Channel that calls ChannelService.stop_channel first, covering
-    manual, bulk, and sync-triggered deletes uniformly.
+    Issue #870: sync-driven channel deletes must stop active proxy sessions
+    before the DB row is removed. Manual deletes leave this optional via the
+    stop_stream API flag (plain model.delete() does not stop).
     """
 
-    def test_pre_delete_signal_calls_stop_channel(self):
+    def test_model_delete_does_not_auto_stop_proxy(self):
         from unittest.mock import patch
+
+        account = _make_account()
+        group = _make_group(name="Sports")
+        channel = Channel.objects.create(
+            name="ESPN",
+            channel_number=1,
+            channel_group=group,
+            auto_created=True,
+            auto_created_by=account,
+        )
+
+        with patch(
+            "apps.proxy.live_proxy.services.channel_service.ChannelService.stop_channel"
+        ) as mock_stop:
+            channel.delete()
+
+        mock_stop.assert_not_called()
+        self.assertFalse(Channel.objects.filter(id=channel.id).exists())
+
+    def test_sync_helper_stops_proxy_before_delete(self):
+        from unittest.mock import patch
+
+        from apps.m3u.tasks import _delete_channels_stopping_streams
 
         account = _make_account()
         group = _make_group(name="Sports")
@@ -295,15 +320,21 @@ class ChannelDeleteStopsProxyTests(TestCase):
         channel_uuid = str(channel.uuid)
 
         with patch(
-            "apps.proxy.live_proxy.services.channel_service.ChannelService.stop_channel"
+            "apps.proxy.live_proxy.services.channel_service.ChannelService.stop_channels"
         ) as mock_stop:
-            channel.delete()
+            deleted = _delete_channels_stopping_streams([channel])
 
-        mock_stop.assert_called_once_with(channel_uuid)
+        self.assertEqual(deleted, 1)
+        mock_stop.assert_called_once()
+        stopped = [str(u) for u in mock_stop.call_args[0][0] if u]
+        self.assertEqual(stopped, [channel_uuid])
+        self.assertFalse(Channel.objects.filter(id=channel.id).exists())
 
-    def test_pre_delete_signal_swallows_stop_errors(self):
-        """Proxy failure must not block the DB delete."""
+    def test_sync_helper_continues_delete_when_stop_channel_fails(self):
+        """Per-channel proxy failures must not block the DB delete."""
         from unittest.mock import patch
+
+        from apps.m3u.tasks import _delete_channels_stopping_streams
 
         account = _make_account()
         group = _make_group(name="Sports")
@@ -314,14 +345,16 @@ class ChannelDeleteStopsProxyTests(TestCase):
             auto_created=True,
             auto_created_by=account,
         )
+        channel_id = channel.id
 
         with patch(
             "apps.proxy.live_proxy.services.channel_service.ChannelService.stop_channel",
             side_effect=Exception("proxy is down"),
         ):
-            channel.delete()
+            deleted = _delete_channels_stopping_streams([channel])
 
-        self.assertFalse(Channel.objects.filter(id=channel.id).exists())
+        self.assertEqual(deleted, 1)
+        self.assertFalse(Channel.objects.filter(id=channel_id).exists())
 
 
 class RangeEnforcementTests(TestCase):
@@ -644,6 +677,34 @@ class NumbersInRangeLookupTests(TestCase):
         )
         self.assertFalse(occupant["has_channel_number_override"])
 
+    def test_group_override_channel_reports_target_group(self):
+        # When auto-sync routes channels into a different group via
+        # group_override, the occupant's channel_group_id is the override
+        # target, not the source group being configured. The frontend relies
+        # on this to recognize override-routed channels as the config's own
+        # output (effectiveSyncGroupId), so the warning does not flag them.
+        account = _make_account()
+        source = _make_group(name="SourceGrp")
+        target = _make_group(name="TargetGrp")
+        Channel.objects.create(
+            name="Routed",
+            channel_number=3210,
+            channel_group=target,
+            auto_created=True,
+            auto_created_by=account,
+        )
+        client = self._client()
+
+        response = client.get(
+            "/api/channels/channels/numbers-in-range/?start=3210&end=3210"
+        )
+
+        occupant = response.data["occupants"][0]
+        self.assertEqual(occupant["channel_group_id"], target.id)
+        self.assertNotEqual(occupant["channel_group_id"], source.id)
+        self.assertTrue(occupant["auto_created"])
+        self.assertEqual(occupant["auto_created_by_account_id"], account.id)
+
     def test_manual_channel_exposed_with_auto_created_false(self):
         # Manual channels are always a real collision worth surfacing.
         # The response must flag them with auto_created=False and a null
@@ -734,6 +795,128 @@ class RegexPreviewTests(TestCase):
         self.assertEqual(response.data["total_in_group"], 3)
         self.assertEqual(response.data["total_scanned"], 3)
         self.assertFalse(response.data["scan_limit_hit"])
+
+    def test_find_replace_applies_numbered_capture_group(self):
+        # The replace field accepts JS-style $1 backreferences, but the regex
+        # engine expects \1. Without the conversion the preview echoes the
+        # literal "$1", so the previewed "after" disagrees with the name the
+        # live rename produces.
+        account = self._make_account()
+        group = _make_group(name="Sports")
+        Stream.objects.create(
+            name="High Limit Racing at Eagle @ Jun 9 7:00 PM",
+            url="http://example.com/hlr.m3u8",
+            m3u_account=account,
+            channel_group=group,
+            last_seen=timezone.now(),
+        )
+        client = self._client()
+
+        response = client.get(
+            "/api/channels/streams/regex-preview/",
+            {"channel_group": "Sports", "find": r"(.+) @.*", "replace": "$1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["find_match_count"], 1)
+        after = response.data["find_matches"][0]["after"]
+        self.assertEqual(after, "High Limit Racing at Eagle")
+        self.assertNotIn("$1", after)
+
+    def test_preview_after_matches_live_sync_rename(self):
+        # Guards the defect class: the preview and the live rename are
+        # separate code paths that must convert the replacement identically,
+        # so the preview can never promise an output the sync would not yield.
+        name = "High Limit Racing at Eagle @ Jun 9 7:00 PM"
+        account = self._make_account()
+        group = _make_group(name="Racing")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={
+                "name_regex_pattern": r"(.+) @.*",
+                "name_replace_pattern": "$1",
+            },
+        )
+        _make_stream(account, group, name=name, tvg_id="hlr")
+
+        result = _sync(account)
+        self.assertEqual(result.get("status"), "ok")
+        channel = Channel.objects.get(auto_created=True, auto_created_by=account)
+        live_name = channel.name
+
+        client = self._client()
+        response = client.get(
+            "/api/channels/streams/regex-preview/",
+            {"channel_group": "Racing", "find": r"(.+) @.*", "replace": "$1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        preview_after = response.data["find_matches"][0]["after"]
+        self.assertEqual(preview_after, live_name)
+        self.assertEqual(preview_after, "High Limit Racing at Eagle")
+
+    def test_regex_engine_pattern_transforms_in_preview(self):
+        # Both the preview and the live rename use the regex module, which is
+        # more permissive than stdlib re and matches the JS-style syntax the UI
+        # authors. A quantified anchor like "^*" (which stdlib re rejects)
+        # compiles and transforms rather than reporting an error.
+        account = self._make_account()
+        group = _make_group(name="Sports")
+        Stream.objects.create(
+            name="Doc95",
+            url="http://example.com/doc95.m3u8",
+            m3u_account=account,
+            channel_group=group,
+            last_seen=timezone.now(),
+        )
+        client = self._client()
+
+        response = client.get(
+            "/api/channels/streams/regex-preview/",
+            {"channel_group": "Sports", "find": "^*", "replace": "$"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("find_error", response.data)
+        self.assertEqual(response.data["find_match_count"], 1)
+        # ^* matches the empty string at every position, so the literal $
+        # replacement is inserted between characters.
+        self.assertEqual(
+            response.data["find_matches"][0]["after"], "$D$o$c$9$5$"
+        )
+
+    def test_preview_and_sync_agree_on_regex_only_pattern(self):
+        # Parity guard for the engine alignment: a pattern valid in regex but
+        # not stdlib re must transform identically in the sync and the preview,
+        # rather than diverging (the sync no longer silently keeps the
+        # original name for these patterns).
+        name = "Doc95"
+        account = self._make_account()
+        group = _make_group(name="Docs")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={
+                "name_regex_pattern": "^*",
+                "name_replace_pattern": "$",
+            },
+        )
+        _make_stream(account, group, name=name, tvg_id="doc95")
+
+        result = _sync(account)
+        self.assertEqual(result.get("status"), "ok")
+        channel = Channel.objects.get(auto_created=True, auto_created_by=account)
+        live_name = channel.name
+        self.assertNotEqual(live_name, name)
+
+        client = self._client()
+        response = client.get(
+            "/api/channels/streams/regex-preview/",
+            {"channel_group": "Docs", "find": "^*", "replace": "$"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["find_matches"][0]["after"], live_name)
 
     def test_filter_returns_matched_names_with_count(self):
         account = self._make_account()
@@ -1458,6 +1641,375 @@ class SyncPerformanceRegressionTests(TestCase):
         )
 
 
+class AutoSyncMembershipRegressionTests(TestCase):
+    def _make_existing_channel(self, account, group, *streams):
+        channel = Channel.objects.create(
+            name=streams[0].name,
+            channel_number=100,
+            channel_group=group,
+            auto_created=True,
+            auto_created_by=account,
+        )
+        ChannelStream.objects.bulk_create(
+            [ChannelStream(channel=channel, stream=stream) for stream in streams]
+        )
+        return channel
+
+    @staticmethod
+    def _membership_snapshot(channel):
+        return list(
+            ChannelProfileMembership.objects.filter(channel=channel)
+            .order_by("channel_profile_id")
+            .values_list("channel_profile_id", "enabled")
+        )
+
+    @staticmethod
+    def _set_custom_properties(group_relation, custom_properties):
+        group_relation.custom_properties = custom_properties
+        group_relation.save(update_fields=["custom_properties"])
+
+    def test_selected_profiles_keep_historical_reconciliation(self):
+        account = _make_account()
+        group = _make_group()
+        target_disabled = ChannelProfile.objects.create(name="Target disabled")
+        target_missing = ChannelProfile.objects.create(name="Target missing")
+        other_profile = ChannelProfile.objects.create(name="Other profile")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={
+                "channel_profile_ids": [target_disabled.id, target_missing.id]
+            },
+        )
+        stream = _make_stream(account, group)
+        channel = self._make_existing_channel(account, group, stream)
+        ChannelProfileMembership.objects.create(
+            channel=channel,
+            channel_profile=target_disabled,
+            enabled=False,
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel,
+            channel_profile=other_profile,
+            enabled=True,
+        )
+
+        result = _sync(account)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(
+            ChannelProfileMembership.objects.get(
+                channel=channel, channel_profile=target_disabled
+            ).enabled
+        )
+        self.assertTrue(
+            ChannelProfileMembership.objects.get(
+                channel=channel, channel_profile=target_missing
+            ).enabled
+        )
+        self.assertFalse(
+            ChannelProfileMembership.objects.get(
+                channel=channel, channel_profile=other_profile
+            ).enabled
+        )
+
+    def test_no_profiles_creates_new_channel_without_memberships(self):
+        account = _make_account()
+        group = _make_group()
+        ChannelProfile.objects.create(name="Existing profile")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={"skip_channel_profile_memberships": True},
+        )
+        _make_stream(account, group)
+
+        result = _sync(account)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["channels_created"], 1)
+        channel = Channel.objects.get(auto_created_by=account)
+        self.assertFalse(
+            ChannelProfileMembership.objects.filter(channel=channel).exists()
+        )
+
+    def test_no_profiles_preserves_all_existing_memberships(self):
+        account = _make_account()
+        group = _make_group()
+        enabled_profile = ChannelProfile.objects.create(name="Enabled")
+        disabled_profile = ChannelProfile.objects.create(name="Disabled")
+        other_profile = ChannelProfile.objects.create(name="Other")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={"skip_channel_profile_memberships": True},
+        )
+        stream = _make_stream(account, group)
+        channel = self._make_existing_channel(account, group, stream)
+        ChannelProfileMembership.objects.create(
+            channel=channel,
+            channel_profile=enabled_profile,
+            enabled=True,
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel,
+            channel_profile=disabled_profile,
+            enabled=False,
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel,
+            channel_profile=other_profile,
+            enabled=True,
+        )
+
+        before = self._membership_snapshot(channel)
+        result = _sync(account)
+        after = self._membership_snapshot(channel)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(after, before)
+        self.assertEqual(len(after), 3)
+        self.assertIn((enabled_profile.id, True), after)
+        self.assertIn((disabled_profile.id, False), after)
+        self.assertIn((other_profile.id, True), after)
+
+    def test_no_profiles_is_idempotent_across_repeated_refreshes(self):
+        account = _make_account()
+        group = _make_group()
+        enabled_profile = ChannelProfile.objects.create(name="Enabled")
+        disabled_profile = ChannelProfile.objects.create(name="Disabled")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={"skip_channel_profile_memberships": True},
+        )
+        stream = _make_stream(account, group)
+        channel = self._make_existing_channel(account, group, stream)
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=enabled_profile, enabled=True
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=disabled_profile, enabled=False
+        )
+
+        before = self._membership_snapshot(channel)
+        first_result = _sync(account)
+        after_first = self._membership_snapshot(channel)
+        second_result = _sync(account)
+        after_second = self._membership_snapshot(channel)
+
+        self.assertEqual(first_result["status"], "ok")
+        self.assertEqual(second_result["status"], "ok")
+        self.assertEqual(after_first, before)
+        self.assertEqual(after_second, before)
+
+    def test_switching_from_profile_to_no_profiles_preserves_last_state(self):
+        account = _make_account()
+        group = _make_group()
+        target_profile = ChannelProfile.objects.create(name="Target")
+        other_profile = ChannelProfile.objects.create(name="Other")
+        group_relation = _attach_group_to_account(
+            account,
+            group,
+            custom_properties={"channel_profile_ids": [target_profile.id]},
+        )
+        stream = _make_stream(account, group)
+        channel = self._make_existing_channel(account, group, stream)
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=target_profile, enabled=False
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=other_profile, enabled=True
+        )
+
+        standard_result = _sync(account)
+        standard_snapshot = self._membership_snapshot(channel)
+        self._set_custom_properties(
+            group_relation, {"skip_channel_profile_memberships": True}
+        )
+        no_profiles_result = _sync(account)
+
+        self.assertEqual(standard_result["status"], "ok")
+        self.assertEqual(no_profiles_result["status"], "ok")
+        self.assertEqual(self._membership_snapshot(channel), standard_snapshot)
+        self.assertIn((target_profile.id, True), standard_snapshot)
+        self.assertIn((other_profile.id, False), standard_snapshot)
+
+    def test_switching_from_no_profiles_to_profile_resumes_reconciliation(self):
+        account = _make_account()
+        group = _make_group()
+        target_profile = ChannelProfile.objects.create(name="Target")
+        other_profile = ChannelProfile.objects.create(name="Other")
+        group_relation = _attach_group_to_account(
+            account,
+            group,
+            custom_properties={"skip_channel_profile_memberships": True},
+        )
+        stream = _make_stream(account, group)
+        channel = self._make_existing_channel(account, group, stream)
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=target_profile, enabled=False
+        )
+        ChannelProfileMembership.objects.create(
+            channel=channel, channel_profile=other_profile, enabled=True
+        )
+
+        no_profiles_result = _sync(account)
+        no_profiles_snapshot = self._membership_snapshot(channel)
+        self._set_custom_properties(
+            group_relation, {"channel_profile_ids": [target_profile.id]}
+        )
+        selected_profile_result = _sync(account)
+        selected_profile_snapshot = self._membership_snapshot(channel)
+
+        self.assertEqual(no_profiles_result["status"], "ok")
+        self.assertEqual(selected_profile_result["status"], "ok")
+        self.assertIn((target_profile.id, False), no_profiles_snapshot)
+        self.assertIn((other_profile.id, True), no_profiles_snapshot)
+        self.assertIn((target_profile.id, True), selected_profile_snapshot)
+        self.assertIn((other_profile.id, False), selected_profile_snapshot)
+
+    def test_no_profiles_flag_precedes_residual_profile_ids(self):
+        account = _make_account()
+        group = _make_group()
+        profile = ChannelProfile.objects.create(name="Residual target")
+        _attach_group_to_account(
+            account,
+            group,
+            custom_properties={
+                "skip_channel_profile_memberships": True,
+                "channel_profile_ids": [profile.id],
+            },
+        )
+        _make_stream(account, group)
+        profile_manager = ChannelProfile.objects
+        membership_manager = ChannelProfileMembership.objects
+
+        with (
+            patch.object(
+                profile_manager, "filter", wraps=profile_manager.filter
+            ) as profile_filter,
+            patch.object(
+                profile_manager, "all", wraps=profile_manager.all
+            ) as profile_all,
+            patch.object(
+                membership_manager,
+                "bulk_create",
+                wraps=membership_manager.bulk_create,
+            ) as membership_bulk_create,
+            patch.object(
+                membership_manager,
+                "bulk_update",
+                wraps=membership_manager.bulk_update,
+            ) as membership_bulk_update,
+        ):
+            result = _sync(account)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["channels_created"], 1)
+        profile_filter.assert_not_called()
+        profile_all.assert_not_called()
+        membership_bulk_create.assert_not_called()
+        membership_bulk_update.assert_not_called()
+        self.assertFalse(ChannelProfileMembership.objects.exists())
+
+
+class AutoSyncLogoValidationRegressionTests(TestCase):
+    @staticmethod
+    def _invalid_data_uri(marker):
+        return f"data:image/png;base64,{marker}" + ("A" * 5000)
+
+    def test_new_channel_with_rejected_logo_is_created_without_logo(self):
+        account = _make_account()
+        group = _make_group()
+        _attach_group_to_account(account, group)
+        stream = _make_stream(account, group)
+        rejected_url = self._invalid_data_uri("PRIVATE_BASE64_PAYLOAD")
+        stream.logo_url = rejected_url
+        stream.save(update_fields=["logo_url"])
+        logo_manager = Logo.objects
+
+        with (
+            self.assertLogs("apps.channels.tasks", level="WARNING") as logs,
+            patch.object(
+                logo_manager, "filter", wraps=logo_manager.filter
+            ) as logo_filter,
+            patch.object(
+                logo_manager, "get_or_create", wraps=logo_manager.get_or_create
+            ) as logo_get_or_create,
+        ):
+            result = _sync(account)
+
+        channel = Channel.objects.get(auto_created_by=account)
+        warning_output = "\n".join(logs.output)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["channels_failed"], 0)
+        self.assertIsNone(channel.logo_id)
+        self.assertFalse(Logo.objects.filter(url=rejected_url).exists())
+        self.assertIn("Logo URL rejected", warning_output)
+        self.assertIn(stream.name, warning_output)
+        self.assertIn(
+            str(len(rejected_url.encode("utf-8"))), warning_output
+        )
+        self.assertIn("2000", warning_output)
+        self.assertNotIn("PRIVATE_BASE64_PAYLOAD", warning_output)
+        self.assertNotIn("A" * 100, warning_output)
+        self.assertNotIn(rejected_url, warning_output)
+        self.assertEqual(logo_filter.call_count, 0)
+        logo_get_or_create.assert_not_called()
+
+    def test_rejected_logo_warns_only_once_per_sync(self):
+        account = _make_account()
+        group = _make_group()
+        _attach_group_to_account(account, group)
+        rejected_url = self._invalid_data_uri("SHARED_PRIVATE_PAYLOAD")
+        first = _make_stream(account, group, name="First", tvg_id="first")
+        second = _make_stream(account, group, name="Second", tvg_id="second")
+        Stream.objects.filter(id__in=[first.id, second.id]).update(
+            logo_url=rejected_url
+        )
+
+        with self.assertLogs("apps.channels.tasks", level="WARNING") as logs:
+            result = _sync(account)
+
+        rejection_warnings = [
+            message for message in logs.output if "Logo URL rejected" in message
+        ]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["channels_created"], 2)
+        self.assertEqual(len(rejection_warnings), 1)
+        self.assertNotIn("SHARED_PRIVATE_PAYLOAD", rejection_warnings[0])
+
+    def test_rejected_provider_logo_preserves_existing_valid_logo(self):
+        account = _make_account()
+        group = _make_group()
+        _attach_group_to_account(account, group)
+        stream = _make_stream(account, group)
+        valid_logo = Logo.objects.create(
+            name="Existing logo", url="https://logos.example.com/existing.png"
+        )
+        channel = Channel.objects.create(
+            name=stream.name,
+            channel_number=100,
+            channel_group=group,
+            auto_created=True,
+            auto_created_by=account,
+            logo=valid_logo,
+        )
+        ChannelStream.objects.create(channel=channel, stream=stream)
+        rejected_url = self._invalid_data_uri("REJECTED_PROVIDER_PAYLOAD")
+        stream.logo_url = rejected_url
+        stream.save(update_fields=["logo_url"])
+
+        result = _sync(account)
+
+        channel.refresh_from_db()
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["channels_failed"], 0)
+        self.assertEqual(channel.logo_id, valid_logo.id)
+        self.assertFalse(Logo.objects.filter(url=rejected_url).exists())
+
+
 class OrphanCleanupModeTests(TestCase):
     """
     Account-level `custom_properties.orphan_channel_cleanup` is a 3-state
@@ -2040,10 +2592,13 @@ class Migration0037DemoteOrphansTests(TestCase):
             "apps.channels.migrations.0037_auto_sync_overhaul"
         )
 
-        # The migration function takes (apps, schema_editor); apps is
-        # the historical app registry. For this unit test we call with
-        # the live registry.
-        module.backfill_auto_created_by_null(django_apps, None)
+        connection = MagicMock()
+        cursor = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        connection.cursor.return_value.__exit__.return_value = False
+        schema_editor = MagicMock(connection=connection)
+
+        module.backfill_auto_created_by_null(django_apps, schema_editor)
 
         ch.refresh_from_db()
         self.assertFalse(

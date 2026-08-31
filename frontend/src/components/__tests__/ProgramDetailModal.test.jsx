@@ -12,7 +12,9 @@ vi.mock('../../utils/cards/RecordingCardUtils.js', () => ({
   getShowVideoUrl: vi.fn(() => 'http://video.test'),
 }));
 
-vi.mock('../../images/logo.png', () => ({ default: 'default-logo.png' }));
+vi.mock('../../images/logo.png', () => ({
+  default: 'default-logo.png',
+}));
 
 vi.mock('../../utils/dateTimeUtils.js', () => ({
   format: vi.fn(() => '12:00 PM'),
@@ -212,6 +214,19 @@ describe('ProgramDetailModal', () => {
     );
 
     expect(screen.getByText('Record')).toBeInTheDocument();
+  });
+
+  it('hides Record button when onRecord is not provided', async () => {
+    render(
+      <ProgramDetailModal
+        program={baseProgram}
+        channel={baseChannel}
+        opened={true}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText('Record')).not.toBeInTheDocument();
   });
 
   it('hides Record button for past programs', async () => {

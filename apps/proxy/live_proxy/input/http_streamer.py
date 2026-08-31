@@ -26,7 +26,6 @@ class HTTPStreamReader:
         self.pipe_read = None
         self.pipe_write = None
         self.running = False
-        self.error_occurred = False  # Track if an error occurred during streaming
 
     def start(self):
         """Start the HTTP stream reader thread"""
@@ -58,8 +57,9 @@ class HTTPStreamReader:
             # Build proxies dict if proxy is configured
             proxies = None
             if self.proxy:
+                from core.utils import sanitize_proxy_url
                 proxies = {'http': self.proxy, 'https': self.proxy}
-                logger.info(f"HTTP reader using proxy: {self.proxy}")
+                logger.info(f"HTTP reader using proxy: {sanitize_proxy_url(self.proxy)}")
 
             logger.info(f"HTTP reader connecting to {self.url}")
 
@@ -126,25 +126,8 @@ class HTTPStreamReader:
 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP reader request error: {e}")
-            self.error_occurred = True
-        except AttributeError as e:
-            # Attribute error - could be race condition during shutdown (response becomes None)
-            if self.running:
-                logger.error(f"HTTP reader AttributeError (unexpected): {e}")
-                self.error_occurred = True
-            else:
-                # Expected during shutdown - response might be None
-                logger.debug(f"HTTP reader AttributeError during shutdown (expected): {e}")
-        except OSError as e:
-            # OS error (pipe closed, etc.)
-            if self.running:
-                logger.error(f"HTTP reader OSError: {e}")
-                self.error_occurred = True
-            else:
-                logger.debug(f"HTTP reader OSError during shutdown (expected): {e}")
         except Exception as e:
             logger.error(f"HTTP reader unexpected error: {e}", exc_info=True)
-            self.error_occurred = True
         finally:
             self.running = False
             # Close write end of pipe to signal EOF
@@ -160,32 +143,28 @@ class HTTPStreamReader:
         logger.info("Stopping HTTP stream reader")
         self.running = False
 
-        # Close response (thread-safe check)
+        # Close response
         if self.response:
             try:
                 self.response.close()
-                logger.debug("HTTP response closed successfully")
-            except Exception as e:
-                logger.debug(f"Error closing HTTP response (expected during shutdown): {e}")
+            except:
+                pass
 
         # Close session
         if self.session:
             try:
                 self.session.close()
-                logger.debug("HTTP session closed successfully")
-            except Exception as e:
-                logger.debug(f"Error closing HTTP session: {e}")
+            except:
+                pass
 
         # Close write end of pipe
         if self.pipe_write is not None:
             try:
                 os.close(self.pipe_write)
                 self.pipe_write = None
-            except Exception as e:
-                logger.debug(f"Error closing pipe write end: {e}")
+            except:
+                pass
 
         # Wait for thread
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
-            if self.thread.is_alive():
-                logger.warning("HTTP stream reader thread did not stop within timeout")

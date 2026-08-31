@@ -7,10 +7,36 @@ from apps.m3u.models import M3UAccount
 import uuid
 
 
+class VODLogoQuerySet(models.QuerySet):
+    def bulk_create(self, objs, *args, **kwargs):
+        # bulk_create bypasses Model.save(); clamp names here so provider
+        # movie/series titles longer than varchar(255) cannot abort VOD ingest.
+        from core.utils import truncate_with_warning
+
+        max_length = self.model._meta.get_field("name").max_length
+        for obj in objs:
+            obj.name = truncate_with_warning(
+                obj.name, max_length=max_length, label="Logo name"
+            )
+        return super().bulk_create(objs, *args, **kwargs)
+
+
 class VODLogo(models.Model):
     """Logo model specifically for VOD content (movies and series)"""
     name = models.CharField(max_length=255)
     url = models.TextField(unique=True)
+
+    objects = VODLogoQuerySet.as_manager()
+
+    def save(self, *args, **kwargs):
+        from core.utils import truncate_with_warning
+
+        self.name = truncate_with_warning(
+            self.name,
+            max_length=self._meta.get_field("name").max_length,
+            label="Logo name",
+        )
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
@@ -125,6 +151,12 @@ class Movie(models.Model):
     # Metadata IDs for deduplication - these should be globally unique when present
     tmdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="TMDB ID for metadata")
     imdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="IMDB ID for metadata")
+
+    is_adult = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Whether this movie contains adult content",
+    )
 
     # Additional metadata and properties
     custom_properties = models.JSONField(blank=True, null=True, help_text='Additional metadata and properties for the movie')
@@ -243,12 +275,12 @@ class M3UMovieRelation(models.Model):
 
     def get_stream_url(self):
         """Get the full stream URL for this movie from this provider"""
-        # Build URL dynamically for XtreamCodes accounts
         if self.m3u_account.account_type == 'XC':
-            from core.xtream_codes import Client as XCClient
-            # Use XC client's URL normalization to handle malformed URLs
-            # (e.g., URLs with /player_api.php or query parameters)
-            normalized_url = XCClient(self.m3u_account.server_url, '', '')._normalize_url(self.m3u_account.server_url)
+            from core.xtream_codes import normalize_server_url
+
+            normalized_url = normalize_server_url(self.m3u_account.server_url)
+            if not normalized_url:
+                return None
             username = self.m3u_account.username
             password = self.m3u_account.password
             return f"{normalized_url}/movie/{username}/{password}/{self.stream_id}.{self.container_extension or 'mp4'}"
@@ -292,13 +324,12 @@ class M3UEpisodeRelation(models.Model):
 
     def get_stream_url(self):
         """Get the full stream URL for this episode from this provider"""
-        from core.xtream_codes import Client as XtreamCodesClient
-
         if self.m3u_account.account_type == 'XC':
-            # For XtreamCodes accounts, build the URL dynamically
-            # Use XC client's URL normalization to handle malformed URLs
-            # (e.g., URLs with /player_api.php or query parameters)
-            normalized_url = XtreamCodesClient(self.m3u_account.server_url, '', '')._normalize_url(self.m3u_account.server_url)
+            from core.xtream_codes import normalize_server_url
+
+            normalized_url = normalize_server_url(self.m3u_account.server_url)
+            if not normalized_url:
+                return None
             username = self.m3u_account.username
             password = self.m3u_account.password
             return f"{normalized_url}/series/{username}/{password}/{self.stream_id}.{self.container_extension or 'mp4'}"

@@ -1,5 +1,6 @@
 import { NETWORK_ACCESS_OPTIONS, USER_LEVELS } from '../../constants.js';
 import { IPV4_CIDR_REGEX, IPV6_CIDR_REGEX } from '../networkUtils.js';
+import { DVR_ACCESS } from '../dvrAccess.js';
 import API from '../../api.js';
 
 const isValidNetworkEntry = (entry) =>
@@ -50,6 +51,15 @@ export const userToFormValues = (user) => {
       ? `${customProps.output_profile}`
       : '',
     hide_adult_content: customProps.hide_adult_content || false,
+    catchup_enabled: customProps.catchup_enabled !== false,
+    vod_movies_enabled: customProps.vod_movies_enabled !== false,
+    vod_series_enabled: customProps.vod_series_enabled !== false,
+    dvr_access:
+      customProps.dvr_access === DVR_ACCESS.NONE ||
+      customProps.dvr_access === DVR_ACCESS.VIEW ||
+      customProps.dvr_access === DVR_ACCESS.MANAGE
+        ? customProps.dvr_access
+        : DVR_ACCESS.VIEW,
     epg_days: customProps.epg_days || 0,
     epg_prev_days: customProps.epg_prev_days || 0,
     allowed_ips: [
@@ -79,6 +89,33 @@ export const formValuesToPayload = (values, existingUser) => {
 
   customProps.hide_adult_content = payload.hide_adult_content || false;
   delete payload.hide_adult_content;
+
+  customProps.catchup_enabled = payload.catchup_enabled !== false;
+  delete payload.catchup_enabled;
+
+  customProps.vod_movies_enabled = payload.vod_movies_enabled !== false;
+  delete payload.vod_movies_enabled;
+
+  customProps.vod_series_enabled = payload.vod_series_enabled !== false;
+  delete payload.vod_series_enabled;
+
+  // DVR is a single access level for standard users and admins. Streamers
+  // have no DVR surface (unlike catchup/VOD via XC), so force none.
+  // Coerce with == so string form values ('0') match numeric USER_LEVELS.
+  const isStreamer = payload.user_level == USER_LEVELS.STREAMER;
+  if (isStreamer) {
+    customProps.dvr_access = DVR_ACCESS.NONE;
+  } else {
+    const level = payload.dvr_access;
+    customProps.dvr_access =
+      level === DVR_ACCESS.NONE || level === DVR_ACCESS.MANAGE
+        ? level
+        : DVR_ACCESS.VIEW;
+  }
+  delete payload.dvr_access;
+  // Drop any leftover dual-flag keys from earlier drafts of this feature.
+  delete customProps.dvr_view_enabled;
+  delete customProps.dvr_manage_enabled;
 
   customProps.epg_days = payload.epg_days || 0;
   delete payload.epg_days;
@@ -119,6 +156,10 @@ export const getFormInitialValues = () => {
     output_profile: '',
     channel_profiles: [],
     hide_adult_content: false,
+    catchup_enabled: true,
+    vod_movies_enabled: true,
+    vod_series_enabled: true,
+    dvr_access: DVR_ACCESS.VIEW,
     epg_days: 0,
     epg_prev_days: 0,
     allowed_ips: [],
@@ -129,17 +170,16 @@ export const getFormValidators = (user) => {
   return (values) => ({
     username: !values.username
       ? 'Username is required'
-      : values.user_level == USER_LEVELS.STREAMER &&
-          !values.username.match(/^[a-z0-9]+$/i)
-        ? 'Streamer username must be alphanumeric'
+      : !values.username.match(/^[A-Za-z0-9._@-]+$/)
+        ? 'Username may only contain letters, numbers, periods (.), underscores (_), at signs (@), and hyphens (-)'
         : null,
     password:
       !user && !values.password && values.user_level != USER_LEVELS.STREAMER
         ? 'Password is required'
         : null,
     xc_password:
-      values.xc_password && !values.xc_password.match(/^[a-z0-9]+$/i)
-        ? 'XC password must be alphanumeric'
+      values.xc_password && !values.xc_password.match(/^[A-Za-z0-9._@-]+$/)
+        ? 'XC password may only contain letters, numbers, periods (.), underscores (_), at signs (@), and hyphens (-)'
         : null,
     allowed_ips: (values.allowed_ips || []).some((t) => !isValidNetworkEntry(t))
       ? 'Invalid IP address or CIDR range'

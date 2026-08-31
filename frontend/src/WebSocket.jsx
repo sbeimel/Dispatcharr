@@ -203,7 +203,7 @@ export const WebsocketProvider = ({ children }) => {
                 notifications.update({
                   id,
                   title: 'Commercials removed',
-                  message: `${title} — kept ${parsedEvent.data.segments_kept} segments`,
+                  message: `${title}: kept ${parsedEvent.data.segments_kept} segments`,
                   color: 'green.5',
                   loading: false,
                   autoClose: 4000,
@@ -318,6 +318,10 @@ export const WebsocketProvider = ({ children }) => {
 
             case 'vod_stats':
               setVodStats(JSON.parse(parsedEvent.data.stats));
+              break;
+
+            case 'timeshift_stats':
+              setTimeshiftStats(JSON.parse(parsedEvent.data.stats));
               break;
 
             case 'vod_started':
@@ -1055,6 +1059,7 @@ export const WebsocketProvider = ({ children }) => {
 
   const setChannelStats = useChannelsStore((s) => s.setChannelStats);
   const setVodStats = useChannelsStore((s) => s.setVodStats);
+  const setTimeshiftStats = useChannelsStore((s) => s.setTimeshiftStats);
   const fetchPlaylists = usePlaylistsStore((s) => s.fetchPlaylists);
   const setRefreshProgress = usePlaylistsStore((s) => s.setRefreshProgress);
   const setProfilePreview = usePlaylistsStore((s) => s.setProfilePreview);

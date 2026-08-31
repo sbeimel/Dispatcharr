@@ -1,11 +1,21 @@
 # core/models.py
 
+import logging
+import time
 from shlex import split as shlex_split
 
 from django.conf import settings
+from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.text import slugify
-from django.core.exceptions import ValidationError
+from django_redis.exceptions import ConnectionInterrupted
+from redis.exceptions import AuthenticationError as RedisAuthenticationError
+from redis.exceptions import AuthorizationError as RedisAuthorizationError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+
+logger = logging.getLogger(__name__)
 
 
 class UserAgent(models.Model):
@@ -45,7 +55,7 @@ class StreamProfile(models.Model):
         blank=True,
     )
     parameters = models.TextField(
-        help_text="Command-line parameters. Use {userAgent} and {streamUrl} as placeholders.",
+        help_text="Command-line parameters. Use {userAgent}, {streamUrl}, and {channelId} as placeholders.",
         blank=True,
     )
     locked = models.BooleanField(
@@ -124,7 +134,7 @@ class StreamProfile(models.Model):
             return True
         return False
 
-    def build_command(self, stream_url, user_agent, proxy=None):
+    def build_command(self, stream_url, user_agent, channel_id=None, proxy=None):
 
         if self.is_proxy():
             return []
@@ -132,6 +142,7 @@ class StreamProfile(models.Model):
         replacements = {
             "{streamUrl}": stream_url,
             "{userAgent}": user_agent,
+            "{channelId}": str(channel_id) if channel_id else "",
             "{proxy}": proxy or "",
         }
 
@@ -150,6 +161,8 @@ class StreamProfile(models.Model):
                 cmd.insert(i_index, '-http_proxy')
             except ValueError:
                 # No -i flag found - append -http_proxy at end
+                import logging
+                logger = logging.getLogger(__name__)
                 logger.warning(f"FFmpeg command has no -i flag, appending -http_proxy at end")
                 cmd.extend(['-http_proxy', proxy])
 
@@ -209,6 +222,59 @@ SYSTEM_SETTINGS_KEY = "system_settings"
 EPG_SETTINGS_KEY = "epg_settings"
 USER_LIMITS_SETTINGS_KEY = "user_limit_settings"
 
+# Redis cache for CoreSettings JSON groups. Primary invalidation is post_save /
+# post_delete; TTL is a safety net if a writer bypasses signals.
+# A version key is bumped on invalidate so a concurrent miss cannot re-poison
+# Redis with a stale DB snapshot after delete.
+_GROUP_CACHE_PREFIX = "coresettings:group:"
+_GROUP_CACHE_VER_PREFIX = "coresettings:groupver:"
+_GROUP_CACHE_TTL_SECONDS = 300
+
+# Resolved default User-Agent string. Invalidated when stream settings change
+# or any UserAgent row is saved/deleted.
+_DEFAULT_USER_AGENT_CACHE_KEY = "coresettings:default_user_agent"
+_DEFAULT_USER_AGENT_CACHE_VER_KEY = "coresettings:default_user_agent:ver"
+
+# Locked Redirect StreamProfile primary key. Stable once seeded; TTL is a
+# safety net. Empty string in cache means "not found" (distinct from miss).
+_REDIRECT_STREAM_PROFILE_ID_CACHE_KEY = "coresettings:redirect_stream_profile_id"
+
+# Connectivity / timeout only. ResponseError (WRONGTYPE) and similar must still
+# propagate. Note: redis-py's AuthenticationError / AuthorizationError subclass
+# ConnectionError, so helpers re-raise those after the catch.
+_GROUP_CACHE_BACKEND_ERRORS = (
+    RedisConnectionError,
+    RedisTimeoutError,
+    ConnectionInterrupted,
+    OSError,
+    TimeoutError,
+)
+_GROUP_CACHE_RERAISE_ERRORS = (RedisAuthenticationError, RedisAuthorizationError)
+
+# Distinct from a normal cache miss (None) so version-guard compares never
+# collapse to None == None after a backend failure.
+_CACHE_BACKEND_ERROR = object()
+
+_GROUP_CACHE_ERROR_LOG_INTERVAL_SECONDS = 60
+_last_group_cache_error_log_at = 0.0
+
+
+def _log_group_cache_backend_error(operation, key, exc):
+    """Warn when settings cache degrades to Postgres (throttled)."""
+    global _last_group_cache_error_log_at
+
+    now = time.time()
+    if now - _last_group_cache_error_log_at < _GROUP_CACHE_ERROR_LOG_INTERVAL_SECONDS:
+        return
+    _last_group_cache_error_log_at = now
+    logger.warning(
+        "CoreSettings group cache %s failed for %s (%s: %s); falling back to Postgres",
+        operation,
+        key,
+        type(exc).__name__,
+        exc,
+    )
+
 
 class CoreSettings(models.Model):
     key = models.CharField(
@@ -226,14 +292,136 @@ class CoreSettings(models.Model):
     def __str__(self):
         return "Core Settings"
 
+    @classmethod
+    def group_cache_key(cls, key):
+        return f"{_GROUP_CACHE_PREFIX}{key}"
+
+    @classmethod
+    def group_cache_ver_key(cls, key):
+        return f"{_GROUP_CACHE_VER_PREFIX}{key}"
+
+    @classmethod
+    def _cache_get(cls, key, default=None):
+        """Read from Django cache.
+
+        Returns ``_CACHE_BACKEND_ERROR`` if Redis is unreachable so callers can
+        distinguish that from a normal miss. AIO starts Redis via uWSGI after
+        ``migrate``, so settings reads during data migrations must not
+        hard-require Redis. Local connection refused fails immediately (no
+        connect-timeout wait).
+        """
+        try:
+            return cache.get(key, default)
+        except _GROUP_CACHE_RERAISE_ERRORS:
+            raise
+        except _GROUP_CACHE_BACKEND_ERRORS as exc:
+            _log_group_cache_backend_error("get", key, exc)
+            return _CACHE_BACKEND_ERROR
+
+    @classmethod
+    def _cache_set(cls, key, value, timeout=None):
+        """Write to Django cache; no-op if Redis is unreachable."""
+        try:
+            cache.set(key, value, timeout=timeout)
+            return True
+        except _GROUP_CACHE_RERAISE_ERRORS:
+            raise
+        except _GROUP_CACHE_BACKEND_ERRORS as exc:
+            _log_group_cache_backend_error("set", key, exc)
+            return False
+
+    @classmethod
+    def _cache_delete(cls, key):
+        """Delete from Django cache; no-op if Redis is unreachable."""
+        try:
+            cache.delete(key)
+            return True
+        except _GROUP_CACHE_RERAISE_ERRORS:
+            raise
+        except _GROUP_CACHE_BACKEND_ERRORS as exc:
+            _log_group_cache_backend_error("delete", key, exc)
+            return False
+
+    @classmethod
+    def invalidate_default_user_agent_cache(cls):
+        """Drop the cached default User-Agent string (all workers share Redis)."""
+        cls._cache_delete(_DEFAULT_USER_AGENT_CACHE_KEY)
+        # Monotonic bump so an in-flight miss fill skips cache.set.
+        # timeout=None: never expire (version must outlive the string entry).
+        cls._cache_set(
+            _DEFAULT_USER_AGENT_CACHE_VER_KEY, time.time_ns(), timeout=None
+        )
+
+    @classmethod
+    def invalidate_group_cache(cls, key):
+        """Drop the cached JSON for a settings group (all workers share Redis)."""
+        cls._cache_delete(cls.group_cache_key(key))
+        # Monotonic bump so in-flight _get_group fills skip cache.set.
+        # timeout=None: never expire (version must outlive group entries).
+        cls._cache_set(cls.group_cache_ver_key(key), time.time_ns(), timeout=None)
+        if key == STREAM_SETTINGS_KEY:
+            # Default UA id lives in stream settings; drop the resolved string.
+            cls.invalidate_default_user_agent_cache()
+        if key == PROXY_SETTINGS_KEY:
+            # Proxy workers also keep a short process-local copy.
+            try:
+                from apps.proxy.config import BaseConfig
+
+                BaseConfig.clear_proxy_settings_cache()
+            except Exception:
+                pass
+
+    @classmethod
+    def _load_group_value(cls, key, defaults):
+        """Read a settings group from Postgres (no cache)."""
+        try:
+            value = cls.objects.get(key=key).value or defaults
+            if not isinstance(value, dict):
+                value = defaults
+        except cls.DoesNotExist:
+            value = defaults
+        return value
+
     # Helper methods to get/set grouped settings
     @classmethod
     def _get_group(cls, key, defaults=None):
-        """Get a settings group, returning defaults if not found."""
-        try:
-            return cls.objects.get(key=key).value or (defaults or {})
-        except cls.DoesNotExist:
-            return defaults or {}
+        """Get a settings group, returning defaults if not found.
+
+        Results are cached in Redis so hot paths (proxy, XC, catchup) do not
+        hit Postgres on every client request. If Redis is down (for example
+        during AIO first-boot migrate), reads fall through to Postgres and
+        skip cache fill so a flapping backend cannot re-poison Redis after
+        invalidate. Mutations go through ``save`` / ``_update_group``, which
+        invalidate via CoreSettings post_save / post_delete signals.
+        """
+        import copy
+
+        defaults = defaults or {}
+        cache_key = cls.group_cache_key(key)
+        ver_key = cls.group_cache_ver_key(key)
+        cached = cls._cache_get(cache_key)
+        if isinstance(cached, dict):
+            return copy.deepcopy(cached)
+
+        # Backend errors are not normal misses: read DB and skip fill so a
+        # flapping backend cannot collapse the version guard to None == None.
+        if cached is _CACHE_BACKEND_ERROR:
+            return copy.deepcopy(cls._load_group_value(key, defaults))
+
+        ver_before = cls._cache_get(ver_key)
+        if ver_before is _CACHE_BACKEND_ERROR:
+            return copy.deepcopy(cls._load_group_value(key, defaults))
+
+        value = copy.deepcopy(cls._load_group_value(key, defaults))
+
+        # Skip fill if an invalidate landed during the DB read (avoids
+        # re-caching a stale snapshot for the full TTL).
+        ver_after = cls._cache_get(ver_key)
+        if ver_after is _CACHE_BACKEND_ERROR or ver_after != ver_before:
+            return value
+
+        cls._cache_set(cache_key, value, timeout=_GROUP_CACHE_TTL_SECONDS)
+        return copy.deepcopy(value)
 
     @classmethod
     def _update_group(cls, key, name, updates):
@@ -265,8 +453,130 @@ class CoreSettings(models.Model):
         return cls.get_stream_settings().get("default_user_agent")
 
     @classmethod
+    def _load_default_user_agent_string(cls):
+        """Resolve the default User-Agent string from Postgres (no string cache)."""
+        from core.utils import dispatcharr_user_agent
+
+        fallback = dispatcharr_user_agent()
+        try:
+            ua_id = cls.get_default_user_agent_id()
+            if ua_id is None or ua_id == "":
+                return fallback
+            user_agent_obj = UserAgent.objects.get(id=int(ua_id))
+            if user_agent_obj.user_agent:
+                return user_agent_obj.user_agent
+            logger.warning(
+                "Default User-Agent id %s has an empty string; using %s",
+                ua_id,
+                fallback,
+            )
+        except UserAgent.DoesNotExist:
+            logger.warning(
+                "Default User-Agent id %s not found; using %s",
+                ua_id,
+                fallback,
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Default User-Agent id %r is invalid; using %s",
+                ua_id,
+                fallback,
+            )
+        return fallback
+
+    @classmethod
+    def get_default_user_agent(cls):
+        """Return the configured default User-Agent string (Redis-cached).
+
+        Resolves the stream-settings default User-Agent id to its string once,
+        then serves subsequent callers from Redis so hot paths (logo/poster
+        proxies, stream setup) do not query ``UserAgent`` on every request.
+        Falls back to ``dispatcharr_user_agent()`` when unset or missing.
+        Invalidated when stream settings or any UserAgent row changes.
+        """
+        cached = cls._cache_get(_DEFAULT_USER_AGENT_CACHE_KEY)
+        if isinstance(cached, str) and cached:
+            return cached
+
+        # Backend errors are not normal misses: resolve and skip fill.
+        if cached is _CACHE_BACKEND_ERROR:
+            return cls._load_default_user_agent_string()
+
+        ver_before = cls._cache_get(_DEFAULT_USER_AGENT_CACHE_VER_KEY)
+        if ver_before is _CACHE_BACKEND_ERROR:
+            return cls._load_default_user_agent_string()
+
+        value = cls._load_default_user_agent_string()
+
+        # Skip fill if an invalidate landed during the DB read.
+        ver_after = cls._cache_get(_DEFAULT_USER_AGENT_CACHE_VER_KEY)
+        if ver_after is _CACHE_BACKEND_ERROR or ver_after != ver_before:
+            return value
+
+        cls._cache_set(
+            _DEFAULT_USER_AGENT_CACHE_KEY, value, timeout=_GROUP_CACHE_TTL_SECONDS
+        )
+        return value
+
+    @classmethod
     def get_default_stream_profile_id(cls):
         return cls.get_stream_settings().get("default_stream_profile")
+
+    @classmethod
+    def _load_redirect_stream_profile_id(cls):
+        """Resolve the locked Redirect StreamProfile id from Postgres (no cache)."""
+        return (
+            StreamProfile.objects.filter(
+                name=REDIRECT_PROFILE_NAME, locked=True
+            )
+            .values_list("id", flat=True)
+            .first()
+        )
+
+    @classmethod
+    def get_redirect_stream_profile_id(cls):
+        """Return the locked Redirect StreamProfile id (Redis-cached).
+
+        Hot paths compare this to ``get_default_stream_profile_id()`` instead of
+        loading ``StreamProfile`` on every request. Returns ``None`` if missing.
+        """
+        cached = cls._cache_get(_REDIRECT_STREAM_PROFILE_ID_CACHE_KEY)
+        if cached is _CACHE_BACKEND_ERROR:
+            return cls._load_redirect_stream_profile_id()
+        # Hit: int/str id, or "" sentinel for not found. Miss is None.
+        if cached is not None:
+            if cached == "":
+                return None
+            try:
+                return int(cached)
+            except (TypeError, ValueError):
+                return None
+
+        value = cls._load_redirect_stream_profile_id()
+        cls._cache_set(
+            _REDIRECT_STREAM_PROFILE_ID_CACHE_KEY,
+            value if value is not None else "",
+            timeout=_GROUP_CACHE_TTL_SECONDS,
+        )
+        return value
+
+    @classmethod
+    def is_default_stream_profile_redirect(cls):
+        """True when the configured default stream profile is locked Redirect.
+
+        Uses cached stream settings (default id) and a cached Redirect profile
+        id, so warm callers avoid a per-request ``StreamProfile`` query.
+        """
+        default_id = cls.get_default_stream_profile_id()
+        if default_id is None or default_id == "":
+            return False
+        redirect_id = cls.get_redirect_stream_profile_id()
+        if redirect_id is None:
+            return False
+        try:
+            return int(default_id) == int(redirect_id)
+        except (TypeError, ValueError):
+            return False
 
     @classmethod
     def get_default_output_format(cls):
@@ -365,7 +675,10 @@ class CoreSettings(models.Model):
     @classmethod
     def get_dvr_comskip_hw_accel(cls):
         hw = cls.get_dvr_settings().get("comskip_hw_accel", "none")
-        return hw if hw in ("none", "cuvid", "qsv") else "none"
+        # Legacy "qsv" never worked with the bundled binary; treat as hwassist.
+        if hw == "qsv":
+            return "hwassist"
+        return hw if hw in ("none", "cuvid", "hwassist") else "none"
 
     @classmethod
     def get_dvr_comskip_custom_path(cls):
@@ -407,20 +720,30 @@ class CoreSettings(models.Model):
             "buffering_speed": 1.0,
             "redis_chunk_ttl": 60,
             "channel_shutdown_delay": 0,
-            "channel_init_grace_period": 5,
+            "channel_init_grace_period": 60,
+            "channel_client_wait_period": 5,
             "new_client_behind_seconds": 5,
-            "max_retries": 2,
-            "url_switch_timeout": 20,
-            "max_stream_switches": 200,
-            "connection_timeout": 10,
-            "failover_grace_period": 20,
-            "chunk_timeout": 5,
-            "initial_behind_chunks": 4,
-            "chunk_batch_size": 5,
-            "health_check_interval": 5,
             "stream_cooldown_enabled": False,
             "stream_cooldown_minutes": 10,
+            # Extended Timeouts (database-backed, user-configurable)
+            "connection_timeout": 10,
+            "client_wait_timeout": 30,
+            "stream_timeout": 60,
+            "max_retries": 3,
+            "retry_window_seconds": 1800,
+            "stable_connection_threshold": 30,
+            "max_stream_switches": 10,
+            "failover_rotation_cooldown": 60,
+            "retry_wait_interval": 0.5,
+            "url_switch_timeout": 20,
+            "failover_grace_period": 20,
+            "chunk_timeout": 5,
         })
+
+    @classmethod
+    def get_network_access_settings(cls):
+        """CIDR allowlists per endpoint type (UI, STREAMS, XC_API, M3U_EPG, ...)."""
+        return cls._get_group(NETWORK_ACCESS_KEY, {})
 
     # System Settings
     @classmethod
@@ -432,7 +755,14 @@ class CoreSettings(models.Model):
             "preferred_region": None,
             "auto_import_mapped_files": True,
             "enable_ip_lookup": True,
+            "catchup_enabled": True,
         })
+
+    @classmethod
+    def get_catchup_enabled(cls):
+        """Whether catch-up / timeshift is enabled system-wide (default True)."""
+        # Stored as a JSON boolean by System Settings; default on when unset.
+        return cls.get_system_settings().get("catchup_enabled", True) is not False
 
     @classmethod
     def get_system_time_zone(cls):

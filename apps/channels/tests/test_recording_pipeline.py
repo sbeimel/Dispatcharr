@@ -1,13 +1,17 @@
 """Tests for recent DVR fixes.
 
 Covers:
-  1. Collision avoidance: _build_output_paths checks both .mkv and .ts files
-  2. Logo guard: _resolve_poster_for_program skips external APIs when title ≈ channel name
-  3. Recording status lifecycle: status transitions visible via API
-  4. Concat flags: error-tolerant ffmpeg flags used for segment concatenation
-  5. Recovery skip-list: "recording" status NOT in terminal skip list
+  1. Original-air date handling for TV fallback DVR paths
+  2. Collision avoidance: _build_output_paths checks existing .mkv files
+  3. Logo guard: _resolve_poster_for_program skips external APIs when title ≈ channel name
+  4. Recording status lifecycle: status transitions visible via API
+  5. Concat flags: error-tolerant ffmpeg flags used for segment concatenation
+  6. Recovery skip-list: "recording" status NOT in terminal skip list
+  7. FFmpeg in-process retry behavior
+  8. Frontend recording-status data contract
 """
 import os
+import datetime as dt
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +20,16 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.channels.models import Channel, Recording
+from apps.epg.models import EPGData, EPGSource, ProgramData
+
+# Fixed wall time for collision tests: 10:30 avoids _2 appearing inside
+# %Y%m%d_%H%M%S timestamps (e.g. hour 20 produces ..._205331 which contains "_2").
+COLLISION_TEST_START = timezone.make_aware(dt.datetime(2026, 1, 15, 10, 30, 0))
+
+
+def _path_has_collision_suffix(path, counter):
+    """True when the MKV basename ends with _<counter>.mkv (not timestamp digits)."""
+    return path.endswith(f"_{counter}.mkv")
 
 
 # ---------------------------------------------------------------------------
@@ -51,16 +65,174 @@ def _make_recording(channel, **overrides):
 
 
 # =========================================================================
-# 1. Collision avoidance — _build_output_paths
+# 1. Original-air date in TV fallback paths
+# =========================================================================
+
+class DvrOriginalAirDateTemplateTests(TestCase):
+    def setUp(self):
+        self.epg_source = EPGSource.objects.create(
+            name="DVR Original Air Test", source_type="xmltv"
+        )
+        self.epg = EPGData.objects.create(
+            tvg_id="original-air.test",
+            name="Original Air Test",
+            epg_source=self.epg_source,
+        )
+        self.channel = _make_channel("Test Channel", 90)
+        self.start = COLLISION_TEST_START
+        self.end = self.start + timedelta(hours=1)
+
+    def _program(self, custom_properties, title="Auf Streife",
+                 sub_title="Die blonde Sünderin"):
+        program = ProgramData.objects.create(
+            epg=self.epg,
+            title=title,
+            sub_title=sub_title,
+            start_time=self.start,
+            end_time=self.end,
+            custom_properties=custom_properties,
+        )
+        return {
+            "id": program.id,
+            "title": program.title,
+            "sub_title": program.sub_title,
+        }
+
+    def _build(self, program, *, tv_template=None, tv_fallback=None,
+               movie_template=None, movie_fallback=None):
+        tv_template = tv_template or "TV/{show}/S{season:02d}E{episode:02d}.mkv"
+        tv_fallback = tv_fallback or (
+            "TV/{show}/{show} - {original_air_date} - {sub_title}.mkv"
+        )
+        movie_template = movie_template or "Movies/{title} ({year}).mkv"
+        movie_fallback = movie_fallback or "Movies/{start}.mkv"
+
+        with patch(
+            "apps.channels.tasks.CoreSettings.get_dvr_tv_template",
+            return_value=tv_template,
+        ), patch(
+            "apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
+            return_value=tv_fallback,
+        ), patch(
+            "apps.channels.tasks.CoreSettings.get_dvr_movie_template",
+            return_value=movie_template,
+        ), patch(
+            "apps.channels.tasks.CoreSettings.get_dvr_movie_fallback_template",
+            return_value=movie_fallback,
+        ), patch("os.stat", side_effect=OSError), patch("os.makedirs"):
+            from apps.channels.tasks import _build_output_paths
+            return _build_output_paths(
+                self.channel, program, self.start, self.end, recording_id=1
+            )[0]
+
+    def test_fallback_normalizes_supported_original_air_date_formats(self):
+        cases = (
+            ("2016-12-15", "2016-12-15"),
+            ("20161215", "2016-12-15"),
+            ("20161215000000 +0100", "2016-12-15"),
+            ("2016-12-15T00:00:00", "2016-12-15"),
+            ("2016-12-15 00:00:00", "2016-12-15"),
+        )
+        for raw_value, expected in cases:
+            with self.subTest(raw_value=raw_value):
+                program = self._program({
+                    "date": "2026-07-31",
+                    "previously_shown_details": {"start": raw_value},
+                })
+                final_path = self._build(program)
+                self.assertTrue(final_path.endswith(
+                    f"TV/Auf Streife/Auf Streife - {expected} "
+                    "- Die blonde Sünderin.mkv"
+                ))
+                self.assertNotIn("2026-07-31", final_path)
+
+    def test_missing_original_air_date_is_empty_without_broadcast_fallback(self):
+        program = self._program({"date": "2026-07-31"})
+        final_path = self._build(program)
+        self.assertTrue(final_path.endswith(
+            "TV/Auf Streife/Auf Streife -  - Die blonde Sünderin.mkv"
+        ))
+        self.assertNotIn("2026-07-31", final_path)
+        self.assertNotIn(self.start.strftime("%Y-%m-%d"), final_path)
+
+    def test_valid_season_episode_uses_normal_tv_template(self):
+        program = self._program({
+            "season": 1,
+            "episode": 2,
+            "previously_shown_details": {"start": "2016-12-15"},
+        })
+        final_path = self._build(program)
+        self.assertTrue(final_path.endswith("TV/Auf Streife/S01E02.mkv"))
+        self.assertNotIn("2016-12-15", final_path)
+
+    def test_original_air_date_is_not_available_to_normal_tv_template(self):
+        program = self._program({
+            "season": 1,
+            "episode": 2,
+            "previously_shown_details": {"start": "2016-12-15"},
+        })
+        final_path = self._build(
+            program,
+            tv_template="TV/{original_air_date}.mkv",
+        )
+        self.assertTrue(final_path.endswith(
+            "TV_Shows/Auf Streife/S01E02.mkv"
+        ))
+        self.assertNotIn("2016-12-15", final_path)
+
+    def test_movie_template_behavior_is_unchanged(self):
+        program = self._program({
+            "categories": ["Movie"],
+            "date": "1999-04-10",
+            "previously_shown_details": {"start": "2016-12-15"},
+        }, title="A Film", sub_title=None)
+        final_path = self._build(program)
+        self.assertTrue(final_path.endswith("Movies/A Film (1999).mkv"))
+        self.assertNotIn("2016-12-15", final_path)
+
+    def test_original_air_date_is_not_available_to_movie_templates(self):
+        program = self._program({
+            "categories": ["Movie"],
+            "date": "1999-04-10",
+            "previously_shown_details": {"start": "2016-12-15"},
+        }, title="A Film", sub_title=None)
+        final_path = self._build(
+            program,
+            movie_template="Movies/{original_air_date}.mkv",
+        )
+        self.assertTrue(final_path.endswith(
+            f"Movies/{self.start.strftime('%Y%m%d_%H%M%S')}.mkv"
+        ))
+        self.assertNotIn("2016-12-15", final_path)
+
+    def test_nonstandard_original_air_date_is_path_safe(self):
+        program = self._program({
+            "previously_shown_details": {
+                "start": "../../unexpected:date"
+            },
+        })
+        final_path = self._build(
+            program,
+            tv_fallback="TV/{show}/{original_air_date}.mkv",
+        )
+        self.assertTrue(final_path.startswith("/data/recordings/TV/"))
+        self.assertTrue(final_path.endswith(
+            "TV/Auf Streife/unexpecteddate.mkv"
+        ))
+        self.assertNotIn("..", final_path)
+
+
+# =========================================================================
+# 2. Collision avoidance — _build_output_paths
 # =========================================================================
 
 class CollisionAvoidanceTests(TestCase):
     """_build_output_paths must increment the filename counter when
     EITHER the .mkv OR the .ts file already exists with size > 0."""
 
-    def _call(self, channel, program, start, end):
+    def _call(self, channel, program, start, end, recording_id=1):
         from apps.channels.tasks import _build_output_paths
-        return _build_output_paths(channel, program, start, end)
+        return _build_output_paths(channel, program, start, end, recording_id)
 
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
            return_value="TV/{show}/{start}.mkv")
@@ -71,7 +243,7 @@ class CollisionAvoidanceTests(TestCase):
         ch = MagicMock(name="TestCh")
         ch.name = "TestCh"
         program = {"title": "My Show"}
-        now = timezone.now()
+        now = COLLISION_TEST_START
 
         def mock_stat(path):
             raise OSError("No such file")
@@ -80,8 +252,7 @@ class CollisionAvoidanceTests(TestCase):
              patch("os.makedirs"):
             final, ts, fname = self._call(ch, program, now, now + timedelta(hours=1))
 
-        # Should NOT have a _2 suffix
-        self.assertNotIn("_2", final)
+        self.assertFalse(_path_has_collision_suffix(final, 2))
         self.assertTrue(final.endswith(".mkv"))
 
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
@@ -89,32 +260,31 @@ class CollisionAvoidanceTests(TestCase):
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_template",
            return_value="TV/{show}/S{season:02d}E{episode:02d}.mkv")
     def test_collision_when_ts_exists_but_mkv_is_zero_bytes(self, _tv, _fb):
-        """Pre-restart scenario: MKV is 0-byte placeholder, TS has real data.
-        The old code only checked MKV size, so it would reuse the path.
-        The fix also checks TS, so it must increment."""
+        """With the HLS pipeline, collision avoidance keys off the final MKV only.
+        A 0-byte MKV placeholder is treated as unoccupied even if legacy TS
+        segments exist elsewhere on disk."""
         ch = MagicMock(name="TestCh")
         ch.name = "TestCh"
         program = {"title": "My Show"}
-        now = timezone.now()
+        now = COLLISION_TEST_START
 
         def mock_stat(path):
-            if "_2" in path:
+            if _path_has_collision_suffix(path, 2):
                 raise OSError("No such file")
             result = MagicMock()
             if path.endswith('.mkv'):
                 result.st_size = 0       # MKV is 0-byte placeholder
             elif path.endswith('.ts'):
-                result.st_size = 5000000  # TS has real data from pre-restart
+                result.st_size = 5000000  # legacy TS data is ignored for collision
             else:
                 result.st_size = 0
             return result
 
         with patch("os.stat", side_effect=mock_stat), \
              patch("os.makedirs"):
-            final, ts, fname = self._call(ch, program, now, now + timedelta(hours=1))
+            final, hls_dir, fname = self._call(ch, program, now, now + timedelta(hours=1))
 
-        # Must have incremented to _2
-        self.assertIn("_2", final, "Should increment counter when TS file has data")
+        self.assertFalse(_path_has_collision_suffix(final, 2), "HLS path builder ignores legacy TS when MKV is empty")
 
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
            return_value="TV/{show}/{start}.mkv")
@@ -125,10 +295,10 @@ class CollisionAvoidanceTests(TestCase):
         ch = MagicMock(name="TestCh")
         ch.name = "TestCh"
         program = {"title": "My Show"}
-        now = timezone.now()
+        now = COLLISION_TEST_START
 
         def mock_stat(path):
-            if "_2" in path:
+            if _path_has_collision_suffix(path, 2):
                 raise OSError("No such file")
             result = MagicMock()
             if path.endswith('.mkv'):
@@ -141,7 +311,7 @@ class CollisionAvoidanceTests(TestCase):
              patch("os.makedirs"):
             final, ts, fname = self._call(ch, program, now, now + timedelta(hours=1))
 
-        self.assertIn("_2", final, "Should increment counter when MKV file has data")
+        self.assertTrue(_path_has_collision_suffix(final, 2), "Should increment counter when MKV file has data")
 
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
            return_value="TV/{show}/{start}.mkv")
@@ -152,7 +322,7 @@ class CollisionAvoidanceTests(TestCase):
         ch = MagicMock(name="TestCh")
         ch.name = "TestCh"
         program = {"title": "My Show"}
-        now = timezone.now()
+        now = COLLISION_TEST_START
 
         def mock_stat(path):
             result = MagicMock()
@@ -163,7 +333,7 @@ class CollisionAvoidanceTests(TestCase):
              patch("os.makedirs"):
             final, ts, fname = self._call(ch, program, now, now + timedelta(hours=1))
 
-        self.assertNotIn("_2", final, "Should NOT increment when all files are empty")
+        self.assertFalse(_path_has_collision_suffix(final, 2), "Should NOT increment when all files are empty")
 
     @patch("apps.channels.tasks.CoreSettings.get_dvr_tv_fallback_template",
            return_value="TV/{show}/{start}.mkv")
@@ -174,27 +344,27 @@ class CollisionAvoidanceTests(TestCase):
         ch = MagicMock(name="TestCh")
         ch.name = "TestCh"
         program = {"title": "My Show"}
-        now = timezone.now()
+        now = COLLISION_TEST_START
 
         def mock_stat(path):
-            if "_3" in path:
+            if _path_has_collision_suffix(path, 3):
                 raise OSError("No such file")
             result = MagicMock()
-            if path.endswith('.ts'):
-                result.st_size = 5000000
+            if path.endswith('.mkv'):
+                result.st_size = 1000000  # occupied MKV at base and _2
             else:
                 result.st_size = 0
             return result
 
         with patch("os.stat", side_effect=mock_stat), \
              patch("os.makedirs"):
-            final, ts, fname = self._call(ch, program, now, now + timedelta(hours=1))
+            final, hls_dir, fname = self._call(ch, program, now, now + timedelta(hours=1))
 
-        self.assertIn("_3", final, "Should increment to _3 when base and _2 are occupied")
+        self.assertTrue(_path_has_collision_suffix(final, 3), "Should increment to _3 when base and _2 MKVs are occupied")
 
 
 # =========================================================================
-# 2. Logo guard — _resolve_poster_for_program
+# 3. Logo guard — _resolve_poster_for_program
 # =========================================================================
 
 class LogoGuardTests(TestCase):
@@ -280,7 +450,7 @@ class LogoGuardTests(TestCase):
 
 
 # =========================================================================
-# 3. Recording status lifecycle via API
+# 4. Recording status lifecycle via API
 # =========================================================================
 
 class RecordingStatusLifecycleTests(TestCase):
@@ -361,7 +531,7 @@ class RecordingStatusLifecycleTests(TestCase):
 
 
 # =========================================================================
-# 4. Concat flags — error-tolerant ffmpeg
+# 5. Concat flags — error-tolerant ffmpeg
 # =========================================================================
 
 class ConcatFlagsTests(TestCase):
@@ -406,7 +576,7 @@ class ConcatFlagsTests(TestCase):
 
 
 # =========================================================================
-# 5. Recovery skip-list
+# 6. Recovery skip-list
 # =========================================================================
 
 class RecoverySkipListTests(TestCase):
@@ -442,6 +612,7 @@ class RecoverySkipListTests(TestCase):
         """A recording with status='recording' should be recovered, not skipped."""
         mock_redis_conn = MagicMock()
         mock_redis_conn.set.return_value = True  # Acquire lock
+        mock_redis_conn.exists.return_value = False  # No active-recording lock
         mock_redis_cls.get_client.return_value = mock_redis_conn
 
         channel = _make_channel("Recovery Test", 300)
@@ -571,7 +742,7 @@ class FfmpegRetryTests(TestCase):
 
 
 # =========================================================================
-# 6. Frontend red-dot filter (guideUtils.mapRecordingsByProgramId)
+# 8. Frontend red-dot filter (guideUtils.mapRecordingsByProgramId)
 # =========================================================================
 
 class MapRecordingsByProgramIdTests(TestCase):

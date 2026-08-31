@@ -2,9 +2,9 @@
 Utilities for handling stream URLs and transformations.
 """
 
-import logging
 import regex
 from typing import Optional, Tuple, List
+from django.db import close_old_connections
 from django.shortcuts import get_object_or_404
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
@@ -12,9 +12,7 @@ from apps.m3u.connection_pool import (
     get_profile_connection_count,
     profile_available_for_channel_switch,
 )
-from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
-from uuid import UUID
 import requests
 
 logger = get_logger()
@@ -55,7 +53,10 @@ def get_stream_object(id: str):
     except:
         # UUID check failed, assume stream hash
         logger.info(f"Fetching stream hash {id}")
-        return get_object_or_404(Stream, stream_hash=id)
+        return get_object_or_404(
+            Stream.objects.select_related("m3u_account__user_agent"),
+            stream_hash=id,
+        )
 
 def generate_stream_url(
     channel_id: str,
@@ -67,11 +68,6 @@ def generate_stream_url(
         Tuple: (stream_url, user_agent, transcode_flag, profile_id, slot_reserved, error_reason)
     """
     try:
-        # Import ConfigHelper and Redis utilities at function level for both paths
-        from .config_helper import ConfigHelper
-        from .redis_keys import RedisKeys
-        from core.utils import RedisClient
-        
         channel_or_stream = get_stream_object(channel_id)
 
         # Handle direct stream preview (custom streams)
@@ -83,100 +79,21 @@ def generate_stream_url(
                 logger.error(f"Stream {stream.id} has no M3U account")
                 return None, None, False, None, False, "Stream has no M3U account"
 
-            # Check Redis cooldowns before selecting a profile.
-            # This prevents re-using a recently-failed profile when the same
-            # stream-hash is reconnected within the cooldown window.
-            
-            cooldown_skip_profiles = set()
-            if ConfigHelper.stream_cooldown_enabled():
-                try:
-                    redis_client = RedisClient.get_client()
-                    if redis_client:
-                        # Scan for all cooldown keys for this stream (global, no channel_id)
-                        cooldown_pattern = f"live:cooldown:stream:{stream.id}:profile:*"
-                        for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
-                            # Key format: live:cooldown:stream:{stream_id}:profile:{profile_id}
-                            parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
-                            if len(parts) == 6:
-                                try:
-                                    profile_id_from_key = int(parts[-1])
-                                    ttl = redis_client.ttl(key)
-                                    mins = int(ttl // 60)
-                                    secs = int(ttl % 60)
-                                    logger.info(
-                                        f"[COOLDOWN] Skipping profile {profile_id_from_key} for stream {stream.id} "
-                                        f"on reconnect - blocked for {mins}m {secs}s more"
-                                    )
-                                    cooldown_skip_profiles.add(profile_id_from_key)
-                                except (ValueError, IndexError):
-                                    pass
-                except Exception as e:
-                    logger.debug(f"Could not check cooldowns for stream preview: {e}")
-
             stream_id, profile_id, error_reason, slot_reserved = stream.get_stream()
             if not stream_id or not profile_id:
                 logger.error(f"No profile available for stream {stream.id}: {error_reason}")
                 return None, None, False, None, False, error_reason
 
-            # If the selected profile is on cooldown, try to find a non-cooled profile
-            if profile_id in cooldown_skip_profiles:
-                logger.info(
-                    f"[COOLDOWN] Default profile {profile_id} for stream {stream.id} is on cooldown, "
-                    f"looking for non-cooled profile..."
-                )
-                # Release the just-reserved slot
-                if slot_reserved:
-                    stream.release_stream()
-                    slot_reserved = False
-
-                # Try other profiles
-                m3u_account = stream.m3u_account
-                m3u_profiles = m3u_account.profiles.filter(is_active=True)
-                default_profile = next((obj for obj in m3u_profiles if obj.is_default), None)
-                profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default] if default_profile else list(m3u_profiles)
-
-                selected_profile = None
-                from apps.m3u.connection_pool import reserve_profile_slot
-                from core.utils import RedisClient as RC
-                rc = RC.get_client()
-
-                for prof in profiles:
-                    # Skip current failing profile
-                    if prof and prof.id == profile_id:
-                        logger.debug(f"Skipping current failing profile {prof.id} for stream {stream.id}")
-                        continue
-                    
-                    if prof and prof.id not in cooldown_skip_profiles:
-                        reserved, _count, _reason = reserve_profile_slot(prof, rc)
-                        if reserved:
-                            selected_profile = prof
-                            stream_id = stream.id
-                            profile_id = prof.id
-                            slot_reserved = True
-                            logger.info(f"[COOLDOWN] Selected non-cooled profile {prof.id} for stream {stream.id}")
-                            break
-
-                if not selected_profile:
-                    # All profiles on cooldown or unavailable - use original (cooldown has expired or is the only option)
-                    logger.warning(
-                        f"[COOLDOWN] All profiles for stream {stream.id} are on cooldown or unavailable, "
-                        f"falling back to default profile selection"
-                    )
-                    stream_id, profile_id, error_reason, slot_reserved = stream.get_stream()
-                    if not stream_id or not profile_id:
-                        logger.error(f"No profile available for stream {stream.id}: {error_reason}")
-                        return None, None, False, None, False, error_reason
-
             try:
-                profile = M3UAccountProfile.objects.get(id=profile_id)
-                m3u_account = stream.m3u_account
+                m3u_profile = M3UAccountProfile.objects.select_related(
+                    "m3u_account__user_agent"
+                ).get(id=profile_id)
+                # Prefer the profile's account so select_related populates the UA.
+                m3u_account = m3u_profile.m3u_account or stream.m3u_account
 
-                stream_user_agent = m3u_account.get_user_agent().user_agent
-                if stream_user_agent is None:
-                    stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
-                    logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
+                stream_user_agent = m3u_account.get_user_agent_string()
 
-                stream_url = _resolve_live_stream_url(stream, m3u_account, profile)
+                stream_url = _resolve_live_stream_url(stream, m3u_account, m3u_profile)
 
                 stream_profile = stream.get_stream_profile()
                 logger.debug(f"Using stream profile: {stream_profile.name}")
@@ -194,37 +111,6 @@ def generate_stream_url(
 
         # Handle channel preview (existing logic)
         channel = channel_or_stream
-        
-        # Check Redis cooldowns before selecting a profile (same as Stream Preview)
-        cooldown_skip_profiles = set()
-        if ConfigHelper.stream_cooldown_enabled():
-            try:
-                redis_client = RedisClient.get_client()
-                if redis_client:
-                    # Get all streams for this channel to check their cooldowns
-                    channel_streams = channel.streams.all()
-                    for ch_stream in channel_streams:
-                        # Scan for cooldown keys (global, no channel_id)
-                        cooldown_pattern = f"live:cooldown:stream:{ch_stream.id}:profile:*"
-                        for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
-                            # Key format: live:cooldown:stream:{stream_id}:profile:{profile_id}
-                            parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
-                            if len(parts) == 6:
-                                try:
-                                    profile_id_from_key = int(parts[-1])
-                                    ttl = redis_client.ttl(key)
-                                    if ttl > 0:
-                                        mins = int(ttl // 60)
-                                        secs = int(ttl % 60)
-                                        logger.info(
-                                            f"[COOLDOWN] Skipping profile {profile_id_from_key} for stream {ch_stream.id} "
-                                            f"on channel playback - blocked for {mins}m {secs}s more"
-                                        )
-                                        cooldown_skip_profiles.add(profile_id_from_key)
-                                except (ValueError, IndexError):
-                                    pass
-            except Exception as e:
-                logger.debug(f"Could not check cooldowns for channel playback: {e}")
 
         # Get stream and profile for this channel
         stream_id, profile_id, error_reason, slot_reserved = channel.get_stream()
@@ -235,20 +121,13 @@ def generate_stream_url(
 
         # get_stream() allocated a connection slot - ensure it's released on any error
         try:
-            # Look up the Stream and Profile objects
             stream = Stream.objects.get(id=stream_id)
-            profile = M3UAccountProfile.objects.get(id=profile_id)
+            m3u_profile = M3UAccountProfile.objects.select_related(
+                "m3u_account__user_agent"
+            ).get(id=profile_id)
 
-            # Get the M3U account profile for URL pattern
-            m3u_profile = profile
-
-            # Get the appropriate user agent
-            m3u_account = M3UAccount.objects.get(id=m3u_profile.m3u_account.id)
-            stream_user_agent = m3u_account.get_user_agent().user_agent
-
-            if stream_user_agent is None:
-                stream_user_agent = UserAgent.objects.get(id=CoreSettings.get_default_user_agent_id())
-                logger.debug(f"No user agent found for account, using default: {stream_user_agent}")
+            m3u_account = m3u_profile.m3u_account
+            stream_user_agent = m3u_account.get_user_agent_string()
 
             stream_url = _resolve_live_stream_url(stream, m3u_account, m3u_profile)
 
@@ -271,6 +150,13 @@ def generate_stream_url(
     except Exception as e:
         logger.error(f"Error generating stream URL: {e}")
         return None, None, False, None, False, str(e)
+    finally:
+        close_old_connections()
+
+# Bounds catastrophic backtracking on user-authored profile patterns.
+# Matches the rename / regex-preview timeout used elsewhere.
+URL_TRANSFORM_REGEX_TIMEOUT = 0.1
+
 
 def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> str:
     """
@@ -290,13 +176,20 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         logger.debug(f"  search: {search_pattern}")
 
         # Convert JS-style backreferences in replace pattern: $<name> -> \g<name>, $1 -> \1
+        # Fixed conversion patterns only; timeout is reserved for the user search.
         safe_replace_pattern = regex.sub(r'\$<([^>]+)>', r'\\g<\1>', replace_pattern)
         safe_replace_pattern = regex.sub(r'\$(\d+)', r'\\\1', safe_replace_pattern)
         logger.debug(f"  replace: {replace_pattern}")
         logger.debug(f"  safe replace: {safe_replace_pattern}")
 
-        # Apply the transformation (regex module accepts JS-style (?<name>...) natively)
-        stream_url, match_count = regex.subn(search_pattern, safe_replace_pattern, input_url)
+        # Apply the transformation (regex module accepts JS-style (?<name>...) natively).
+        # timeout bounds ReDoS from nested quantifiers in search_pattern.
+        stream_url, match_count = regex.subn(
+            search_pattern,
+            safe_replace_pattern,
+            input_url,
+            timeout=URL_TRANSFORM_REGEX_TIMEOUT,
+        )
         if match_count == 0:
             logger.warning(f"URL pattern '{search_pattern}' did not match, falling back to original URL: {input_url}")
         else:
@@ -331,7 +224,10 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
             stream_id = target_stream_id
 
             # Get the stream object
-            stream = get_object_or_404(Stream, pk=stream_id)
+            stream = get_object_or_404(
+                Stream.objects.select_related("m3u_account"),
+                pk=stream_id,
+            )
 
             # Find compatible profile for this stream with connection availability check
             m3u_account = stream.m3u_account
@@ -390,12 +286,15 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
                 return {'error': error_reason or 'No stream assigned to channel'}
 
         stream = get_object_or_404(Stream, pk=stream_id)
-        profile = get_object_or_404(M3UAccountProfile, pk=m3u_profile_id)
+        m3u_profile = get_object_or_404(
+            M3UAccountProfile.objects.select_related("m3u_account__user_agent"),
+            pk=m3u_profile_id,
+        )
 
-        m3u_account = M3UAccount.objects.get(id=profile.m3u_account.id)
-        user_agent = m3u_account.get_user_agent().user_agent
+        m3u_account = m3u_profile.m3u_account
+        user_agent = m3u_account.get_user_agent_string()
 
-        stream_url = _resolve_live_stream_url(stream, m3u_account, profile)
+        stream_url = _resolve_live_stream_url(stream, m3u_account, m3u_profile)
 
         stream_profile = channel.get_stream_profile()
         transcode = not (stream_profile.is_proxy() or stream_profile is None)
@@ -415,18 +314,43 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
             channel.release_stream()
         logger.error(f"Error getting stream info for switch: {e}", exc_info=True)
         return {'error': f'Error: {str(e)}'}
+    finally:
+        close_old_connections()
 
-def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None, current_profile_id: Optional[int] = None) -> List[dict]:
+def order_alternates_from_current(
+    alternate_streams: List[dict],
+    ordered_stream_ids: List[int],
+    current_stream_id: Optional[int],
+) -> List[dict]:
+    """
+    Reorder failover candidates to start after the current stream in channel order,
+    wrapping around.
+    """
+    if not alternate_streams or not ordered_stream_ids or current_stream_id is None:
+        return alternate_streams
+
+    alt_by_id = {entry['stream_id']: entry for entry in alternate_streams}
+
+    try:
+        current_index = ordered_stream_ids.index(current_stream_id)
+    except ValueError:
+        return alternate_streams
+
+    rotated = []
+    for offset in range(1, len(ordered_stream_ids)):
+        stream_id = ordered_stream_ids[(current_index + offset) % len(ordered_stream_ids)]
+        entry = alt_by_id.get(stream_id)
+        if entry is not None:
+            rotated.append(entry)
+    return rotated
+
+def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None) -> List[dict]:
     """
     Get alternative streams for a channel when the current stream fails.
-    
-    IMPORTANT: Returns ALL available profiles for each stream, not just the first one!
-    This enables full profile failover (try all profiles of stream 1, then all profiles of stream 2, etc.)
 
     Args:
         channel_id: The UUID of the channel
-        current_stream_id: The currently failing stream ID
-        current_profile_id: The currently failing profile ID to exclude
+        current_stream_id: The currently failing stream ID to exclude
 
     Returns:
         List[dict]: List of stream information dictionaries with stream_id and profile_id
@@ -474,12 +398,13 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                     logger.debug(f"Skipping current failing profile {profile.id} for stream {stream.id}")
                     continue
                 
-                # Check connection availability with improved error handling
+                # Check connection availability
                 if redis_client:
                     try:
                         profile_connections_key = f"profile_connections:{profile.id}"
                         current_connections = int(redis_client.get(profile_connections_key) or 0)
                         
+                        # For stream preview, we don't check "channel_using_profile" since it's the same stream
                         if profile.max_streams == 0 or current_connections < profile.max_streams:
                             logger.debug(f"Found available profile {profile.id} for stream {stream.id}: {current_connections}/{profile.max_streams}")
                             alternate_profiles.append({
@@ -490,11 +415,9 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                         else:
                             logger.debug(f"Profile {profile.id} at max connections: {current_connections}/{profile.max_streams}")
                     except (TypeError, ValueError, KeyError) as e:
-                        # Programming error - should not happen, fail loudly
                         logger.error(f"Programming error checking profile {profile.id}: {e}", exc_info=True)
-                        # Don't add profile - this is a real bug that needs attention
                     except Exception as e:
-                        # Redis connection error or other infrastructure issue - fail-open for resilience
+                        # Redis error - fail-open for resilience
                         logger.error(f"Redis error checking profile {profile.id} connections: {e}, assuming available for resilience")
                         alternate_profiles.append({
                             'stream_id': stream.id,
@@ -509,7 +432,12 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                         'name': stream.name
                     })
             
-            logger.info(f"Stream preview: Found {len(alternate_profiles)} alternate profiles for stream {stream.id}")
+            if alternate_profiles:
+                profile_ids = ', '.join([str(p['profile_id']) for p in alternate_profiles])
+                logger.info(f"Found {len(alternate_profiles)} alternate profiles for stream preview {stream.id}: [{profile_ids}]")
+            else:
+                logger.warning(f"No alternate profiles found for stream preview {stream.id}")
+            
             return alternate_profiles
 
         # ============================================================
@@ -517,13 +445,14 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         # ============================================================
         channel = channel_or_stream
         redis_client = RedisClient.get_client()
-        logger.debug(f"Looking for alternate streams for channel {channel_id}, current stream ID: {current_stream_id}, current profile ID: {current_profile_id}")
+        logger.debug(f"Looking for alternate streams for channel {channel_id}, current stream ID: {current_stream_id}")
 
         # Get all assigned streams for this channel using the correct ordering
         streams = channel.streams.all().order_by('channelstream__order')
-        logger.debug(f"Channel {channel_id} has {streams.count()} total assigned streams")
+        ordered_stream_ids = list(streams.values_list('id', flat=True))
+        logger.debug(f"Channel {channel_id} has {len(ordered_stream_ids)} total assigned streams")
 
-        if not streams.exists():
+        if not ordered_stream_ids:
             logger.warning(f"No streams assigned to channel {channel_id}")
             return []
 
@@ -533,8 +462,10 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
         for stream in streams:
             logger.debug(f"Checking stream ID {stream.id} ({stream.name}) for channel {channel_id}")
 
-            # BUGFIX: Do NOT skip the current stream entirely - we may want to try different profiles!
-            # Only skip the specific (stream_id, profile_id) combination that failed
+            # Skip the current failing stream
+            if current_stream_id and stream.id == current_stream_id:
+                logger.debug(f"Skipping current stream ID {current_stream_id}")
+                continue
 
             # Find compatible profiles for this stream with connection checking
             try:
@@ -555,13 +486,8 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                 # Check profiles in order with connection availability
                 profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
 
-                # BUGFIX: Try ALL profiles for this stream, not just the first available one!
+                selected_profile = None
                 for profile in profiles:
-                    # Skip the current stream+profile combination that just failed
-                    if current_stream_id and stream.id == current_stream_id and current_profile_id and profile.id == current_profile_id:
-                        logger.debug(f"Skipping current failing stream+profile combination: stream={current_stream_id}, profile={current_profile_id}")
-                        continue
-                    
                     if redis_client:
                         channel_using_profile = False
                         existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
@@ -580,59 +506,50 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                             redis_client,
                             channel_already_on_profile=channel_using_profile,
                         ):
-                            try:
-                                current_connections = get_profile_connection_count(
-                                    profile, redis_client
-                                )
-                                # BUGFIX: Don't break here - add ALL available profiles!
-                                logger.debug(
-                                    f"Found available profile {profile.id} for stream {stream.id}: "
-                                    f"{current_connections}/{profile.max_streams} "
-                                    f"(already using: {channel_using_profile})"
-                                )
-                                alternate_streams.append({
-                                    'stream_id': stream.id,
-                                    'profile_id': profile.id,
-                                    'name': stream.name
-                                })
-                                # DON'T break - continue to check other profiles!
-                            except (TypeError, ValueError, KeyError) as e:
-                                # Programming error - should not happen
-                                logger.error(f"Programming error checking profile {profile.id} for stream {stream.id}: {e}", exc_info=True)
-                            except Exception as e:
-                                # Redis or infrastructure error - fail-open for resilience
-                                logger.error(f"Redis error checking profile {profile.id} for stream {stream.id}: {e}, assuming available for resilience")
-                                alternate_streams.append({
-                                    'stream_id': stream.id,
-                                    'profile_id': profile.id,
-                                    'name': stream.name
-                                })
-                        else:
-                            logger.debug(
-                                f"Profile {profile.id} unavailable for alternate stream {stream.id}"
+                            current_connections = get_profile_connection_count(
+                                profile, redis_client
                             )
+                            selected_profile = profile
+                            logger.debug(
+                                f"Found available profile {profile.id} for stream {stream.id}: "
+                                f"{current_connections}/{profile.max_streams} "
+                                f"(already using: {channel_using_profile})"
+                            )
+                            break
+                        logger.debug(
+                            f"Profile {profile.id} unavailable for alternate stream {stream.id}"
+                        )
                     else:
-                        # No Redis available, add all profiles
-                        alternate_streams.append({
-                            'stream_id': stream.id,
-                            'profile_id': profile.id,
-                            'name': stream.name
-                        })
+                        selected_profile = profile
+                        break
+
+                if selected_profile:
+                    alternate_streams.append({
+                        'stream_id': stream.id,
+                        'profile_id': selected_profile.id,
+                        'name': stream.name
+                    })
+                else:
+                    logger.debug(f"No available profiles for stream ID {stream.id}")
 
             except Exception as inner_e:
                 logger.error(f"Error finding profiles for stream {stream.id}: {inner_e}")
                 continue
 
         if alternate_streams:
-            stream_profile_pairs = ', '.join([f"({s['stream_id']},{s['profile_id']})" for s in alternate_streams])
-            logger.info(f"Found {len(alternate_streams)} alternate stream+profile combinations for channel {channel_id}: [{stream_profile_pairs}]")
+            stream_ids = ', '.join([str(s['stream_id']) for s in alternate_streams])
+            logger.info(f"Found {len(alternate_streams)} alternate streams with available connections for channel {channel_id}: [{stream_ids}]")
         else:
             logger.warning(f"No alternate streams with available connections found for channel {channel_id}")
 
-        return alternate_streams
+        return order_alternates_from_current(
+            alternate_streams, ordered_stream_ids, current_stream_id
+        )
     except Exception as e:
         logger.error(f"Error getting alternate streams for channel {channel_id}: {e}", exc_info=True)
         return []
+    finally:
+        close_old_connections()
 
 def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
     """
@@ -803,3 +720,5 @@ def get_connections_left(m3u_profile_id: int) -> int:
     except Exception as e:
         logger.error(f"Error getting connections left for M3U profile {m3u_profile_id}: {e}")
         return 0
+    finally:
+        close_old_connections()

@@ -36,6 +36,7 @@ import {
 import { CustomTable, useTable } from '../tables/CustomTable/index.jsx';
 import { TableHelper } from '../../helpers/index.jsx';
 import logo from '../../images/logo.png';
+import LazyLogo from '../LazyLogo.jsx';
 import { formatBytes, formatSpeed } from '../../utils/networkUtils.js';
 import { showNotification } from '../../utils/notificationUtils.js';
 import {
@@ -43,7 +44,6 @@ import {
   durationAccessor,
   getBufferingSpeedThreshold,
   getChannelStreams,
-  getLogoUrl,
   getM3uAccountsMap,
   getSelectedStream,
   getStartDate,
@@ -54,14 +54,12 @@ import {
 import useVideoStore from '../../store/useVideoStore';
 import { buildLiveStreamUrl } from '../../utils/components/FloatingVideoUtils.js';
 
-
 // Create a separate component for each channel card to properly handle the hook
 const StreamConnectionCard = ({
   channel,
   clients,
   stopClient,
   stopChannel,
-  logos,
   channelsByUUID,
   channels,
   currentProgram,
@@ -73,7 +71,6 @@ const StreamConnectionCard = ({
   const [currentM3UProfile, setCurrentM3UProfile] = useState(null); // Add state for current M3U profile
   const [data, setData] = useState([]);
   const [previewedStream, setPreviewedStream] = useState(null);
-
 
   const theme = useMantineTheme();
 
@@ -467,9 +464,6 @@ const StreamConnectionCard = ({
     },
   });
 
-  // Get logo URL from the logos object if available
-  const logoUrl = getLogoUrl(channel.logo_id, logos, previewedStream);
-
   useEffect(() => {
     let isMounted = true;
     // Only fetch if we have a stream_id and NO channel.name
@@ -486,7 +480,10 @@ const StreamConnectionCard = ({
   }, [channel.name, channel.stream_id]);
 
   const channelName =
-    channel.name || previewedStream?.name || 'Unnamed Channel';
+    channel.name ||
+    channel.channel_name ||
+    previewedStream?.name ||
+    'Unnamed Channel';
   const uptime = channel.uptime || 0;
   const bitrates = channel.bitrates || [];
   const totalBytes = channel.total_bytes || 0;
@@ -555,8 +552,9 @@ const StreamConnectionCard = ({
             h={70}
             display="flex"
           >
-            <img
-              src={logoUrl || logo}
+            <LazyLogo
+              logoId={channel.logo_id}
+              fallbackSrc={previewedStream?.logo_url || logo}
               style={{
                 maxWidth: '100%',
                 maxHeight: '100%',

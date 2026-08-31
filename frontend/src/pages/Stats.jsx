@@ -19,22 +19,31 @@ import useChannelsStore from '../store/channels';
 import API from '../api';
 import useLogosStore from '../store/logos';
 import useStreamProfilesStore from '../store/streamProfiles';
-import useLocalStorage from '../hooks/useLocalStorage';
+import useBrowserStorage from '../hooks/useBrowserStorage';
 import SystemEvents from '../components/SystemEvents';
 import ErrorBoundary from '../components/ErrorBoundary.jsx';
 import {
-  fetchActiveChannelStats,
+  fetchAllConnectionStats,
   getClientStats,
+  getCatchupPrograms,
   getCombinedConnections,
   getCurrentPrograms,
   getStatsByChannelId,
-  getVODStats,
   stopChannel,
   stopClient,
+  stopTimeshiftSession,
   stopVODClient,
 } from '../utils/pages/StatsUtils.js';
+import {
+  computeCatchupArchivePositionSecs,
+  computeCatchupPlaybackSeconds,
+  isCatchupPlayheadOutsideProgram,
+} from '../utils/cards/TimeshiftConnectionCardUtils.js';
 const VodConnectionCard = React.lazy(
   () => import('../components/cards/VodConnectionCard.jsx')
+);
+const TimeshiftConnectionCard = React.lazy(
+  () => import('../components/cards/TimeshiftConnectionCard.jsx')
 );
 const StreamConnectionCard = React.lazy(
   () => import('../components/cards/StreamConnectionCard.jsx')
@@ -46,10 +55,10 @@ const Connections = ({
   channelsByUUID,
   channels,
   handleStopVODClient,
+  handleStopTimeshiftSession,
   currentPrograms,
+  catchupPrograms,
 }) => {
-  const logos = useLogosStore((s) => s.logos);
-
   return combinedConnections.length === 0 ? (
     <Box
       ta="center"
@@ -63,7 +72,7 @@ const Connections = ({
       </Text>
     </Box>
   ) : (
-    <ErrorBoundary>
+    <ErrorBoundary inline>
       <Suspense fallback={<LoadingOverlay />}>
         {combinedConnections.map((connection) => {
           if (connection.type === 'stream') {
@@ -74,7 +83,6 @@ const Connections = ({
                 clients={clients}
                 stopClient={stopClient}
                 stopChannel={stopChannel}
-                logos={logos}
                 channelsByUUID={channelsByUUID}
                 channels={channels}
                 currentProgram={currentPrograms[connection.data.channel_id]}
@@ -86,6 +94,15 @@ const Connections = ({
                 key={connection.id}
                 vodContent={connection.data}
                 stopVODClient={handleStopVODClient}
+              />
+            );
+          } else if (connection.type === 'timeshift') {
+            return (
+              <TimeshiftConnectionCard
+                key={connection.id}
+                timeshiftSession={connection.data}
+                currentProgram={catchupPrograms[connection.data.session_id]}
+                stopTimeshiftSession={handleStopTimeshiftSession}
               />
             );
           }
@@ -101,17 +118,25 @@ const StatsPage = () => {
   const setChannelStats = useChannelsStore((s) => s.setChannelStats);
   const vodConnections = useChannelsStore((s) => s.activeVodConnections);
   const setVodStats = useChannelsStore((s) => s.setVodStats);
+  const timeshiftSessions = useChannelsStore((s) => s.activeTimeshiftSessions);
+  const setTimeshiftStats = useChannelsStore((s) => s.setTimeshiftStats);
+  const enableLogoRendering = useLogosStore((s) => s.enableLogoRendering);
   const streamProfiles = useStreamProfilesStore((s) => s.profiles);
 
   const [clients, setClients] = useState([]);
   const [channelHistory, setChannelHistory] = useState({});
   const [isPollingActive, setIsPollingActive] = useState(false);
   const [currentPrograms, setCurrentPrograms] = useState({});
+  const [catchupPrograms, setCatchupPrograms] = useState({});
   const [channels, setChannels] = useState({}); // id -> channel
   const [channelsByUUID, setChannelsByUUID] = useState({}); // uuid -> id
 
+  useEffect(() => {
+    enableLogoRendering();
+  }, [enableLogoRendering]);
+
   // Compute needed channel UUIDs from the current active channels.
-  // Stream previews use a non-UUID hash as channel_id — filter those out.
+  // Stream previews use a non-UUID hash as channel_id; filter those out.
   const UUID_REGEX =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const neededUUIDs = useMemo(
@@ -158,7 +183,7 @@ const StatsPage = () => {
   }, [neededUUIDs.join(',')]);
 
   // Use localStorage for stats refresh interval (in seconds)
-  const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useLocalStorage(
+  const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useBrowserStorage(
     'stats-refresh-interval',
     5
   );
@@ -168,55 +193,51 @@ const StatsPage = () => {
     (total, vodContent) => total + (vodContent.connections?.length || 0),
     0
   );
+  const timeshiftConnectionsCount = timeshiftSessions.reduce(
+    (total, session) => total + (session.connections?.length || 0),
+    0
+  );
 
   const handleStopVODClient = async (clientId) => {
     await stopVODClient(clientId);
-    // Refresh VOD stats after stopping to update the UI
-    fetchVODStats();
+    fetchAllStats();
   };
 
-  // Function to fetch channel stats from API
-  const fetchChannelStats = useCallback(async () => {
-    try {
-      const response = await fetchActiveChannelStats();
-      if (response) {
-        setChannelStats(response);
-      } else {
-        console.log('API response was empty or null');
-      }
-    } catch (error) {
-      console.error('Error fetching channel stats:', error);
-      console.error('Error details:', {
-        message: error.message,
-        status: error.status,
-        body: error.body,
-      });
-    }
-  }, [setChannelStats]);
+  const handleStopTimeshiftSession = async (sessionId) => {
+    await stopTimeshiftSession(sessionId);
+    fetchAllStats();
+  };
 
-  const fetchVODStats = useCallback(async () => {
+  const fetchAllStats = useCallback(async () => {
     try {
-      const response = await getVODStats();
+      const response = await fetchAllConnectionStats();
       if (response) {
-        setVodStats(response);
+        if (response.live) {
+          setChannelStats(response.live);
+        }
+        if (response.vod) {
+          setVodStats(response.vod);
+        }
+        if (response.catchup) {
+          setTimeshiftStats(response.catchup);
+        }
       } else {
-        console.log('VOD API response was empty or null');
+        console.log('Combined stats API response was empty or null');
       }
     } catch (error) {
-      console.error('Error fetching VOD stats:', error);
+      console.error('Error fetching connection stats:', error);
       console.error('Error details:', {
         message: error.message,
         status: error.status,
         body: error.body,
       });
     }
-  }, [setVodStats]);
+  }, [setChannelStats, setVodStats, setTimeshiftStats]);
 
   // Always fetch once on mount, regardless of polling interval setting
   useEffect(() => {
-    fetchChannelStats();
-    fetchVODStats();
-  }, [fetchChannelStats, fetchVODStats]);
+    fetchAllStats();
+  }, [fetchAllStats]);
 
   // Set up polling for stats when on stats page
   useEffect(() => {
@@ -226,8 +247,7 @@ const StatsPage = () => {
       setIsPollingActive(true);
 
       const interval = setInterval(() => {
-        fetchChannelStats();
-        fetchVODStats();
+        fetchAllStats();
       }, refreshInterval);
 
       return () => {
@@ -237,7 +257,7 @@ const StatsPage = () => {
     } else {
       setIsPollingActive(false);
     }
-  }, [refreshInterval, fetchChannelStats, fetchVODStats]);
+  }, [refreshInterval, fetchAllStats]);
 
   useEffect(() => {
     console.log('Processing channel stats:', channelStats);
@@ -328,10 +348,205 @@ const StatsPage = () => {
     };
   }, [activeChannelIds]); // Only re-run when active channel set changes
 
-  // Combine active streams and VOD connections into a single mixed list
+  // Catch-up programme metadata: fetch when missing or when the playhead has
+  // left the cached programme's window; otherwise keep that result and only
+  // do cheap local checks until the next boundary.
+  const timeshiftProgrammeKey = useMemo(() => {
+    return timeshiftSessions
+      .map((session) => `${session.session_id}:${session.programme_start || ''}`)
+      .sort()
+      .join(',');
+  }, [timeshiftSessions]);
+
+  const timeshiftSessionsRef = useRef(timeshiftSessions);
+  const catchupProgramsRef = useRef(catchupPrograms);
+  const programmeCheckRef = useRef(() => {});
+  const playbackFingerprintRef = useRef('');
+
+  useEffect(() => {
+    timeshiftSessionsRef.current = timeshiftSessions;
+
+    const fingerprint = timeshiftSessions
+      .map(
+        (session) =>
+          `${session.session_id}:${session.playback_base_secs ?? ''}:${session.position_anchor_at ?? ''}:${session.paused ? 1 : 0}`
+      )
+      .sort()
+      .join(',');
+    if (
+      playbackFingerprintRef.current &&
+      fingerprint !== playbackFingerprintRef.current
+    ) {
+      programmeCheckRef.current();
+    }
+    playbackFingerprintRef.current = fingerprint;
+  }, [timeshiftSessions]);
+  useEffect(() => {
+    catchupProgramsRef.current = catchupPrograms;
+  }, [catchupPrograms]);
+
+  useEffect(() => {
+    if (!timeshiftProgrammeKey) {
+      setCatchupPrograms({});
+      return;
+    }
+
+    let cancelled = false;
+    let timer = null;
+    let inFlight = false;
+
+    const clearTimer = () => {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const sessionNeedsProgrammeFetch = (session, program) => {
+      if (!program?.start_time || program.duration_secs == null) {
+        return true;
+      }
+      return isCatchupPlayheadOutsideProgram({
+        programmeStart: session.programme_start,
+        programStartTime: program.start_time,
+        programDurationSecs: program.duration_secs,
+        positionAnchorAt: session.position_anchor_at,
+        playbackBaseSecs: session.playback_base_secs,
+        paused: Boolean(session.paused),
+      });
+    };
+
+    const msUntilNearestBoundary = () => {
+      let nearestMs = null;
+      timeshiftSessionsRef.current.forEach((session) => {
+        const program = catchupProgramsRef.current?.[session.session_id];
+        if (!program?.start_time || program.duration_secs == null) {
+          return;
+        }
+        const position = computeCatchupPlaybackSeconds({
+          programmeStart: session.programme_start,
+          programStartTime: program.start_time,
+          programDurationSecs: program.duration_secs,
+          positionAnchorAt: session.position_anchor_at,
+          playbackBaseSecs: session.playback_base_secs,
+          paused: Boolean(session.paused),
+          capToDuration: false,
+          allowNegative: true,
+        });
+        if (position == null) {
+          return;
+        }
+        if (position < 0) {
+          nearestMs = 0;
+          return;
+        }
+        const remainingMs = Math.max(
+          0,
+          (Number(program.duration_secs) - position) * 1000
+        );
+        if (nearestMs == null || remainingMs < nearestMs) {
+          nearestMs = remainingMs;
+        }
+      });
+      return nearestMs;
+    };
+
+    const scheduleCheck = () => {
+      clearTimer();
+      if (cancelled) {
+        return;
+      }
+
+      const sessions = timeshiftSessionsRef.current;
+      const programs = catchupProgramsRef.current || {};
+      if (
+        sessions.some((session) =>
+          sessionNeedsProgrammeFetch(session, programs[session.session_id])
+        )
+      ) {
+        fetchPrograms();
+        return;
+      }
+
+      // Wake near the programme end; also at least every 2s so a seek/heartbeat
+      // that jumps the playhead is noticed without hitting the API.
+      const remainingMs = msUntilNearestBoundary();
+      const delay =
+        remainingMs == null
+          ? 2000
+          : Math.min(Math.max(remainingMs + 250, 250), 2000);
+      timer = setTimeout(scheduleCheck, delay);
+    };
+
+    const fetchPrograms = async () => {
+      if (cancelled || inFlight) {
+        return;
+      }
+      inFlight = true;
+      clearTimer();
+      try {
+        const existingPrograms = catchupProgramsRef.current || {};
+        const sessions = timeshiftSessionsRef.current.map((session) => {
+          const existing = existingPrograms[session.session_id];
+          // Archive playhead relative to the URL programme (uncapped). When the
+          // card has already advanced and we only have URL math, omit position
+          // and let the API fall back to Redis.
+          const positionSecs = computeCatchupArchivePositionSecs({
+            programmeStart: session.programme_start,
+            programStartTime: existing?.start_time,
+            positionAnchorAt: session.position_anchor_at,
+            playbackBaseSecs: session.playback_base_secs,
+            paused: Boolean(session.paused),
+          });
+          const payload = {
+            session_id: session.session_id,
+            channel_uuid: session.channel_uuid,
+            programme_start: session.programme_start,
+          };
+          if (positionSecs != null) {
+            payload.position_secs = positionSecs;
+          }
+          return payload;
+        });
+        const programs = await getCatchupPrograms(sessions);
+        if (cancelled) {
+          return;
+        }
+        catchupProgramsRef.current = programs;
+        setCatchupPrograms(programs);
+
+        const stillOutside = timeshiftSessionsRef.current.some((session) =>
+          sessionNeedsProgrammeFetch(session, programs[session.session_id])
+        );
+        // No next guide entry (or unknown playhead): back off instead of spinning.
+        timer = setTimeout(
+          stillOutside ? fetchPrograms : scheduleCheck,
+          stillOutside ? 30_000 : 250
+        );
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    programmeCheckRef.current = scheduleCheck;
+
+    fetchPrograms();
+
+    return () => {
+      cancelled = true;
+      clearTimer();
+      programmeCheckRef.current = () => {};
+    };
+  }, [timeshiftProgrammeKey]);
+
+  // Combine active streams, VOD, and catch-up into a single mixed list
   const combinedConnections = useMemo(() => {
-    return getCombinedConnections(channelHistory, vodConnections);
-  }, [channelHistory, vodConnections]);
+    return getCombinedConnections(
+      channelHistory,
+      vodConnections,
+      timeshiftSessions
+    );
+  }, [channelHistory, vodConnections, timeshiftSessions]);
 
   return (
     <>
@@ -348,6 +563,11 @@ const StatsPage = () => {
                   {vodConnectionsCount !== 1
                     ? 'VOD connections'
                     : 'VOD connection'}
+                  {' • '}
+                  {timeshiftConnectionsCount}{' '}
+                  {timeshiftConnectionsCount !== 1
+                    ? 'catch-up sessions'
+                    : 'catch-up session'}
                 </Text>
                 <Group align="center" gap="xs">
                   <Text size="sm">Refresh Interval (seconds):</Text>
@@ -374,10 +594,7 @@ const StatsPage = () => {
                 <Button
                   size="xs"
                   variant="subtle"
-                  onClick={() => {
-                    fetchChannelStats();
-                    fetchVODStats();
-                  }}
+                  onClick={fetchAllStats}
                   loading={false}
                 >
                   Refresh Now
@@ -402,7 +619,9 @@ const StatsPage = () => {
               channelsByUUID={channelsByUUID}
               channels={channels}
               handleStopVODClient={handleStopVODClient}
+              handleStopTimeshiftSession={handleStopTimeshiftSession}
               currentPrograms={currentPrograms}
+              catchupPrograms={catchupPrograms}
             />
           </Box>
         </Box>

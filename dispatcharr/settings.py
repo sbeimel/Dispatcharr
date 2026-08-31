@@ -5,6 +5,8 @@ from datetime import timedelta
 from urllib.parse import quote_plus
 from django.core.exceptions import ImproperlyConfigured
 
+from dispatcharr.db.process_label import db_application_name, uses_geventpool_database_backend
+
 
 def _validate_tls_cert_paths(paths, service_name):
     """Validate that configured TLS certificate file paths exist on disk.
@@ -27,6 +29,20 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_DB = os.environ.get("REDIS_DB", "0")
 REDIS_USER = os.environ.get("REDIS_USER", "")
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "")
+# Cap Redis TCP sockets per process-local pool. Under gevent, redis-py's default
+# unbounded ConnectionPool grows one ESTABLISHED fd per concurrent waiter.
+# BlockingConnectionPool waits instead of raising when the cap is reached.
+# Default 50 is per pool (client / buffer / pubsub / django-redis each have
+# their own); raise via REDIS_MAX_CONNECTIONS if a busy install queues.
+REDIS_MAX_CONNECTIONS = int(os.environ.get("REDIS_MAX_CONNECTIONS", "50"))
+# Seconds a greenlet waits for a free BlockingConnectionPool slot before
+# raising. Unrelated to REDIS_IDLE_TIMEOUT (server idle-client close) below.
+REDIS_POOL_TIMEOUT = float(os.environ.get("REDIS_POOL_TIMEOUT", "20"))
+# Redis-server idle-client timeout (CONFIG SET timeout / --timeout). Closes
+# pooled TCP sockets with no commands for this long. Not the pool wait above.
+# Celery BRPOP/BZPOPMIN waiters are exempt. 0 disables. Applied at
+# redis-server start (AIO) and via CONFIG SET on connect.
+REDIS_IDLE_TIMEOUT = int(os.environ.get("REDIS_IDLE_TIMEOUT", "300"))
 
 # Redis TLS configuration
 REDIS_SSL = os.environ.get("REDIS_SSL", "false").lower() == "true"
@@ -99,6 +115,7 @@ INSTALLED_APPS = [
     "django_filters",
     "django_celery_beat",
     "apps.plugins",
+    "apps.timeshift.apps.TimeshiftConfig",
 ]
 
 # EPG Processing optimization settings
@@ -193,15 +210,22 @@ CHANNEL_LAYERS = {
     },
 }
 
-_django_redis_opts = {
-    "CLIENT_CLASS": "django_redis.client.DefaultClient",
+_django_redis_pool_kwargs = {
+    "max_connections": REDIS_MAX_CONNECTIONS,
+    "timeout": REDIS_POOL_TIMEOUT,
 }
 if REDIS_SSL:
     # rediss:// in the URL already enables SSL; pass cert paths and verify
     # settings separately via CONNECTION_POOL_KWARGS.
-    _django_redis_opts["CONNECTION_POOL_KWARGS"] = {
-        k: v for k, v in REDIS_SSL_PARAMS.items() if k != "ssl"
-    }
+    _django_redis_pool_kwargs.update(
+        {k: v for k, v in REDIS_SSL_PARAMS.items() if k != "ssl"}
+    )
+
+_django_redis_opts = {
+    "CLIENT_CLASS": "django_redis.client.DefaultClient",
+    "CONNECTION_POOL_CLASS": "redis.connection.BlockingConnectionPool",
+    "CONNECTION_POOL_KWARGS": _django_redis_pool_kwargs,
+}
 
 CACHES = {
     "default": {
@@ -227,23 +251,38 @@ if os.getenv("DB_ENGINE", None) == "sqlite":
         }
     }
 else:
+    _use_geventpool_db = uses_geventpool_database_backend()
+    _pg_options = {"pool": False} if _use_geventpool_db else {
+        "application_name": db_application_name(),
+    }
+    if _use_geventpool_db:
+        _pg_options.update({
+            "MAX_CONNS": 8,   # Per-worker pool size; 4 workers × 8 = 32 total < pg max_connections=100
+            "REUSE_CONNS": 3, # Connections to keep warm between requests
+            "CONN_MAX_LIFETIME": DATABASE_POOL_CONN_MAX_LIFETIME or None,
+        })
+
     DATABASES = {
         "default": {
-            "ENGINE": "dispatcharr.db.backends.postgresql_psycopg3",
+            "ENGINE": (
+                "dispatcharr.db.backends.postgresql_psycopg3"
+                if _use_geventpool_db
+                else "django.db.backends.postgresql"
+            ),
             "NAME": os.environ.get("POSTGRES_DB", "dispatcharr"),
             "USER": os.environ.get("POSTGRES_USER", "dispatch"),
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "secret"),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": int(os.environ.get("POSTGRES_PORT", 5432)),
             "CONN_MAX_AGE": DATABASE_CONN_MAX_AGE,
-            "OPTIONS": {
-                "MAX_CONNS": 8,   # Per-worker pool size; 4 workers × 8 = 32 total < pg max_connections=100
-                "REUSE_CONNS": 3, # Connections to keep warm between requests
-                "pool": False,    # Disable Django's native psycopg3 pool; geventpool manages connections
-                "CONN_MAX_LIFETIME": DATABASE_POOL_CONN_MAX_LIFETIME or None,
-            },
+            "OPTIONS": _pg_options,
         }
     }
+
+    if not _use_geventpool_db:
+        print(
+            f"PostgreSQL: standard backend for Celery ({_pg_options.get('application_name')})"
+        )
 
     if POSTGRES_SSL:
         _validate_tls_cert_paths([
@@ -376,6 +415,13 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     "visibility_timeout": 3600,  # Time in seconds that a task remains invisible during retries
 }
 
+# Kombu (Celery's broker client) keeps its own Redis connection pool per
+# process, separate from Django's RedisClient/cache pools above. It already
+# defaults to a bounded pool (10), but pin it explicitly so an upstream
+# default change can't silently let broker connections grow unbounded on
+# the autoscaled `default` worker or the 20-thread `dvr` worker.
+CELERY_BROKER_POOL_LIMIT = int(os.environ.get("CELERY_BROKER_POOL_LIMIT", "10"))
+
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 
@@ -504,12 +550,19 @@ else:
 
 LOG_LEVEL = LOG_LEVEL_MAP.get(LOG_LEVEL_NAME, 20)  # Default to INFO (20) if invalid
 
+# Read at module import: Django re-stamps os.environ["TZ"] to TIME_ZONE
+# ("UTC") via time.tzset() as soon as settings finish loading.
+DISPATCHARR_DISPLAY_TZ = (
+    os.environ.get("DISPATCHARR_TIME_ZONE") or os.environ.get("TZ") or "UTC"
+)
+
 # Add this to your existing LOGGING configuration or create one if it doesn't exist
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {
         "verbose": {
+            "()": "dispatcharr.display_timezone.DisplayTimezoneFormatter",
             "format": "{asctime} {levelname} {name} {message}",
             "style": "{",
         },

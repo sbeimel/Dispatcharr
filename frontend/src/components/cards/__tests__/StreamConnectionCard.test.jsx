@@ -19,12 +19,16 @@ vi.mock('../../../store/useVideoStore', () => ({
 vi.mock('../../../store/users.jsx', () => ({
   default: vi.fn(),
 }));
+vi.mock('../../../store/outputProfiles.jsx', () => ({
+  default: vi.fn(),
+}));
 
 // ── dateTimeUtils ─────────────────────────────────────────────────────────────
 vi.mock('../../../utils/dateTimeUtils.js', () => ({
   toFriendlyDuration: vi.fn(() => '1h 23m'),
   formatExactDuration: vi.fn((s) => `${s.toFixed(1)} seconds`),
   useDateTimeFormat: vi.fn(() => ({ fullDateTimeFormat: 'MM/DD/YYYY h:mm A' })),
+  formatDuration: vi.fn(() => '5m 30s'),
 }));
 
 // ── networkUtils ──────────────────────────────────────────────────────────────
@@ -67,6 +71,16 @@ vi.mock('../../../helpers/index.jsx', () => ({
 
 // ── logo image ────────────────────────────────────────────────────────────────
 vi.mock('../../../images/logo.png', () => ({ default: 'logo.png' }));
+
+vi.mock('../../LazyLogo.jsx', () => ({
+  default: ({ logoId, fallbackSrc, ...props }) => (
+    <img
+      src={logoId ? `logo-${logoId}.png` : fallbackSrc}
+      alt="channel logo"
+      {...props}
+    />
+  ),
+}));
 
 // ── Mantine core ──────────────────────────────────────────────────────────────
 vi.mock('@mantine/core', () => ({

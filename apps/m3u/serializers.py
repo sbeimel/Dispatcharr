@@ -1,4 +1,4 @@
-from core.utils import validate_flexible_url
+from core.utils import validate_flexible_url, ensure_custom_properties_dict
 from rest_framework import serializers, status
 from rest_framework.response import Response
 from .models import M3UAccount, M3UFilter, ServerGroup, M3UAccountProfile
@@ -175,8 +175,6 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "password",
             "stale_stream_days",
             "priority",
-            "proxy",
-            "proxy_for_api",
             "status",
             "last_message",
             "enable_vod",
@@ -191,6 +189,7 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             "password": {
                 "required": False,
                 "allow_blank": True,
+                "write_only": True,
             },
         }
 
@@ -214,6 +213,13 @@ class M3UAccountSerializer(serializers.ModelSerializer):
             }
 
         data = super().to_representation(instance)
+
+        # write_only strips password for everyone; re-add only for admins so
+        # operator tooling / profile regex helpers still see credentials.
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        if user is not None and getattr(user, "user_level", 0) >= 10:
+            data["password"] = instance.password or ""
 
         # Parse custom_properties to get VOD preference and auto_enable_new_groups settings
         custom_props = instance.custom_properties or {}
@@ -272,11 +278,15 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         # overwrite their corresponding keys; clients should set those via
         # the typed top-level fields rather than the custom_properties
         # payload.
-        incoming_custom = validated_data.get("custom_properties") or {}
-        custom_props = {
-            **(instance.custom_properties or {}),
-            **incoming_custom,
-        }
+        incoming_custom = {}
+        if "custom_properties" in validated_data:
+            incoming_custom = validated_data["custom_properties"] or {}
+            if not isinstance(incoming_custom, dict):
+                incoming_custom = ensure_custom_properties_dict(incoming_custom)
+        existing_custom = instance.custom_properties or {}
+        if not isinstance(existing_custom, dict):
+            existing_custom = ensure_custom_properties_dict(existing_custom)
+        custom_props = {**existing_custom, **incoming_custom}
 
         if enable_vod is not None:
             custom_props["enable_vod"] = enable_vod
@@ -348,7 +358,9 @@ class M3UAccountSerializer(serializers.ModelSerializer):
         auto_enable_new_groups_series = validated_data.pop("auto_enable_new_groups_series", True)
 
         # Parse existing custom_properties or create new
-        custom_props = validated_data.get("custom_properties", {})
+        custom_props = validated_data.get("custom_properties") or {}
+        if not isinstance(custom_props, dict):
+            custom_props = ensure_custom_properties_dict(custom_props)
 
         # Set preferences (default to True for auto_enable_new_groups)
         custom_props["enable_vod"] = enable_vod

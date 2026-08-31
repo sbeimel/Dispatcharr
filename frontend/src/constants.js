@@ -70,6 +70,66 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'How long to wait before retrying a failed stream/profile combination (prevents endless loops)',
   },
+  connection_timeout: {
+    label: 'Connection Timeout',
+    description:
+      'Maximum time (in seconds) to wait for initial connection to upstream provider',
+  },
+  max_retries: {
+    label: 'Max Retries',
+    description:
+      'Maximum number of retry attempts for failed connections',
+  },
+  url_switch_timeout: {
+    label: 'URL Switch Timeout',
+    description:
+      'Timeout (in seconds) before switching to next URL in failover rotation',
+  },
+  max_stream_switches: {
+    label: 'Max Stream Switches',
+    description:
+      'Maximum number of stream switches allowed during adaptive health monitoring',
+  },
+  failover_rotation_cooldown: {
+    label: 'Failover Rotation Cooldown',
+    description:
+      'Cooldown period (in seconds) between failover rotations to prevent rapid cycling',
+  },
+  retry_wait_interval: {
+    label: 'Retry Wait Interval',
+    description:
+      'Wait time (in seconds) between retry attempts',
+  },
+  failover_grace_period: {
+    label: 'Failover Grace Period',
+    description:
+      'Grace period (in seconds) before triggering failover after connection issues',
+  },
+  chunk_timeout: {
+    label: 'Chunk Timeout',
+    description:
+      'Maximum time (in seconds) to wait for receiving a single chunk from provider',
+  },
+  client_wait_timeout: {
+    label: 'Client Wait Timeout',
+    description:
+      'Maximum time (in seconds) to wait for client to consume buffered data',
+  },
+  stream_timeout: {
+    label: 'Stream Timeout',
+    description:
+      'Overall stream timeout (in seconds) for detecting stalled streams',
+  },
+  retry_window_seconds: {
+    label: 'Retry Window',
+    description:
+      'Time window (in seconds) for counting retries before resetting counter',
+  },
+  stable_connection_threshold: {
+    label: 'Stable Connection Threshold',
+    description:
+      'Minimum uptime (in seconds) before a connection is considered stable',
+  },
 };
 
 export const USER_LIMITS_OPTIONS = {

@@ -3,6 +3,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework.decorators import action
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuthentication
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from drf_spectacular.utils import extend_schema, OpenApiParameter, inline_serializer
 from drf_spectacular.types import OpenApiTypes
@@ -12,18 +14,30 @@ from django.db import connection, transaction
 from django.db.models import Count, F, Prefetch
 from django.db.models import Q
 import os, json, requests, logging, mimetypes, threading, time
+from urllib.parse import urlencode
 from datetime import timedelta
-from django.utils.http import http_date
 from apps.accounts.permissions import (
     Authenticated,
     IsAdmin,
-    IsOwnerOfObject,
+    IsAdminOrDVRManager,
+    IsDVRViewer,
+    IsStandardUser,
     permission_classes_by_action,
     permission_classes_by_method,
 )
+from apps.channels.dvr_access import (
+    is_dvr_manage_enabled,
+    is_dvr_view_enabled,
+    recordings_queryset_for_user,
+)
 
-from core.models import UserAgent, CoreSettings
-from core.utils import RedisClient, safe_upload_path
+from core.models import CoreSettings
+from core.utils import RedisClient, safe_upload_path, resolve_safe_local_data_path
+from core.image_proxy import (
+    image_fetch_failures as _logo_fetch_failures,
+    serve_local_or_remote_image,
+)
+from apps.m3u.utils import convert_js_numbered_backreferences
 
 from .models import (
     Stream,
@@ -71,13 +85,34 @@ from rest_framework.pagination import PageNumberPagination
 from dispatcharr.utils import network_access_allowed
 
 
-logger = logging.getLogger(__name__)
+def _parse_request_bool(value, default=False):
+    """Parse a query/body boolean. Missing values use *default*."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
-# Negative cache for remote logo URLs that failed to fetch.
-# Prevents repeated blocking requests to unreachable hosts (e.g., dead CDNs)
-# from exhausting Daphne workers.  Keyed by URL, value is expiry timestamp.
-_logo_fetch_failures = {}
-_LOGO_FAIL_TTL = 300  # seconds
+
+def _stop_proxy_sessions_for_channel_ids(channel_ids):
+    """Stop live proxy sessions for channels before deleting their DB rows.
+
+    Runs outside Django's delete atomic so geventpool connection release during
+    teardown cannot poison the delete transaction.
+    """
+    if not channel_ids:
+        return
+    from apps.proxy.live_proxy.services.channel_service import ChannelService
+
+    uuids = list(
+        Channel.objects.filter(id__in=channel_ids).values_list("uuid", flat=True)
+    )
+    ChannelService.stop_channels(uuids)
+
+
+logger = logging.getLogger(__name__)
 
 
 class OrInFilter(django_filters.Filter):
@@ -172,6 +207,10 @@ class StreamViewSet(viewsets.ModelViewSet):
         hide_stale = self.request.query_params.get("hide_stale")
         if hide_stale and str(hide_stale).lower() in ("1", "true", "yes", "on"):
             qs = qs.filter(is_stale=False)
+
+        is_catchup = self.request.query_params.get("is_catchup")
+        if is_catchup and str(is_catchup).lower() in ("1", "true", "yes", "on"):
+            qs = qs.filter(is_catchup=True)
 
         return qs
 
@@ -365,6 +404,17 @@ class StreamViewSet(viewsets.ModelViewSet):
             except re.error as e:
                 exclude_error = str(e)
 
+        # The replace field accepts JS-style $1 backreferences, but the regex
+        # engine honors \1. Convert once so the preview's "after" matches the
+        # name the live rename produces (apps/m3u/tasks.py sync_auto_channels
+        # applies the same conversion on the same engine).
+        replace_repl = convert_js_numbered_backreferences(replace_pat)
+
+        # The live rename caps the result at Channel.name's column length
+        # before bulk_create; mirror that cap so the preview never shows a
+        # name the sync would truncate.
+        name_max_len = Channel._meta.get_field("name").max_length
+
         # Capped at SCAN_CAP to bound memory on huge groups; the
         # separate COUNT lets the client surface scan_limit_hit when
         # the preview covers only a sample.
@@ -387,11 +437,12 @@ class StreamViewSet(viewsets.ModelViewSet):
             total_scanned += 1
             if find_re is not None:
                 try:
-                    new_name = find_re.sub(replace_pat, name, timeout=REGEX_TIMEOUT)
+                    new_name = find_re.sub(replace_repl, name, timeout=REGEX_TIMEOUT)
                 except (TimeoutError, re.error) as e:
                     find_error = find_error or f"Pattern timed out: {e}"
                     find_re = None
                     continue
+                new_name = new_name[:name_max_len]
                 if new_name != name:
                     find_match_count += 1
                     if len(find_matches) < limit:
@@ -591,10 +642,12 @@ class ChannelGroupViewSet(viewsets.ModelViewSet):
     serializer_class = ChannelGroupSerializer
 
     def get_permissions(self):
+        if self.action == "cleanup_unused_groups":
+            return [IsAdmin()]
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
-            return [Authenticated()]
+            return [IsAdmin()]
 
     def get_queryset(self):
         # Annotate both counts at the SQL level so the serializer methods
@@ -739,7 +792,9 @@ class ChannelPagination(PageNumberPagination):
     max_page_size = 10000  # Prevent excessive page sizes
 
     def paginate_queryset(self, queryset, request, view=None):
-        if not request.query_params.get(self.page_query_param):
+        if not request.query_params.get(self.page_query_param) and not request.query_params.get(
+            self.page_size_query_param
+        ):
             return None  # disables pagination, returns full queryset
 
         return super().paginate_queryset(queryset, request, view)
@@ -868,6 +923,22 @@ class ChannelViewSet(viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+    def destroy(self, request, *args, **kwargs):
+        """Delete a channel. Optionally stop an active proxy session first.
+
+        Query param ``stop_stream`` (default false): when true, stop the live
+        proxy session *before* the DB delete (outside the delete atomic) so
+        playback ends with the channel row. When false, an in-progress stream
+        keeps playing until stopped from Stats or the client disconnects.
+        """
+        instance = self.get_object()
+        stop_stream = _parse_request_bool(request.query_params.get("stop_stream"))
+        if stop_stream:
+            # Stop before super().destroy() so teardown is not inside the
+            # collector's transaction.atomic.
+            _stop_proxy_sessions_for_channel_ids([instance.id])
+        return super().destroy(request, *args, **kwargs)
+
     def get_permissions(self):
         if self.action in [
             "edit_bulk",
@@ -877,13 +948,26 @@ class ChannelViewSet(viewsets.ModelViewSet):
             "match_epg",
             "set_epg",
             "batch_set_epg",
+            "bulk_regex_rename",
+            "set_names_from_epg",
+            "set_logos_from_epg",
+            "set_tvg_ids_from_epg",
+            "reorder",
         ]:
             return [IsAdmin()]
+
+        if self.action in (
+            "get_ids",
+            "summary",
+            "numbers_in_range",
+            "by_uuids",
+        ):
+            return [IsStandardUser()]
 
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
-            return [Authenticated()]
+            return [IsAdmin()]
 
     def get_queryset(self):
         # get_ids and summary only need the filter conditions, not the full
@@ -925,6 +1009,7 @@ class ChannelViewSet(viewsets.ModelViewSet):
         only_streamless = self.request.query_params.get("only_streamless", None)
         only_stale = self.request.query_params.get("only_stale", None)
         only_has_overrides = self.request.query_params.get("only_has_overrides", None)
+        only_catchup = self.request.query_params.get("only_catchup", None)
         visibility_filter = self.request.query_params.get("visibility_filter", "active")
 
         if channel_profile_id:
@@ -950,6 +1035,8 @@ class ChannelViewSet(viewsets.ModelViewSet):
             q_filters &= Q(streams__is_stale=True)
         if only_has_overrides:
             q_filters &= Q(override__isnull=False)
+        if only_catchup:
+            q_filters &= Q(is_catchup=True)
 
         # Visibility filter applies to list-style reads only; retrieve /
         # update / delete must still reach a hidden channel by id so the
@@ -1298,14 +1385,26 @@ class ChannelViewSet(viewsets.ModelViewSet):
                     to_create = []
                     to_update = []
                     update_field_set = set()
+                    changed_override_epg_ids = set()
+                    override_epg_assignment_changed = False
                     for channel_id, defaults in overrides_to_upsert:
                         existing = existing_overrides.get(channel_id)
                         if existing:
+                            if "epg_data_id" in defaults:
+                                new_epg_id = defaults.get("epg_data_id")
+                                if new_epg_id != existing.epg_data_id:
+                                    override_epg_assignment_changed = True
+                                    if new_epg_id:
+                                        changed_override_epg_ids.add(new_epg_id)
                             for f, v in defaults.items():
                                 setattr(existing, f, v)
                                 update_field_set.add(f)
                             to_update.append(existing)
                         else:
+                            new_epg_id = defaults.get("epg_data_id")
+                            if new_epg_id:
+                                override_epg_assignment_changed = True
+                                changed_override_epg_ids.add(new_epg_id)
                             to_create.append(
                                 ChannelOverride(
                                     channel_id=channel_id, **defaults
@@ -1320,6 +1419,21 @@ class ChannelViewSet(viewsets.ModelViewSet):
                     if to_create:
                         ChannelOverride.objects.bulk_create(
                             to_create, batch_size=200
+                        )
+
+                    # bulk_* bypasses post_save: drop XMLTV chunk cache and
+                    # queue programme import for newly assigned override EPG.
+                    if override_epg_assignment_changed:
+                        from apps.output.streaming_chunk_cache import (
+                            invalidate_epg_chunk_cache,
+                        )
+                        invalidate_epg_chunk_cache()
+                    if changed_override_epg_ids:
+                        from apps.epg.tasks import (
+                            dispatch_program_refresh_for_epg_ids,
+                        )
+                        dispatch_program_refresh_for_epg_ids(
+                            changed_override_epg_ids
                         )
 
                     # Drop override rows that ended up all-null; an empty
@@ -2407,19 +2521,34 @@ class BulkDeleteChannelsAPIView(APIView):
             return [Authenticated()]
 
     @extend_schema(
-        description="Bulk delete channels by ID",
+        description=(
+            "Bulk delete channels by ID. Optional ``stop_stream`` (default false) "
+            "stops active proxy sessions for those channels before deleting."
+        ),
         request=inline_serializer(
             name="BulkDeleteChannelsRequest",
             fields={
                 "channel_ids": serializers.ListField(
                     child=serializers.IntegerField(),
                     help_text="Channel IDs to delete",
-                )
+                ),
+                "stop_stream": serializers.BooleanField(
+                    required=False,
+                    default=False,
+                    help_text=(
+                        "When true, stop active live proxy sessions for these "
+                        "channels before deleting. Default false leaves streams "
+                        "playing until stopped separately."
+                    ),
+                ),
             },
         ),
     )
     def delete(self, request):
         channel_ids = request.data.get("channel_ids", [])
+        stop_stream = _parse_request_bool(request.data.get("stop_stream"), default=False)
+        if stop_stream:
+            _stop_proxy_sessions_for_channel_ids(channel_ids)
         Channel.objects.filter(id__in=channel_ids).delete()
         return Response(
             {"message": "Channels deleted"}, status=status.HTTP_204_NO_CONTENT
@@ -2699,6 +2828,16 @@ class LogoViewSet(viewsets.ModelViewSet):
         except ValueError:
             return Response({"error": "Invalid filename."}, status=status.HTTP_400_BAD_REQUEST)
 
+        overwrite = _parse_request_bool(request.data.get("overwrite"))
+        if os.path.exists(file_path) and not overwrite:
+            return Response(
+                {
+                    "error": f"A logo named '{os.path.basename(file_path)}' already exists.",
+                    "already_exists": True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         os.makedirs("/data/logos", exist_ok=True)
         with open(file_path, "wb+") as destination:
             for chunk in file.chunks():
@@ -2721,7 +2860,7 @@ class LogoViewSet(viewsets.ModelViewSet):
         custom_name = request.data.get('name', '').strip()
         logo_name = custom_name if custom_name else os.path.basename(file_path)
 
-        logo, _ = Logo.objects.get_or_create(
+        logo, _ = Logo.objects.update_or_create(
             url=file_path,
             defaults={
                 "name": logo_name,
@@ -2739,117 +2878,11 @@ class LogoViewSet(viewsets.ModelViewSet):
     def cache(self, request, pk=None):
         """Streams the logo file, whether it's local or remote."""
         logo = self.get_object()
-        logo_url = logo.url
-        if logo_url.startswith("/data"):  # Local file
-            if not os.path.exists(logo_url):
-                raise Http404("Image not found")
-            stat = os.stat(logo_url)
-            # Get proper mime type (first item of the tuple)
-            content_type, _ = mimetypes.guess_type(logo_url)
-            if not content_type:
-                content_type = "image/jpeg"  # Default to a common image type
-
-            # Use context manager and set Content-Disposition to inline
-            response = StreamingHttpResponse(
-                open(logo_url, "rb"), content_type=content_type
-            )
-            response["Cache-Control"] = "public, max-age=14400"  # Cache in browser for 4 hours
-            response["Last-Modified"] = http_date(stat.st_mtime)
-            response["Content-Disposition"] = 'inline; filename="{}"'.format(
-                os.path.basename(logo_url)
-            )
-            return response
-
-        else:  # Remote image
-            # Skip URLs that recently failed to avoid blocking workers
-            # on unreachable hosts (e.g., dead CDNs referenced by old recordings).
-            fail_expiry = _logo_fetch_failures.get(logo_url)
-            if fail_expiry and time.monotonic() < fail_expiry:
-                raise Http404("Remote image temporarily unavailable")
-
-            try:
-                # Get the default user agent
-                try:
-                    default_user_agent_id = CoreSettings.get_default_user_agent_id()
-                    user_agent_obj = UserAgent.objects.get(id=int(default_user_agent_id))
-                    user_agent = user_agent_obj.user_agent
-                except (CoreSettings.DoesNotExist, UserAgent.DoesNotExist, ValueError):
-                    # Fallback if default not found
-                    from core.utils import dispatcharr_user_agent
-                    user_agent = dispatcharr_user_agent()
-
-                # Hard total timeout (connect + full download) prevents a slow
-                # server dripping bytes from holding a greenlet indefinitely.
-                _LOGO_TOTAL_TIMEOUT = 10  # seconds
-                _LOGO_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-
-                remote_response = requests.get(
-                    logo_url,
-                    stream=True,
-                    timeout=(10, 15),  # (connect_timeout, read_timeout per chunk) - Extended for slow servers
-                    headers={'User-Agent': user_agent}
-                )
-                if remote_response.status_code == 200:
-                    # Eagerly read the full image with a total time + size cap
-                    # so the greenlet is released quickly.
-                    chunks = []
-                    total = 0
-                    deadline = time.monotonic() + _LOGO_TOTAL_TIMEOUT
-                    for chunk in remote_response.iter_content(chunk_size=8192):
-                        total += len(chunk)
-                        if total > _LOGO_MAX_BYTES:
-                            remote_response.close()
-                            raise Http404("Remote image too large")
-                        if time.monotonic() > deadline:
-                            remote_response.close()
-                            now = time.monotonic()
-                            _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
-                            raise Http404("Remote image fetch timed out")
-                        chunks.append(chunk)
-                    body = b"".join(chunks)
-
-                    # Full read succeeded, clear any previous failure entry
-                    _logo_fetch_failures.pop(logo_url, None)
-
-                    # Try to get content type from response headers first
-                    content_type = remote_response.headers.get("Content-Type")
-
-                    # If no content type in headers or it's empty, guess based on URL
-                    if not content_type:
-                        content_type, _ = mimetypes.guess_type(logo_url)
-
-                    # If still no content type, default to common image type
-                    if not content_type:
-                        content_type = "image/jpeg"
-
-                    response = HttpResponse(
-                        body,
-                        content_type=content_type,
-                    )
-                    response["Content-Length"] = str(len(body))
-                    if remote_response.headers.get("Cache-Control"):
-                        response["Cache-Control"] = remote_response.headers.get("Cache-Control")
-                    if remote_response.headers.get("Last-Modified"):
-                        response["Last-Modified"] = remote_response.headers.get("Last-Modified")
-                    response["Content-Disposition"] = 'inline; filename="{}"'.format(
-                        os.path.basename(logo_url)
-                    )
-                    return response
-                # Non-200 response — cache the failure and evict stale entries
-                now = time.monotonic()
-                _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
-                if len(_logo_fetch_failures) > 256:
-                    for k in [k for k, v in _logo_fetch_failures.items() if v <= now]:
-                        _logo_fetch_failures.pop(k, None)
-                raise Http404("Remote image not found")
-            except requests.RequestException as e:
-                now = time.monotonic()
-                _logo_fetch_failures[logo_url] = now + _LOGO_FAIL_TTL
-                if len(_logo_fetch_failures) > 256:
-                    for k in [k for k, v in _logo_fetch_failures.items() if v <= now]:
-                        _logo_fetch_failures.pop(k, None)
-                logger.warning(f"Error fetching logo from {logo_url}: {e}")
-                raise Http404("Error fetching remote image")
+        return serve_local_or_remote_image(
+            logo.url,
+            failure_cache=_logo_fetch_failures,
+            log_label="logo",
+        )
 
 
 class ChannelProfileViewSet(viewsets.ModelViewSet):
@@ -3035,11 +3068,19 @@ class GetChannelStreamStatsAPIView(APIView):
 
 
 class UpdateChannelMembershipAPIView(APIView):
-    permission_classes = [IsOwnerOfObject]
+    permission_classes = [Authenticated]
 
     def patch(self, request, profile_id, channel_id):
         """Enable or disable a channel for a specific group"""
-        channel_profile = get_object_or_404(ChannelProfile, id=profile_id)
+        # Scope the fetch to profiles the caller may touch (admin: all,
+        # otherwise their assigned profiles). Auth is the queryset itself,
+        # so there is no second ownership lookup after get_object_or_404.
+        user = request.user
+        if getattr(user, "user_level", None) == 10:
+            profiles = ChannelProfile.objects.all()
+        else:
+            profiles = user.channel_profiles.all()
+        channel_profile = get_object_or_404(profiles, id=profile_id)
         channel = get_object_or_404(Channel, id=channel_id)
         try:
             membership = ChannelProfileMembership.objects.get(
@@ -3158,7 +3199,7 @@ class RecurringRecordingRuleViewSet(viewsets.ModelViewSet):
     serializer_class = RecurringRecordingRuleSerializer
 
     def get_permissions(self):
-        return [IsAdmin()]
+        return [IsAdminOrDVRManager()]
 
     def perform_create(self, serializer):
         rule = serializer.save()
@@ -3236,18 +3277,65 @@ def _stop_dvr_clients(channel_uuid, recording_id=None):
     return stopped
 
 
+# QueryParamJWTAuthentication supports native <video src> clients that cannot
+# send Authorization headers. Authorization still requires an authenticated
+# user via _user_can_play_recording; these classes only populate request.user.
+RECORDING_PLAYBACK_AUTHENTICATORS = [
+    JWTAuthentication,
+    ApiKeyAuthentication,
+    QueryParamJWTAuthentication,
+]
+
+
+def _recording_auth_query_suffix(request):
+    """Suffix for rewritten recording URLs when auth used ?token= (native <video>).
+
+    hls.js clients authenticate via Authorization on each XHR and do not need
+    tokens embedded in playlist segment lines.
+    """
+    from rest_framework.request import Request as DRFRequest
+
+    if isinstance(request, DRFRequest):
+        params = request.query_params
+    else:
+        params = request.GET
+    token = params.get("token")
+    if not token:
+        return ""
+    return "?" + urlencode({"token": token})
+
+
 class RecordingViewSet(viewsets.ModelViewSet):
     queryset = Recording.objects.all()
     serializer_class = RecordingSerializer
 
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("channel")
+        return recordings_queryset_for_user(qs, getattr(self.request, "user", None))
+
     def get_permissions(self):
-        # Allow unauthenticated playback of recording files (like other streaming endpoints)
+        # file/hls use AllowAny so DRF does not reject requests before auth
+        # classes run; _user_can_play_recording enforces authenticated access.
         if self.action in ('file', 'hls'):
             return [AllowAny()]
+        if self.action in ('list', 'retrieve'):
+            return [IsDVRViewer()]
+        if self.action in (
+            'create',
+            'update',
+            'partial_update',
+            'destroy',
+            'stop',
+            'extend',
+            'comskip',
+            'refresh_artwork',
+            'update_metadata',
+        ):
+            return [IsAdminOrDVRManager()]
         try:
             return [perm() for perm in permission_classes_by_action[self.action]]
         except KeyError:
-            return [Authenticated()]
+            return [IsAdminOrDVRManager()]
 
     def _user_can_play_recording(self, request, recording):
         """Authorization gate for recording playback (file/hls actions).
@@ -3256,10 +3344,11 @@ class RecordingViewSet(viewsets.ModelViewSet):
         unlike the XC-style endpoints these URLs carry no credentials of
         their own, so we require an authenticated session/JWT:
           * Unauthenticated requests → denied.
-          * Admins (user_level >= 10) → allowed.
-          * Authenticated non-admins → allowed only if the recording's
-            source channel is visible under their channel-profile
-            assignments and within their user_level.
+          * Admins and DVR managers → allowed.
+          * View-only users → allowed only if the recording's source
+            channel is visible under their channel-profile assignments
+            and within their user_level.
+          * Users without DVR view/manage → denied.
 
         The network_access_allowed(request, "STREAMS") check applied
         before this is a network-perimeter gate (e.g. block external IPs
@@ -3269,30 +3358,19 @@ class RecordingViewSet(viewsets.ModelViewSet):
         user = getattr(request, "user", None)
         if not user or not getattr(user, "is_authenticated", False):
             return False
-        if getattr(user, "user_level", 0) >= 10:
+        if not is_dvr_view_enabled(user=user):
+            return False
+        if is_dvr_manage_enabled(user=user):
             return True
 
         channel = getattr(recording, "channel", None)
         if channel is None:
-            # Recording with no source channel, only admins can play.
+            # Recording with no source channel, only admins/managers can play.
             return False
 
-        try:
-            user_profile_count = user.channel_profiles.count()
-        except Exception:
-            user_profile_count = 0
-
-        filters = {
-            "id": channel.id,
-            "user_level__lte": user.user_level,
-        }
-        if user_profile_count > 0:
-            filters["channelprofilemembership__enabled"] = True
-            filters["channelprofilemembership__channel_profile__in"] = (
-                user.channel_profiles.all()
-            )
-            return Channel.objects.filter(**filters).distinct().exists()
-        return Channel.objects.filter(**filters).exists()
+        return recordings_queryset_for_user(
+            Recording.objects.filter(pk=recording.pk), user
+        ).exists()
 
     @action(detail=True, methods=["post"], url_path="comskip")
     def comskip(self, request, pk=None):
@@ -3305,7 +3383,12 @@ class RecordingViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({"success": False, "error": str(e)}, status=400)
 
-    @action(detail=True, methods=["get"], url_path="file")
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="file",
+        authentication_classes=RECORDING_PLAYBACK_AUTHENTICATORS,
+    )
     def file(self, request, pk=None):
         """Stream a completed recording file with HTTP Range support for seeking.
 
@@ -3329,7 +3412,7 @@ class RecordingViewSet(viewsets.ModelViewSet):
             if hls_dir and os.path.isdir(hls_dir):
                 hls_url = request.build_absolute_uri(
                     f"/api/channels/recordings/{pk}/hls/index.m3u8"
-                )
+                ) + _recording_auth_query_suffix(request)
                 return HttpResponseRedirect(hls_url)
             if not file_path or not os.path.exists(file_path):
                 raise Http404("Recording file not found")
@@ -3393,7 +3476,12 @@ class RecordingViewSet(viewsets.ModelViewSet):
         response["Content-Disposition"] = f"inline; filename=\"{file_name}\""
         return response
 
-    @action(detail=True, methods=["get"], url_path="hls/(?P<seg_path>.+)")
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="hls/(?P<seg_path>.+)",
+        authentication_classes=RECORDING_PLAYBACK_AUTHENTICATORS,
+    )
     def hls(self, request, pk=None, seg_path=None):
         """Serve HLS playlist and segment files for an in-progress (or completed) recording.
 
@@ -3417,9 +3505,10 @@ class RecordingViewSet(viewsets.ModelViewSet):
             cp = recording.custom_properties or {}
             file_path = cp.get("file_path")
             if seg_path.endswith(".m3u8") and file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                return HttpResponseRedirect(
-                    request.build_absolute_uri(f"/api/channels/recordings/{pk}/file/")
-                )
+                file_url = request.build_absolute_uri(
+                    f"/api/channels/recordings/{pk}/file/"
+                ) + _recording_auth_query_suffix(request)
+                return HttpResponseRedirect(file_url)
             raise Http404("HLS content not available for this recording")
 
         # Security: prevent path traversal outside the HLS directory
@@ -3432,16 +3521,18 @@ class RecordingViewSet(viewsets.ModelViewSet):
             raise Http404(f"HLS file not found: {seg_path}")
 
         if seg_path.endswith(".m3u8"):
-            # Rewrite relative segment lines to absolute URLs through this API
+            # Rewrite relative segment lines to absolute URLs through this API.
+            # Propagate ?token= only for native <video> clients (see helper).
             base_url = request.build_absolute_uri(
                 f"/api/channels/recordings/{pk}/hls/"
             )
+            auth_suffix = _recording_auth_query_suffix(request)
             lines = []
             with open(requested) as _f:
                 for line in _f:
                     stripped = line.strip()
                     if stripped and not stripped.startswith("#"):
-                        lines.append(f"{base_url}{stripped}\n")
+                        lines.append(f"{base_url}{stripped}{auth_suffix}\n")
                     else:
                         lines.append(line)
             return HttpResponse("".join(lines), content_type="application/x-mpegURL")
@@ -3915,10 +4006,7 @@ class ComskipConfigAPIView(APIView):
 class BulkDeleteUpcomingRecordingsAPIView(APIView):
     """Delete all upcoming (future) recordings."""
     def get_permissions(self):
-        try:
-            return [perm() for perm in permission_classes_by_method[self.request.method]]
-        except KeyError:
-            return [Authenticated()]
+        return [IsAdminOrDVRManager()]
 
     def post(self, request):
         now = timezone.now()
@@ -3936,10 +4024,9 @@ class BulkDeleteUpcomingRecordingsAPIView(APIView):
 class SeriesRulesAPIView(APIView):
     """Manage DVR series recording rules (list/add)."""
     def get_permissions(self):
-        try:
-            return [perm() for perm in permission_classes_by_method[self.request.method]]
-        except KeyError:
-            return [Authenticated()]
+        if self.request.method == "GET":
+            return [IsDVRViewer()]
+        return [IsAdminOrDVRManager()]
 
     @extend_schema(
         summary="List all series rules",
@@ -3956,11 +4043,13 @@ class SeriesRulesAPIView(APIView):
             fields={
                 'tvg_id': serializers.CharField(required=False, allow_blank=True, help_text='Optional channel TVG ID. Omit to match across all channels.'),
                 'mode': serializers.ChoiceField(choices=['all', 'new'], default='all', help_text='all: record all episodes, new: record only new episodes'),
+                'untagged_is_new': serializers.BooleanField(required=False, default=False, help_text="mode 'new' only: treat a program tagged neither new nor previously-shown as new, for EPG feeds that only tag repeats"),
                 'title': serializers.CharField(help_text='Series title', required=False),
                 'title_mode': serializers.ChoiceField(choices=['exact', 'contains', 'search', 'regex'], default='exact', required=False, help_text='How to match the title field'),
                 'description': serializers.CharField(required=False, help_text='Optional description match expression'),
                 'description_mode': serializers.ChoiceField(choices=['contains', 'search', 'regex'], default='contains', required=False, help_text='How to match the description field'),
                 'channel_id': serializers.IntegerField(required=False, help_text='Optional channel to pin recordings to (defaults to lowest-numbered channel for the EPG)'),
+                'epg_source_id': serializers.IntegerField(required=False, help_text='Optional EPG source. Combined with tvg_id this picks a specific EPG row when the same tvg_id exists on more than one source. Omit on legacy rules to use every mapped copy of that tvg_id.'),
             },
         ),
     )
@@ -3973,6 +4062,8 @@ class SeriesRulesAPIView(APIView):
         description = data.get("description") or ""
         description_mode = (data.get("description_mode") or "contains").lower()
         channel_id = data.get("channel_id")
+        from apps.channels.managers import parse_optional_epg_source_id
+        epg_source_id = parse_optional_epg_source_id(data.get("epg_source_id"))
         if mode not in ("all", "new"):
             return Response({"error": "mode must be 'all' or 'new'"}, status=status.HTTP_400_BAD_REQUEST)
         if title_mode not in ("exact", "contains", "search", "regex"):
@@ -3993,6 +4084,8 @@ class SeriesRulesAPIView(APIView):
             if not Channel.objects.filter(id=pinned_channel_id).exists():
                 return Response({"error": "channel_id does not exist"}, status=status.HTTP_400_BAD_REQUEST)
 
+        untagged_is_new = bool(data.get("untagged_is_new"))
+
         rule_record = {
             "tvg_id": tvg_id,
             "mode": mode,
@@ -4001,17 +4094,37 @@ class SeriesRulesAPIView(APIView):
             "description": description,
             "description_mode": description_mode,
         }
+        if mode == "new" and untagged_is_new:
+            rule_record["untagged_is_new"] = True
         if pinned_channel_id is not None:
             rule_record["channel_id"] = pinned_channel_id
+        if epg_source_id is not None:
+            rule_record["epg_source_id"] = epg_source_id
 
         rules = CoreSettings.get_dvr_series_rules()
-        # Upsert by tvg_id + title so multiple rules can target the same channel
+        # Upsert by (tvg_id, title, epg_source_id). Re-saving a legacy
+        # unsourced rule from the editor with a source selected upgrades
+        # that rule in place rather than creating a second copy.
+        incoming_source = epg_source_id
         existing = next(
-            (r for r in rules if
-             str(r.get("tvg_id") or "") == tvg_id and
-             str(r.get("title") or "") == title),
+            (
+                r for r in rules
+                if str(r.get("tvg_id") or "") == tvg_id
+                and str(r.get("title") or "") == title
+                and parse_optional_epg_source_id(r.get("epg_source_id")) == incoming_source
+            ),
             None
         )
+        if existing is None and incoming_source is not None:
+            existing = next(
+                (
+                    r for r in rules
+                    if str(r.get("tvg_id") or "") == tvg_id
+                    and str(r.get("title") or "") == title
+                    and parse_optional_epg_source_id(r.get("epg_source_id")) is None
+                ),
+                None
+            )
         if existing:
             existing.clear()
             existing.update(rule_record)
@@ -4025,22 +4138,36 @@ class SeriesRulesAPIView(APIView):
 
     @extend_schema(
         summary="Delete a series rule",
-        description="Remove a series recording rule by tvg_id + title and clean up future scheduled recordings.",
+        description="Remove a series recording rule by tvg_id + title and clean up future scheduled recordings. Pass epg_source_id to delete only that source copy when the same title exists on more than one source.",
         parameters=[
             OpenApiParameter('tvg_id', str, OpenApiParameter.QUERY, required=False, description='Channel TVG ID (may be blank for title-only rules)'),
             OpenApiParameter('title', str, OpenApiParameter.QUERY, required=False, description='Series title'),
+            OpenApiParameter('epg_source_id', int, OpenApiParameter.QUERY, required=False, description='Optional EPG source. When set, only the rule for that source is removed, and only recordings tagged with that source (plus untagged legacy snapshots) are cleaned up.'),
         ],
     )
     def delete(self, request):
+        from apps.channels.managers import parse_optional_epg_source_id
+
         tvg_id = str(request.query_params.get("tvg_id") or "").strip()
         title = request.query_params.get("title")
+        epg_source_id = parse_optional_epg_source_id(
+            request.query_params.get("epg_source_id")
+        )
 
         rules = CoreSettings.get_dvr_series_rules()
 
         def _matches(r):
             tvg_match = str(r.get("tvg_id") or "") == tvg_id
             title_match = title is None or str(r.get("title") or "") == title
-            return tvg_match and title_match
+            if not (tvg_match and title_match):
+                return False
+            if epg_source_id is None:
+                return True
+            # Recordings carry program.epg_source_id even when the rule does
+            # not. A DVR "entire series" delete forwards that id and must
+            # still match the unsourced rule.
+            rule_source = parse_optional_epg_source_id(r.get("epg_source_id"))
+            return rule_source is None or rule_source == epg_source_id
 
         deleted_rule = next((r for r in rules if _matches(r)), None)
         remaining = [r for r in rules if not _matches(r)]
@@ -4048,14 +4175,13 @@ class SeriesRulesAPIView(APIView):
 
         removed = 0
         if deleted_rule:
-            from .models import Recording
-            qs = Recording.objects.filter(start_time__gte=timezone.now())
-            rule_tvg_id = deleted_rule.get("tvg_id") or ""
-            if rule_tvg_id:
-                qs = qs.filter(custom_properties__program__tvg_id=rule_tvg_id)
-            rule_title = deleted_rule.get("title") or ""
-            if rule_title:
-                qs = qs.filter(custom_properties__program__title=rule_title)
+            from apps.channels.managers import future_recordings_for_series
+
+            qs = future_recordings_for_series(
+                tvg_id=deleted_rule.get("tvg_id") or "",
+                title=deleted_rule.get("title") or "",
+                epg_source_id=epg_source_id,
+            )
             removed = qs.count()
             qs.delete()
 
@@ -4078,10 +4204,7 @@ class SeriesRulePreviewAPIView(APIView):
     within the standard 7-day evaluation horizon.
     """
     def get_permissions(self):
-        try:
-            return [perm() for perm in permission_classes_by_method[self.request.method]]
-        except KeyError:
-            return [Authenticated()]
+        return [IsAdminOrDVRManager()]
 
     @extend_schema(
         summary="Preview series rule matches",
@@ -4091,17 +4214,20 @@ class SeriesRulePreviewAPIView(APIView):
             fields={
                 'tvg_id': serializers.CharField(required=False, allow_blank=True, help_text='Optional channel TVG ID. Omit to search across all channels.'),
                 'mode': serializers.ChoiceField(choices=['all', 'new'], default='all', required=False),
+                'untagged_is_new': serializers.BooleanField(required=False, default=False, help_text="mode 'new' only: treat a program tagged neither new nor previously-shown as new, for EPG feeds that only tag repeats"),
                 'title': serializers.CharField(required=False),
                 'title_mode': serializers.ChoiceField(choices=['exact', 'contains', 'search', 'regex'], default='exact', required=False),
                 'description': serializers.CharField(required=False),
                 'description_mode': serializers.ChoiceField(choices=['contains', 'search', 'regex'], default='contains', required=False),
+                'epg_source_id': serializers.IntegerField(required=False, help_text='Optional EPG source, combined with tvg_id'),
                 'limit': serializers.IntegerField(required=False, help_text='Max programs to return (default 25, max 100)'),
             },
         ),
     )
     def post(self, request):
-        from apps.epg.models import EPGData, ProgramData
+        from apps.epg.models import ProgramData
         from apps.epg.query_utils import parse_text_query
+        from apps.channels.managers import program_is_new_for_rule
 
         data = request.data or {}
         tvg_id = str(data.get("tvg_id") or "").strip()
@@ -4123,10 +4249,27 @@ class SeriesRulePreviewAPIView(APIView):
         horizon = now + timedelta(days=7)
 
         if tvg_id:
-            epg = EPGData.objects.filter(tvg_id=tvg_id).first()
-            if not epg:
-                return Response({"matches": [], "total": 0, "epg_found": False})
-            qs = ProgramData.objects.filter(epg=epg, end_time__gt=now, start_time__lte=horizon)
+            from apps.channels.managers import (
+                parse_optional_epg_source_id,
+                resolve_epg_data_for_series_rule,
+            )
+
+            source_id = parse_optional_epg_source_id(data.get("epg_source_id"))
+            resolved_epgs, epg_status = resolve_epg_data_for_series_rule(
+                tvg_id, source_id
+            )
+            if epg_status:
+                return Response({
+                    "matches": [],
+                    "total": 0,
+                    "epg_found": epg_status != "no_epg_match",
+                    "status": epg_status,
+                })
+            qs = ProgramData.objects.filter(
+                epg_id__in=[e.id for e in resolved_epgs],
+                end_time__gt=now,
+                start_time__lte=horizon,
+            )
         else:
             qs = ProgramData.objects.filter(end_time__gt=now, start_time__lte=horizon)
 
@@ -4151,8 +4294,12 @@ class SeriesRulePreviewAPIView(APIView):
         # Apply "new" filter in Python (custom_properties JSON lookup), but only
         # over the bounded result set we already filtered down to.
         candidates = list(qs[:limit * 4])  # small overshoot to allow new-only filtering
+        untagged_is_new = mode == "new" and bool(data.get("untagged_is_new"))
         if mode == "new":
-            candidates = [p for p in candidates if (p.custom_properties or {}).get("new")]
+            candidates = [
+                p for p in candidates
+                if program_is_new_for_rule(p.custom_properties, untagged_is_new)
+            ]
 
         total = len(candidates)
         candidates = candidates[:limit]
@@ -4170,7 +4317,7 @@ class SeriesRulePreviewAPIView(APIView):
                 "end_time": p.end_time.isoformat(),
                 "season": cp.get("season"),
                 "episode": cp.get("episode"),
-                "is_new": bool(cp.get("new")),
+                "is_new": program_is_new_for_rule(cp, untagged_is_new),
             })
 
         return Response({
@@ -4184,10 +4331,7 @@ class SeriesRulePreviewAPIView(APIView):
 
 class EvaluateSeriesRulesAPIView(APIView):
     def get_permissions(self):
-        try:
-            return [perm() for perm in permission_classes_by_method[self.request.method]]
-        except KeyError:
-            return [Authenticated()]
+        return [IsAdminOrDVRManager()]
 
     @extend_schema(
         summary="Evaluate series rules",
@@ -4215,10 +4359,7 @@ class BulkRemoveSeriesRecordingsAPIView(APIView):
       - scope: 'title' (default) or 'channel'
     """
     def get_permissions(self):
-        try:
-            return [perm() for perm in permission_classes_by_method[self.request.method]]
-        except KeyError:
-            return [Authenticated()]
+        return [IsAdminOrDVRManager()]
 
     @extend_schema(
         summary="Bulk remove scheduled recordings for a series",
@@ -4229,22 +4370,30 @@ class BulkRemoveSeriesRecordingsAPIView(APIView):
                 "tvg_id": serializers.CharField(required=True, help_text="Channel TVG ID (required)"),
                 "title": serializers.CharField(required=False, help_text="Series title - when scope=title, only recordings matching this title are removed"),
                 "scope": serializers.ChoiceField(choices=["title", "channel"], default="title", required=False, help_text="title: remove only matching title on channel, channel: remove all future recordings on channel"),
+                "epg_source_id": serializers.IntegerField(required=False, help_text="Optional EPG source. When set, only recordings tagged with that source (and untagged legacy snapshots) are removed."),
             },
         ),
     )
     def post(self, request):
-        from django.utils import timezone
+        from apps.channels.managers import (
+            future_recordings_for_series,
+            parse_optional_epg_source_id,
+        )
+
         tvg_id = str(request.data.get("tvg_id") or "").strip()
         title = request.data.get("title")
         scope = (request.data.get("scope") or "title").lower()
+        epg_source_id = parse_optional_epg_source_id(
+            request.data.get("epg_source_id")
+        )
         if not tvg_id and not title:
             return Response({"error": "tvg_id or title is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        qs = Recording.objects.filter(start_time__gte=timezone.now())
-        if tvg_id:
-            qs = qs.filter(custom_properties__program__tvg_id=tvg_id)
-        if scope == "title" and title:
-            qs = qs.filter(custom_properties__program__title=title)
+        qs = future_recordings_for_series(
+            tvg_id=tvg_id,
+            title=title if scope == "title" else "",
+            epg_source_id=epg_source_id,
+        )
 
         count = qs.count()
         qs.delete()

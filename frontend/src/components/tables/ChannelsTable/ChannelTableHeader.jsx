@@ -3,12 +3,20 @@ import {
   ActionIcon,
   Box,
   Button,
+  Checkbox,
   Flex,
   Group,
   Menu,
-  NumberInput,
+  MenuDivider,
+  MenuDropdown,
+  MenuItem,
+  MenuLabel,
+  MenuTarget,
   Popover,
+  PopoverDropdown,
+  PopoverTarget,
   Select,
+  Stack,
   Text,
   TextInput,
   Tooltip,
@@ -19,22 +27,21 @@ import {
   Binary,
   CircleCheck,
   EllipsisVertical,
-  SquareMinus,
-  SquarePen,
-  SquarePlus,
-  Settings,
   Eye,
   EyeOff,
   Filter,
-  Square,
-  SquareCheck,
-  Pin,
-  PinOff,
+  FolderPlus,
   Lock,
   LockOpen,
+  Pin,
+  PinOff,
+  Settings,
+  Square,
+  SquareCheck,
+  SquareMinus,
+  SquarePen,
+  SquarePlus,
 } from 'lucide-react';
-import API from '../../../api';
-import { notifications } from '@mantine/notifications';
 import useChannelsStore from '../../../store/channels';
 import useChannelsTableStore from '../../../store/channelsTable';
 import useAuthStore from '../../../store/auth';
@@ -45,22 +52,30 @@ import ConfirmationDialog from '../../ConfirmationDialog';
 import useWarningsStore from '../../../store/warnings';
 import ProfileModal, { renderProfileOption } from '../../modals/ProfileModal';
 import EPGMatchModal from '../../modals/EPGMatchModal';
+import AddToProfileModal from '../../modals/AddToProfileModal';
+import {
+  addChannelProfile,
+  deleteChannelProfile,
+} from '../../../utils/tables/ChannelsTableUtils.js';
 
 const CreateProfilePopover = React.memo(() => {
   const [opened, setOpened] = useState(false);
   const [name, setName] = useState('');
+  const [startEmpty, setStartEmpty] = useState(false);
   const theme = useMantineTheme();
 
   const authUser = useAuthStore((s) => s.user);
 
   const setOpen = () => {
     setName('');
+    setStartEmpty(false);
     setOpened(!opened);
   };
 
   const submit = async () => {
-    await API.addChannelProfile({ name });
+    await addChannelProfile({ name, start_empty: startEmpty });
     setName('');
+    setStartEmpty(false);
     setOpened(false);
   };
 
@@ -72,7 +87,7 @@ const CreateProfilePopover = React.memo(() => {
       withArrow
       shadow="md"
     >
-      <Popover.Target>
+      <PopoverTarget>
         <ActionIcon
           variant="transparent"
           color={theme.tailwind.green[5]}
@@ -81,27 +96,37 @@ const CreateProfilePopover = React.memo(() => {
         >
           <SquarePlus />
         </ActionIcon>
-      </Popover.Target>
+      </PopoverTarget>
 
-      <Popover.Dropdown>
-        <Group>
-          <TextInput
-            placeholder="Profile Name"
-            value={name}
-            onChange={(event) => setName(event.currentTarget.value)}
+      <PopoverDropdown>
+        <Stack gap="xs">
+          <Group>
+            <TextInput
+              placeholder="Profile Name"
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              size="xs"
+            />
+
+            <ActionIcon
+              variant="transparent"
+              color={theme.tailwind.green[5]}
+              size="sm"
+              onClick={submit}
+            >
+              <CircleCheck />
+            </ActionIcon>
+          </Group>
+
+          <Checkbox
+            label="Start empty"
+            description="New profiles include all channels unless checked."
+            checked={startEmpty}
+            onChange={(event) => setStartEmpty(event.currentTarget.checked)}
             size="xs"
           />
-
-          <ActionIcon
-            variant="transparent"
-            color={theme.tailwind.green[5]}
-            size="sm"
-            onClick={submit}
-          >
-            <CircleCheck />
-          </ActionIcon>
-        </Group>
-      </Popover.Dropdown>
+        </Stack>
+      </PopoverDropdown>
     </Popover>
   );
 });
@@ -120,15 +145,17 @@ const ChannelTableHeader = ({
   setShowOnlyStaleChannels,
   showOnlyOverriddenChannels,
   setShowOnlyOverriddenChannels,
+  showOnlyCatchupChannels,
+  setShowOnlyCatchupChannels,
   visibilityFilter,
   setVisibilityFilter,
 }) => {
   const theme = useMantineTheme();
 
-  const [channelNumAssignmentStart, setChannelNumAssignmentStart] = useState(1);
   const [assignNumbersModalOpen, setAssignNumbersModalOpen] = useState(false);
   const [groupManagerOpen, setGroupManagerOpen] = useState(false);
   const [epgMatchModalOpen, setEpgMatchModalOpen] = useState(false);
+  const [addToProfileModalOpen, setAddToProfileModalOpen] = useState(false);
   const [confirmDeleteProfileOpen, setConfirmDeleteProfileOpen] =
     useState(false);
   const [profileToDelete, setProfileToDelete] = useState(null);
@@ -179,35 +206,10 @@ const ChannelTableHeader = ({
   const executeDeleteProfile = async (id) => {
     setDeletingProfile(true);
     try {
-      await API.deleteChannelProfile(id);
+      await deleteChannelProfile(id);
     } finally {
       setDeletingProfile(false);
       setConfirmDeleteProfileOpen(false);
-    }
-  };
-
-  const assignChannels = async () => {
-    try {
-      // Call our custom API endpoint
-      const result = await API.assignChannelNumbers(
-        selectedTableIds,
-        channelNumAssignmentStart
-      );
-
-      // We might get { message: "Channels have been auto-assigned!" }
-      notifications.show({
-        title: result.message || 'Channels assigned',
-        color: 'green.5',
-      });
-
-      // Refresh the channel list
-      API.requeryChannels();
-    } catch (err) {
-      console.error(err);
-      notifications.show({
-        title: 'Failed to assign channels',
-        color: 'red.5',
-      });
     }
   };
 
@@ -244,6 +246,12 @@ const ChannelTableHeader = ({
   const toggleShowOnlyOverriddenChannels = () => {
     if (setShowOnlyOverriddenChannels) {
       setShowOnlyOverriddenChannels(!showOnlyOverriddenChannels);
+    }
+  };
+
+  const toggleShowOnlyCatchupChannels = () => {
+    if (setShowOnlyCatchupChannels) {
+      setShowOnlyCatchupChannels(!showOnlyCatchupChannels);
     }
   };
 
@@ -302,14 +310,14 @@ const ChannelTableHeader = ({
       >
         <Flex gap={6}>
           <Menu shadow="md" width={200}>
-            <Menu.Target>
+            <MenuTarget>
               <Button size="xs" variant="default" onClick={() => {}}>
                 <Filter size={18} />
               </Button>
-            </Menu.Target>
+            </MenuTarget>
 
-            <Menu.Dropdown>
-              <Menu.Item
+            <MenuDropdown>
+              <MenuItem
                 onClick={toggleShowDisabled}
                 leftSection={
                   showDisabled ? <Eye size={18} /> : <EyeOff size={18} />
@@ -319,9 +327,9 @@ const ChannelTableHeader = ({
                 <Text size="xs">
                   {showDisabled ? 'Hide Disabled' : 'Show Disabled'}
                 </Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 onClick={toggleShowOnlyStreamlessChannels}
                 leftSection={
                   showOnlyStreamlessChannels ? (
@@ -332,9 +340,9 @@ const ChannelTableHeader = ({
                 }
               >
                 <Text size="xs">Only Empty Channels</Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 onClick={toggleShowOnlyStaleChannels}
                 leftSection={
                   showOnlyStaleChannels ? (
@@ -345,9 +353,9 @@ const ChannelTableHeader = ({
                 }
               >
                 <Text size="xs">Has Stale Streams</Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 onClick={toggleShowOnlyOverriddenChannels}
                 leftSection={
                   showOnlyOverriddenChannels ? (
@@ -358,19 +366,32 @@ const ChannelTableHeader = ({
                 }
               >
                 <Text size="xs">Has Overrides</Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Divider />
-              <Menu.Label>
+              <MenuItem
+                onClick={toggleShowOnlyCatchupChannels}
+                leftSection={
+                  showOnlyCatchupChannels ? (
+                    <SquareCheck size={18} />
+                  ) : (
+                    <Square size={18} />
+                  )
+                }
+              >
+                <Text size="xs">Only Catch-up</Text>
+              </MenuItem>
+
+              <MenuDivider />
+              <MenuLabel>
                 <Text size="xs">Visibility</Text>
-              </Menu.Label>
+              </MenuLabel>
 
               {[
                 { value: 'active', label: 'Active Only' },
                 { value: 'hidden', label: 'Hidden Only' },
                 { value: 'all', label: 'Show All' },
               ].map(({ value, label }) => (
-                <Menu.Item
+                <MenuItem
                   key={value}
                   onClick={() =>
                     setVisibilityFilter && setVisibilityFilter(value)
@@ -384,65 +405,85 @@ const ChannelTableHeader = ({
                   }
                 >
                   <Text size="xs">{label}</Text>
-                </Menu.Item>
+                </MenuItem>
               ))}
-            </Menu.Dropdown>
+            </MenuDropdown>
           </Menu>
 
-          <Button
-            leftSection={<SquarePen size={18} />}
-            variant="default"
-            size="xs"
-            onClick={() => editChannel()}
-            disabled={
-              selectedTableIds.length == 0 ||
-              authUser.user_level != USER_LEVELS.ADMIN
-            }
-          >
-            Edit
-          </Button>
+          <Tooltip label="Edit" openDelay={500}>
+            <Button
+              variant="default"
+              size="xs"
+              onClick={() => editChannel()}
+              disabled={
+                selectedTableIds.length == 0 ||
+                authUser.user_level != USER_LEVELS.ADMIN
+              }
+              p={5}
+            >
+              <SquarePen size={18} />
+            </Button>
+          </Tooltip>
 
-          <Button
-            leftSection={<SquareMinus size={18} />}
-            variant="default"
-            size="xs"
-            onClick={deleteChannels}
-            disabled={
-              selectedTableIds.length == 0 ||
-              authUser.user_level != USER_LEVELS.ADMIN
-            }
-          >
-            Delete
-          </Button>
+          <Tooltip label="Delete" openDelay={500}>
+            <Button
+              variant="default"
+              size="xs"
+              onClick={deleteChannels}
+              disabled={
+                selectedTableIds.length == 0 ||
+                authUser.user_level != USER_LEVELS.ADMIN
+              }
+              p={5}
+            >
+              <SquareMinus size={18} />
+            </Button>
+          </Tooltip>
 
-          <Button
-            leftSection={<SquarePlus size={18} />}
-            variant="light"
-            size="xs"
-            onClick={() => editChannel(null, { forceAdd: true })}
-            disabled={authUser.user_level != USER_LEVELS.ADMIN}
-            p={5}
-            color={theme.tailwind.green[5]}
-            style={{
-              ...(authUser.user_level == USER_LEVELS.ADMIN && {
-                borderWidth: '1px',
-                borderColor: theme.tailwind.green[5],
-                color: 'white',
-              }),
-            }}
-          >
-            Add
-          </Button>
+          <Tooltip label="Add to Profile" openDelay={500}>
+            <Button
+              variant="default"
+              size="xs"
+              onClick={() => setAddToProfileModalOpen(true)}
+              disabled={
+                selectedTableIds.length == 0 ||
+                authUser.user_level != USER_LEVELS.ADMIN
+              }
+              p={5}
+            >
+              <FolderPlus size={18} />
+            </Button>
+          </Tooltip>
+
+          <Tooltip label="Add Channel" openDelay={500}>
+            <Button
+              variant="light"
+              size="xs"
+              onClick={() => editChannel(null, { forceAdd: true })}
+              disabled={authUser.user_level != USER_LEVELS.ADMIN}
+              p={5}
+              color={theme.tailwind.green[5]}
+              style={{
+                ...(authUser.user_level == USER_LEVELS.ADMIN && {
+                  borderWidth: '1px',
+                  borderColor: theme.tailwind.green[5],
+                  color: 'white',
+                }),
+              }}
+            >
+              <SquarePlus size={18} />
+            </Button>
+          </Tooltip>
 
           <Menu>
-            <Menu.Target>
+            <MenuTarget>
               <ActionIcon variant="default" size={30}>
                 <EllipsisVertical size={18} />
               </ActionIcon>
-            </Menu.Target>
+            </MenuTarget>
 
-            <Menu.Dropdown>
-              <Menu.Item
+            <MenuDropdown>
+              <MenuItem
                 leftSection={
                   headerPinned ? <Pin size={18} /> : <PinOff size={18} />
                 }
@@ -451,9 +492,9 @@ const ChannelTableHeader = ({
                 <Text size="xs">
                   {headerPinned ? 'Unpin Headers' : 'Pin Headers'}
                 </Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 leftSection={
                   isUnlocked ? <LockOpen size={18} /> : <Lock size={18} />
                 }
@@ -463,11 +504,11 @@ const ChannelTableHeader = ({
                 <Text size="xs">
                   {isUnlocked ? 'Lock Table' : 'Unlock for Editing'}
                 </Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Divider />
+              <MenuDivider />
 
-              <Menu.Item
+              <MenuItem
                 leftSection={<ArrowDown01 size={18} />}
                 disabled={
                   selectedTableIds.length == 0 ||
@@ -476,9 +517,9 @@ const ChannelTableHeader = ({
                 onClick={() => setAssignNumbersModalOpen(true)}
               >
                 <Text size="xs">Assign #s</Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 leftSection={<Binary size={18} />}
                 disabled={authUser.user_level != USER_LEVELS.ADMIN}
                 onClick={() => setEpgMatchModalOpen(true)}
@@ -488,16 +529,16 @@ const ChannelTableHeader = ({
                     ? `Auto-Match (${selectedTableIds.length} selected)`
                     : 'Auto-Match EPG'}
                 </Text>
-              </Menu.Item>
+              </MenuItem>
 
-              <Menu.Item
+              <MenuItem
                 leftSection={<Settings size={18} />}
                 disabled={authUser.user_level != USER_LEVELS.ADMIN}
                 onClick={() => setGroupManagerOpen(true)}
               >
                 <Text size="xs">Edit Groups</Text>
-              </Menu.Item>
-            </Menu.Dropdown>
+              </MenuItem>
+            </MenuDropdown>
           </Menu>
         </Flex>
       </Box>
@@ -529,6 +570,14 @@ const ChannelTableHeader = ({
         opened={epgMatchModalOpen}
         onClose={() => setEpgMatchModalOpen(false)}
         selectedChannelIds={selectedTableIds}
+      />
+
+      <AddToProfileModal
+        opened={addToProfileModalOpen}
+        onClose={() => setAddToProfileModalOpen(false)}
+        channelIds={selectedTableIds}
+        profiles={profiles}
+        excludeProfileId={selectedProfileId}
       />
 
       <ConfirmationDialog

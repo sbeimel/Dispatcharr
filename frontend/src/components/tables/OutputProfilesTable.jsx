@@ -1,23 +1,26 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import API from '../../api';
+import { useEffect, useMemo, useState } from 'react';
 import OutputProfileForm from '../forms/OutputProfile';
 import useOutputProfilesStore from '../../store/outputProfiles';
 import {
-  Box,
   ActionIcon,
-  Tooltip,
-  Text,
-  Paper,
-  Flex,
+  Box,
   Button,
-  useMantineTheme,
   Center,
-  Switch,
+  Flex,
+  Paper,
   Stack,
+  Switch,
+  Text,
+  Tooltip,
+  useMantineTheme,
 } from '@mantine/core';
-import { SquareMinus, SquarePen, Eye, EyeOff, SquarePlus } from 'lucide-react';
+import { Eye, EyeOff, SquareMinus, SquarePen, SquarePlus } from 'lucide-react';
 import { CustomTable, useTable } from './CustomTable';
-import useLocalStorage from '../../hooks/useLocalStorage';
+import useBrowserStorage from '../../hooks/useBrowserStorage';
+import {
+  deleteOutputProfile,
+  updateOutputProfile,
+} from '../../utils/tables/OutputProfilesTableUtils.js';
 
 const RowActions = ({ row, editOutputProfile, deleteOutputProfile }) => {
   return (
@@ -51,12 +54,8 @@ const OutputProfiles = () => {
   const [data, setData] = useState([]);
 
   const outputProfiles = useOutputProfilesStore((state) => state.profiles);
-  const [tableSize] = useLocalStorage('table-size', 'default');
+  const [tableSize] = useBrowserStorage('table-size', 'default');
   const theme = useMantineTheme();
-
-  const rowVirtualizerInstanceRef = useRef(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [sorting, setSorting] = useState([]);
 
   const columns = useMemo(
     () => [
@@ -139,10 +138,6 @@ const OutputProfiles = () => {
     setProfileModalOpen(true);
   };
 
-  const deleteOutputProfile = async (id) => {
-    await API.deleteOutputProfile(id);
-  };
-
   const closeOutputProfileForm = () => {
     setProfile(null);
     setProfileModalOpen(false);
@@ -151,7 +146,7 @@ const OutputProfiles = () => {
   const toggleHideInactive = () => setHideInactive((v) => !v);
 
   const toggleProfileIsActive = async (profile) => {
-    await API.updateOutputProfile({
+    await updateOutputProfile({
       id: profile.id,
       ...profile,
       is_active: !profile.is_active,
@@ -159,23 +154,7 @@ const OutputProfiles = () => {
   };
 
   useEffect(() => {
-    if (typeof window !== 'undefined') setIsLoading(false);
-  }, []);
-
-  useEffect(() => {
-    try {
-      rowVirtualizerInstanceRef.current?.scrollToIndex?.(0);
-    } catch (error) {
-      console.error(error);
-    }
-  }, [sorting]);
-
-  useEffect(() => {
-    setData(
-      outputProfiles.filter((p) =>
-        hideInactive && !p.is_active ? false : true
-      )
-    );
+    setData(outputProfiles.filter((p) => !(hideInactive && !p.is_active)));
   }, [outputProfiles, hideInactive]);
 
   const renderHeaderCell = (header) => (
@@ -252,11 +231,10 @@ const OutputProfiles = () => {
         </Box>
       </Paper>
 
-      <Box style={{ display: 'flex', flexDirection: 'column', maxHeight: 300 }}>
+      <Box style={{ display: 'flex', flexDirection: 'column' }}>
         <Box
           style={{
             flex: 1,
-            overflowY: 'auto',
             overflowX: 'auto',
             border: 'solid 1px rgb(68,68,68)',
             borderRadius: 'var(--mantine-radius-default)',

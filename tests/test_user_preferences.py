@@ -128,15 +128,59 @@ class UserPreferencesAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_patch_me_cannot_escalate_privileges(self):
-        """Test PATCH /me/ rejects attempts to change user_level or is_staff"""
+        """PATCH /me/ ignores privilege fields; they are stripped before save."""
         original_level = self.user.user_level
 
         data = {"user_level": 99, "is_staff": True, "is_superuser": True}
         response = self.client.patch(self.me_url, data, format="json")
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
 
         self.user.refresh_from_db()
         self.assertEqual(self.user.user_level, original_level)
         self.assertFalse(self.user.is_staff)
         self.assertFalse(self.user.is_superuser)
+
+    def test_patch_me_cannot_set_catchup_enabled(self):
+        """catchup_enabled is admin-managed; /me must not change it."""
+        self.user.custom_properties = {"catchup_enabled": False, "theme": "dark"}
+        self.user.save(update_fields=["custom_properties"])
+
+        response = self.client.patch(
+            self.me_url,
+            {"custom_properties": {"catchup_enabled": True, "theme": "light"}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        # Stripped from input; existing False preserved. Other props still update.
+        self.assertFalse(self.user.custom_properties.get("catchup_enabled"))
+        self.assertEqual(self.user.custom_properties.get("theme"), "light")
+
+    def test_patch_me_cannot_set_vod_access_flags(self):
+        """vod_movies_enabled / vod_series_enabled are admin-managed; /me must not change them."""
+        self.user.custom_properties = {
+            "vod_movies_enabled": False,
+            "vod_series_enabled": False,
+            "theme": "dark",
+        }
+        self.user.save(update_fields=["custom_properties"])
+
+        response = self.client.patch(
+            self.me_url,
+            {
+                "custom_properties": {
+                    "vod_movies_enabled": True,
+                    "vod_series_enabled": True,
+                    "theme": "light",
+                }
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.custom_properties.get("vod_movies_enabled"))
+        self.assertFalse(self.user.custom_properties.get("vod_series_enabled"))
+        self.assertEqual(self.user.custom_properties.get("theme"), "light")

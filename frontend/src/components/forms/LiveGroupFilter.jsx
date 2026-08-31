@@ -34,6 +34,7 @@ import {
   getRegexOptions,
   getStreamsRegexPreview,
   isExpectedOccupantForGroup,
+  effectiveSyncGroupId,
   isGroupVisible,
   rangeFor,
 } from '../../utils/forms/LiveGroupFilterUtils.js';
@@ -131,7 +132,12 @@ const LiveGroupFilter = ({
   // (in-memory range overlap with sibling groups) sources so the sweep
   // can refresh form-overlap synchronously without firing HTTP for
   // groups that did not change.
-  const scheduleConflictScan = (groupId, rawStart, rawEnd) => {
+  const scheduleConflictScan = (
+    groupId,
+    rawStart,
+    rawEnd,
+    expectedGroupId = groupId
+  ) => {
     if (conflictTimersRef.current[groupId]) {
       clearTimeout(conflictTimersRef.current[groupId]);
     }
@@ -156,7 +162,7 @@ const LiveGroupFilter = ({
           ? result.occupants
           : [];
         const unexpected = occupants.filter(
-          (o) => !isExpectedOccupantForGroup(o, groupId, playlist)
+          (o) => !isExpectedOccupantForGroup(o, expectedGroupId, playlist)
         );
         setConflictSource(groupId, 'occupant', unexpected.length > 0);
       } catch (e) {
@@ -221,7 +227,8 @@ const LiveGroupFilter = ({
         scheduleConflictScan(
           g.channel_group,
           range.startRaw,
-          g.auto_sync_channel_end
+          g.auto_sync_channel_end,
+          effectiveSyncGroupId(g)
         );
       }
     }
@@ -774,7 +781,7 @@ const LiveGroupFilter = ({
         group={configuringGroup}
       >
         {configuringGroup && (
-          <ErrorBoundary>
+          <ErrorBoundary inline>
             <Suspense fallback={<Loader />}>
               <AutoSyncAdvanced
                 group={configuringGroup}
@@ -800,7 +807,7 @@ const LiveGroupFilter = ({
 
       {/* Logo Upload Modal */}
       {logoModalOpen && (
-        <ErrorBoundary>
+        <ErrorBoundary inline>
           <Suspense fallback={<Loader />}>
             <LogoForm
               isOpen={logoModalOpen}
