@@ -701,6 +701,7 @@ const EPG = ({ epg = null, isOpen, onClose }) => {
       refresh_interval: 24,
       cron_expression: '',
       priority: 0,
+      http_proxy: '',
     },
 
     validate: {
@@ -719,6 +720,20 @@ const EPG = ({ epg = null, isOpen, onClose }) => {
       values.refresh_interval = 0;
     } else {
       values.cron_expression = '';
+    }
+
+    // Move http_proxy to custom_properties
+    const http_proxy = values.http_proxy;
+    delete values.http_proxy;
+    
+    if (!values.custom_properties) {
+      values.custom_properties = {};
+    }
+    
+    if (http_proxy && http_proxy.trim()) {
+      values.custom_properties.http_proxy = http_proxy.trim();
+    } else {
+      delete values.custom_properties.http_proxy;
     }
 
     const existingId = epg?.id || savedEpgId;
@@ -761,6 +776,7 @@ const EPG = ({ epg = null, isOpen, onClose }) => {
         refresh_interval: storedEpg.refresh_interval,
         cron_expression: storedEpg.cron_expression || '',
         priority: storedEpg.priority ?? 0,
+        http_proxy: (storedEpg.custom_properties || {}).http_proxy || '',
       };
       form.setValues(values);
       setSourceType(storedEpg.source_type);
@@ -959,6 +975,16 @@ const EPG = ({ epg = null, isOpen, onClose }) => {
                 description="Priority for EPG matching (higher numbers = higher priority). Used when multiple EPG sources have matching entries for a channel."
                 {...form.getInputProps('priority')}
                 key={form.key('priority')}
+              />
+
+              <TextInput
+                id="http_proxy"
+                name="http_proxy"
+                label="HTTP Proxy (Optional)"
+                description="Optional HTTP proxy for EPG downloads (e.g., http://proxy:8080)"
+                placeholder="http://proxy.example.com:8080"
+                {...form.getInputProps('http_proxy')}
+                key={form.key('http_proxy')}
               />
 
               {savedEpgId && (

@@ -216,3 +216,61 @@ index existing..new 100644
 +        with requests.get(source.url, headers=headers, proxies=proxies, stream=True, timeout=60) as response:
              # Handle 404 specifically
              if response.status_code == 404:
+
+diff --git a/frontend/src/components/forms/EPG.jsx b/frontend/src/components/forms/EPG.jsx
+index existing..new 100644
+--- a/frontend/src/components/forms/EPG.jsx
++++ b/frontend/src/components/forms/EPG.jsx
+@@ -693,6 +693,7 @@
+       refresh_interval: 24,
+       cron_expression: '',
+       priority: 0,
++      http_proxy: '',
+     },
+ 
+     validate: {
+@@ -710,6 +711,20 @@
+       values.cron_expression = '';
+     }
+ 
++    // Move http_proxy to custom_properties
++    const http_proxy = values.http_proxy;
++    delete values.http_proxy;
++    
++    if (!values.custom_properties) {
++      values.custom_properties = {};
++    }
++    
++    if (http_proxy && http_proxy.trim()) {
++      values.custom_properties.http_proxy = http_proxy.trim();
++    } else {
++      delete values.custom_properties.http_proxy;
++    }
++
+     const existingId = epg?.id || savedEpgId;
+ 
+     if (existingId) {
+@@ -746,6 +761,7 @@
+         refresh_interval: storedEpg.refresh_interval,
+         cron_expression: storedEpg.cron_expression || '',
+         priority: storedEpg.priority ?? 0,
++        http_proxy: (storedEpg.custom_properties || {}).http_proxy || '',
+       };
+       form.setValues(values);
+       setSourceType(storedEpg.source_type);
+@@ -969,6 +985,15 @@
+                 key={form.key('priority')}
+               />
+ 
++              <TextInput
++                id="http_proxy"
++                name="http_proxy"
++                label="HTTP Proxy (Optional)"
++                description="Optional HTTP proxy for EPG downloads (e.g., http://proxy:8080)"
++                placeholder="http://proxy.example.com:8080"
++                {...form.getInputProps('http_proxy')}
++                key={form.key('http_proxy')}
++              />
++
+               {savedEpgId && (
+                 <AutoApplyEpgLogosSwitch
