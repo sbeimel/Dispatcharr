@@ -128,7 +128,8 @@ class HTTPStreamReader:
             logger.error(f"HTTP reader request error: {e}")
         except AttributeError as e:
             # Race condition during shutdown: response.close() sets _fp = None while iter_content() is reading
-            if "'NoneType' object has no attribute 'read'" in str(e):
+            error_str = str(e)
+            if "'NoneType' object has no attribute 'read'" in error_str or "'NoneType' object has no attribute 'readline'" in error_str:
                 logger.debug(f"HTTP reader stopped during shutdown (expected race condition)")
             else:
                 logger.error(f"HTTP reader attribute error: {e}", exc_info=True)
@@ -148,6 +149,12 @@ class HTTPStreamReader:
         """Stop the HTTP stream reader"""
         logger.info("Stopping HTTP stream reader")
         self.running = False
+
+        # Give the thread a brief moment to notice the flag and exit gracefully
+        # This reduces (but doesn't eliminate) the race condition where we close
+        # the response while iter_content() is still reading
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=0.1)
 
         # Close response
         if self.response:
@@ -171,6 +178,6 @@ class HTTPStreamReader:
             except:
                 pass
 
-        # Wait for thread
+        # Wait for thread to fully terminate
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
