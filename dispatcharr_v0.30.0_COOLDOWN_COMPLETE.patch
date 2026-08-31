@@ -1,0 +1,182 @@
+diff --git a/apps/proxy/live_proxy/url_utils.py b/apps/proxy/live_proxy/url_utils.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/url_utils.py
++++ b/apps/proxy/live_proxy/url_utils.py
+@@ -87,9 +87,12 @@
+             
+             cooldown_skip_profiles = set()
+             if ConfigHelper.stream_cooldown_enabled():
+                 try:
+                     redis_client = RedisClient.get_client()
+                     if redis_client:
+-                        # Scan for cooldown keys for this stream with channel_id (channel-specific in v0.30.0)
+-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*"
++                        # Scan for cooldown keys - must include :cooldown suffix!
++                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*:cooldown"
++                        logger.info(f"[COOLDOWN] Scanning Redis with pattern: {cooldown_pattern}")
++                        
++                        key_count = 0
+                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
++                            key_count += 1
++                            logger.info(f"[COOLDOWN] Found key: {key}")
+                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+-                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+-                            if len(parts) >= 7:
++                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown (8 parts)
++                            if len(parts) >= 8:
+                                 try:
+                                     profile_id_from_key = int(parts[6])
+                                     ttl = redis_client.ttl(key)
+                                     if ttl > 0:
+@@ -110,6 +113,8 @@
+                                         cooldown_skip_profiles.add(profile_id_from_key)
+                                 except (ValueError, IndexError) as e:
+                                     logger.debug(f"Error parsing cooldown key {key}: {e}")
++                        
++                        logger.info(f"[COOLDOWN] Scanned {key_count} keys for stream {stream.id}, found {len(cooldown_skip_profiles)} cooled profiles")
+                 except Exception as e:
+                     logger.debug(f"Could not check cooldowns for stream preview: {e}")
+ 
+@@ -196,6 +201,7 @@
+         cooldown_skip_profiles = set()
+         if ConfigHelper.stream_cooldown_enabled():
+             try:
+                 redis_client = RedisClient.get_client()
+                 if redis_client:
+                     # Get all streams for this channel to check their cooldowns
+                     channel_streams = channel.streams.all()
++                    logger.info(f"[COOLDOWN] Checking cooldowns for {len(channel_streams)} streams in channel {channel_id}")
++                    
+                     for ch_stream in channel_streams:
+-                        # Scan for cooldown keys (channel-specific in v0.30.0)
+-                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*"
++                        # Scan for cooldown keys - must include :cooldown suffix!
++                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*:cooldown"
+                         for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                             parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+-                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+-                            if len(parts) >= 7:
++                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown (8 parts)
++                            if len(parts) >= 8:
+                                 try:
+                                     profile_id_from_key = int(parts[6])
+                                     ttl = redis_client.ttl(key)
+                                     if ttl > 0:
+@@ -221,10 +227,16 @@
+                                         cooldown_skip_profiles.add(profile_id_from_key)
+                                 except (ValueError, IndexError) as e:
+                                     logger.debug(f"Error parsing cooldown key {key}: {e}")
++                
++                logger.info(f"[COOLDOWN] Found {len(cooldown_skip_profiles)} cooled profiles for channel {channel_id}")
+             except Exception as e:
+                 logger.debug(f"Could not check cooldowns for channel playback: {e}")
+ 
+-        # Get stream and profile for this channel
+-        stream_id, profile_id, error_reason, slot_reserved = channel.get_stream()
++        # Get stream and profile for this channel - pass cooldown_skip_profiles!
++        stream_id, profile_id, error_reason, slot_reserved = channel.get_stream(
++            requester=None,
++            cooldown_skip_profiles=cooldown_skip_profiles
++        )
+ 
+         if not stream_id or not profile_id:
+             logger.error(f"No stream available for channel {channel_id}: {error_reason}")
+
+diff --git a/apps/channels/models.py b/apps/channels/models.py
+index existing..new 100644
+--- a/apps/channels/models.py
++++ b/apps/channels/models.py
+@@ -689,12 +689,20 @@
+             except (ValueError, TypeError):
+                 logger.debug(
+                     f"Invalid stream ID retrieved from Redis: {stream_id_bytes}"
+                 )
+                 stream_id = None
+ 
+-    def get_stream(self, requester=None):
++    def get_stream(self, requester=None, cooldown_skip_profiles=None):
+         """
+         Finds an available stream for the requested channel and returns the selected stream and profile.
++        
++        Args:
++            requester: Optional requester information
++            cooldown_skip_profiles: Optional set of profile IDs to skip (e.g. due to cooldown)
+ 
+         Returns:
+             Tuple[Optional[int], Optional[int], Optional[str], bool]:
+             (stream_id, profile_id, error_reason, slot_reserved)
+         """
+         redis_client = RedisClient.get_client()
+         error_reason = None
++        
++        # Convert to set if None
++        if cooldown_skip_profiles is None:
++            cooldown_skip_profiles = set()
+ 
+         # Check if this channel has any streams
+         if not self.streams.exists():
+@@ -777,6 +785,13 @@
+ 
+             for profile in profiles:
+                 has_active_profiles = True
++                
++                # Skip profiles that are on cooldown
++                if profile.id in cooldown_skip_profiles:
++                    logger.info(
++                        f"[COOLDOWN] Skipping profile {profile.id} ({profile.name}) for stream {stream.id} - on cooldown"
++                    )
++                    continue
+ 
+                 # Atomically check and reserve a slot (INCR-first pattern)
+                 reserved, current_count, failure_reason = reserve_profile_slot(
+
+diff --git a/apps/proxy/live_proxy/server.py b/apps/proxy/live_proxy/server.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/server.py
++++ b/apps/proxy/live_proxy/server.py
+@@ -2393,10 +2393,25 @@
+                     for pattern in patterns:
+                         cursor = 0
+                         while True:
+                             cursor, keys = self.redis_client.scan(cursor, match=pattern, count=100)
+                             if keys:
+-                                self.redis_client.delete(*keys)
+-                                total_deleted += len(keys)
++                                # Filter out cooldown keys - they should persist beyond channel lifetime
++                                keys_to_delete = []
++                                cooldown_keys = []
++                                
++                                for k in keys:
++                                    # Handle both bytes and str keys
++                                    key_str = k.decode('utf-8') if isinstance(k, bytes) else k
++                                    
++                                    if key_str.endswith(':cooldown'):
++                                        cooldown_keys.append(k)
++                                    else:
++                                        keys_to_delete.append(k)
++                                
++                                if keys_to_delete:
++                                    self.redis_client.delete(*keys_to_delete)
++                                    total_deleted += len(keys_to_delete)
++                                
++                                # Log skipped cooldown keys
++                                if cooldown_keys:
++                                    logger.debug(f"Preserved {len(cooldown_keys)} cooldown keys for channel {channel_id}")
+ 
+                             if cursor == 0:
+                                 break
+
+diff --git a/apps/proxy/live_proxy/input/manager.py b/apps/proxy/live_proxy/input/manager.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/input/manager.py
++++ b/apps/proxy/live_proxy/input/manager.py
+@@ -2251,8 +2251,8 @@
+                             stream_ids_in_alternates = {alt['stream_id'] for alt in alternate_streams}
+                             
+                             for stream_id in stream_ids_in_alternates:
+-                                # v0.30.0 uses channel-specific cooldown keys
+-                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*"
++                                # v0.30.0 uses channel-specific cooldown keys - must include :cooldown suffix!
++                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*:cooldown"
+                                 for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                                     keys_to_delete.append(key)
