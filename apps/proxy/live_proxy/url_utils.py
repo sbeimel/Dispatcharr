@@ -79,10 +79,90 @@ def generate_stream_url(
                 logger.error(f"Stream {stream.id} has no M3U account")
                 return None, None, False, None, False, "Stream has no M3U account"
 
+            # Check Redis cooldowns before selecting a profile
+            # This prevents re-using a recently-failed profile when stream is reconnected
+            from .config_helper import ConfigHelper
+            from .redis_keys import RedisKeys
+            from core.utils import RedisClient
+            
+            cooldown_skip_profiles = set()
+            if ConfigHelper.stream_cooldown_enabled():
+                try:
+                    redis_client = RedisClient.get_client()
+                    if redis_client:
+                        # Scan for cooldown keys for this stream with channel_id (channel-specific in v0.30.0)
+                        cooldown_pattern = f"live:channel:{channel_id}:stream:{stream.id}:profile:*"
+                        for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                            parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+                            if len(parts) >= 7:
+                                try:
+                                    profile_id_from_key = int(parts[6])
+                                    ttl = redis_client.ttl(key)
+                                    if ttl > 0:
+                                        mins = int(ttl // 60)
+                                        secs = int(ttl % 60)
+                                        logger.info(
+                                            f"[COOLDOWN] Skipping profile {profile_id_from_key} for stream {stream.id} "
+                                            f"on reconnect - blocked for {mins}m {secs}s more"
+                                        )
+                                        cooldown_skip_profiles.add(profile_id_from_key)
+                                except (ValueError, IndexError) as e:
+                                    logger.debug(f"Error parsing cooldown key {key}: {e}")
+                except Exception as e:
+                    logger.debug(f"Could not check cooldowns for stream preview: {e}")
+
             stream_id, profile_id, error_reason, slot_reserved = stream.get_stream()
             if not stream_id or not profile_id:
                 logger.error(f"No profile available for stream {stream.id}: {error_reason}")
                 return None, None, False, None, False, error_reason
+
+            # If selected profile is on cooldown, try to find non-cooled profile
+            if profile_id in cooldown_skip_profiles:
+                logger.info(
+                    f"[COOLDOWN] Default profile {profile_id} for stream {stream.id} is on cooldown, "
+                    f"looking for non-cooled profile..."
+                )
+                # Release the just-reserved slot
+                if slot_reserved:
+                    stream.release_stream()
+                    slot_reserved = False
+
+                # Try other profiles
+                m3u_account = stream.m3u_account
+                m3u_profiles = m3u_account.profiles.filter(is_active=True)
+                default_profile = next((obj for obj in m3u_profiles if obj.is_default), None)
+                profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default] if default_profile else list(m3u_profiles)
+
+                selected_profile = None
+                from apps.m3u.connection_pool import reserve_profile_slot
+                
+                for prof in profiles:
+                    # Skip current failing profile
+                    if prof and prof.id == profile_id:
+                        logger.debug(f"Skipping current failing profile {prof.id} for stream {stream.id}")
+                        continue
+                    
+                    if prof and prof.id not in cooldown_skip_profiles:
+                        reserved, _count, _reason = reserve_profile_slot(prof, redis_client)
+                        if reserved:
+                            selected_profile = prof
+                            stream_id = stream.id
+                            profile_id = prof.id
+                            slot_reserved = True
+                            logger.info(f"[COOLDOWN] Selected non-cooled profile {prof.id} for stream {stream.id}")
+                            break
+
+                if not selected_profile:
+                    # All profiles on cooldown or unavailable - fallback to default
+                    logger.warning(
+                        f"[COOLDOWN] All profiles for stream {stream.id} are on cooldown or unavailable, "
+                        f"falling back to default profile selection"
+                    )
+                    stream_id, profile_id, error_reason, slot_reserved = stream.get_stream()
+                    if not stream_id or not profile_id:
+                        logger.error(f"No profile available for stream {stream.id}: {error_reason}")
+                        return None, None, False, None, False, error_reason
 
             try:
                 m3u_profile = M3UAccountProfile.objects.select_related(
@@ -111,6 +191,41 @@ def generate_stream_url(
 
         # Handle channel preview (existing logic)
         channel = channel_or_stream
+
+        # Check Redis cooldowns before selecting a profile (same as Stream Preview)
+        from .config_helper import ConfigHelper
+        from .redis_keys import RedisKeys
+        from core.utils import RedisClient
+        
+        cooldown_skip_profiles = set()
+        if ConfigHelper.stream_cooldown_enabled():
+            try:
+                redis_client = RedisClient.get_client()
+                if redis_client:
+                    # Get all streams for this channel to check their cooldowns
+                    channel_streams = channel.streams.all()
+                    for ch_stream in channel_streams:
+                        # Scan for cooldown keys (channel-specific in v0.30.0)
+                        cooldown_pattern = f"live:channel:{channel_id}:stream:{ch_stream.id}:profile:*"
+                        for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                            parts = key.split(':') if isinstance(key, str) else key.decode('utf-8').split(':')
+                            # Format: live:channel:{channel_id}:stream:{stream_id}:profile:{profile_id}:cooldown
+                            if len(parts) >= 7:
+                                try:
+                                    profile_id_from_key = int(parts[6])
+                                    ttl = redis_client.ttl(key)
+                                    if ttl > 0:
+                                        mins = int(ttl // 60)
+                                        secs = int(ttl % 60)
+                                        logger.info(
+                                            f"[COOLDOWN] Profile {profile_id_from_key} for stream {ch_stream.id} "
+                                            f"on cooldown - blocked for {mins}m {secs}s more"
+                                        )
+                                        cooldown_skip_profiles.add(profile_id_from_key)
+                                except (ValueError, IndexError) as e:
+                                    logger.debug(f"Error parsing cooldown key {key}: {e}")
+            except Exception as e:
+                logger.debug(f"Could not check cooldowns for channel playback: {e}")
 
         # Get stream and profile for this channel
         stream_id, profile_id, error_reason, slot_reserved = channel.get_stream()

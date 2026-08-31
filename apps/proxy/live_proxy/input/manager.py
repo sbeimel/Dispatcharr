@@ -2230,24 +2230,50 @@ class StreamManager:
                     )
                     return False
 
-                now = time.time()
-                cooldown_until = getattr(self, '_rotation_cooldown_until', None)
-                if cooldown_until is None:
-                    cooldown = ConfigHelper.failover_rotation_cooldown()
-                    self._failover_rotation_passes = rotation_passes + 1
-                    self._rotation_cooldown_until = now + cooldown
-                    logger.warning(
-                        f"All streams tried for channel {self.channel_id}; "
-                        f"arming {cooldown}s wrap cooldown "
-                        f"(rotation pass {self._failover_rotation_passes}/{max_switches})"
-                    )
-                    return False
-
-                if now < cooldown_until:
-                    return False
-
-                # Cooldown elapsed: allow another pass after the current stream (wraps).
-                self._rotation_cooldown_until = None
+                # LAST RESORT: All streams/profiles tried - clear cooldowns and retry immediately
+                # This is better than waiting because:
+                # 1. Avoids black screen for user
+                # 2. Cooldowns may still be active after 60s wait anyway
+                # 3. "Unstable stream is better than no stream"
+                logger.warning(
+                    f"[COOLDOWN] LAST RESORT: All {len(alternate_streams)} stream/profile combinations tried "
+                    f"for channel {self.channel_id} - clearing cooldowns and retrying "
+                    f"(rotation pass {rotation_passes + 1}/{max_switches})"
+                )
+                
+                # Clear all cooldowns for this channel's streams
+                from core.utils import RedisClient
+                if ConfigHelper.stream_cooldown_enabled():
+                    try:
+                        redis_client = RedisClient.get_client()
+                        if redis_client:
+                            keys_to_delete = []
+                            stream_ids_in_alternates = {alt['stream_id'] for alt in alternate_streams}
+                            
+                            for stream_id in stream_ids_in_alternates:
+                                # v0.30.0 uses channel-specific cooldown keys
+                                cooldown_pattern = f"live:channel:{self.channel_id}:stream:{stream_id}:profile:*"
+                                for key in redis_client.scan_iter(match=cooldown_pattern, count=50):
+                                    keys_to_delete.append(key)
+                            
+                            if keys_to_delete:
+                                pipe = redis_client.pipeline()
+                                for key in keys_to_delete:
+                                    pipe.delete(key)
+                                pipe.execute()
+                                logger.info(
+                                    f"[COOLDOWN] LAST RESORT: Cleared {len(keys_to_delete)} cooldown keys "
+                                    f"for channel {self.channel_id}"
+                                )
+                            else:
+                                logger.debug(f"[COOLDOWN] LAST RESORT: No cooldown keys found to clear for channel {self.channel_id}")
+                    except Exception as e:
+                        logger.error(f"[COOLDOWN] LAST RESORT: Error clearing cooldowns: {e}")
+                
+                # Increment rotation pass counter
+                self._failover_rotation_passes = rotation_passes + 1
+                
+                # Clear tried combinations - all options available again
                 if self.current_stream_id and self.current_profile_id:
                     self.tried_combinations = {(self.current_stream_id, self.current_profile_id)}
                     self.tried_stream_ids = {self.current_stream_id}

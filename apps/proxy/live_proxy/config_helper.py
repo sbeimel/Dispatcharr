@@ -95,7 +95,7 @@ class ConfigHelper:
     def max_stream_switches():
         """Get maximum number of stream switch attempts from database or default"""
         settings = Config.get_proxy_settings()
-        return settings.get("max_stream_switches", 10)
+        return settings.get("max_stream_switches", 200)  # Increased from 10 to match v0.27.0
 
     @staticmethod
     def failover_rotation_cooldown():
