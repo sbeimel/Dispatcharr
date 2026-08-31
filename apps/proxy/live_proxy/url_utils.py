@@ -344,13 +344,14 @@ def order_alternates_from_current(
             rotated.append(entry)
     return rotated
 
-def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None) -> List[dict]:
+def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None, current_profile_id: Optional[int] = None) -> List[dict]:
     """
     Get alternative streams for a channel when the current stream fails.
 
     Args:
         channel_id: The UUID of the channel
         current_stream_id: The currently failing stream ID to exclude
+        current_profile_id: The currently failing profile ID to exclude
 
     Returns:
         List[dict]: List of stream information dictionaries with stream_id and profile_id
