@@ -89,7 +89,9 @@ class StreamManager:
 
         # Add tracking for tried streams and current stream
         self.current_stream_id = stream_id
+        self.current_profile_id = None  # Track current M3U profile ID
         self.tried_stream_ids = set()
+        self.tried_combinations = set()  # Track (stream_id, profile_id) tuples for profile failover
 
         # Track last stream switch time for adaptive health monitor
         self.last_stream_switch_time = 0
@@ -241,9 +243,11 @@ class StreamManager:
 
     def _note_stable_connection(self):
         """Reset stream-switch bookkeeping after sustained successful playback."""
-        if self.current_stream_id:
+        if self.current_stream_id and self.current_profile_id:
+            self.tried_combinations = {(self.current_stream_id, self.current_profile_id)}
             self.tried_stream_ids = {self.current_stream_id}
         else:
+            self.tried_combinations.clear()
             self.tried_stream_ids.clear()
         self._failover_rotation_passes = 0
         self._rotation_cooldown_until = None
@@ -1800,6 +1804,7 @@ class StreamManager:
 
     def reset_failover_rotation_state(self):
         """Clear tried-stream / wrap bookkeeping after a manual stream change."""
+        self.tried_combinations.clear()
         self.tried_stream_ids = set()
         self._failover_rotation_passes = 0
         self._rotation_cooldown_until = None
@@ -2131,8 +2136,11 @@ class StreamManager:
             alternate_streams = get_alternate_streams(self.channel_id, self.current_stream_id)
             logger.info(f"Found {len(alternate_streams)} potential alternate streams for channel {self.channel_id}")
 
-            # Filter out streams we've already tried
-            untried_streams = [s for s in alternate_streams if s['stream_id'] not in self.tried_stream_ids]
+            # Filter out stream+profile combinations we've already tried
+            untried_streams = [
+                s for s in alternate_streams 
+                if (s['stream_id'], s['profile_id']) not in self.tried_combinations
+            ]
             
             # Filter out streams on cooldown (if cooldown system is enabled)
             if ConfigHelper.stream_cooldown_enabled():
@@ -2208,14 +2216,16 @@ class StreamManager:
 
                 # Cooldown elapsed: allow another pass after the current stream (wraps).
                 self._rotation_cooldown_until = None
-                if self.current_stream_id:
+                if self.current_stream_id and self.current_profile_id:
+                    self.tried_combinations = {(self.current_stream_id, self.current_profile_id)}
                     self.tried_stream_ids = {self.current_stream_id}
                 else:
+                    self.tried_combinations.clear()
                     self.tried_stream_ids.clear()
 
                 untried_streams = [
                     s for s in alternate_streams
-                    if s['stream_id'] not in self.tried_stream_ids
+                    if (s['stream_id'], s['profile_id']) not in self.tried_combinations
                 ]
                 if not untried_streams:
                     logger.warning(
@@ -2233,7 +2243,10 @@ class StreamManager:
                 stream_id = next_stream['stream_id']
                 profile_id = next_stream['profile_id']  # This is the M3U profile ID we need
 
-                # Add to tried streams
+                # Add to tried combinations
+                self.tried_combinations.add((stream_id, profile_id))
+                
+                # Also update tried_stream_ids for backward compatibility with error messages
                 self.tried_stream_ids.add(stream_id)
 
                 # Get stream info including URL using the profile_id we already have
@@ -2264,8 +2277,9 @@ class StreamManager:
                     logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
                     continue  # Try next stream
 
-                # Update stream ID tracking
+                # Update stream ID and profile ID tracking
                 self.current_stream_id = stream_id
+                self.current_profile_id = profile_id
 
                 # Store the new user agent and transcode settings
                 self.user_agent = new_user_agent
