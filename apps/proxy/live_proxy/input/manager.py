@@ -92,6 +92,7 @@ class StreamManager:
         self.current_profile_id = None  # Track current M3U profile ID
         self.tried_stream_ids = set()
         self.tried_combinations = set()  # Track (stream_id, profile_id) tuples for profile failover
+        self.tried_combinations_reset_time = time.time() + 3600  # Reset tried_combinations every hour
 
         # Track last stream switch time for adaptive health monitor
         self.last_stream_switch_time = 0
@@ -124,8 +125,16 @@ class StreamManager:
                     else:
                         logger.warning(f"No stream_id found in Redis for channel {channel_id}. "
                                      f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
+                    
+                    # Try to load current_profile_id from Redis
+                    profile_id_bytes = buffer.redis_client.hget(metadata_key, ChannelMetadataField.M3U_PROFILE)
+                    if profile_id_bytes:
+                        self.current_profile_id = int(profile_id_bytes.decode('utf-8') if isinstance(profile_id_bytes, bytes) else profile_id_bytes)
+                        logger.info(f"Loaded profile ID {self.current_profile_id} from Redis for channel {buffer.channel_id}")
+                    else:
+                        logger.debug(f"No profile ID found in Redis for channel {channel_id}")
                 except Exception as e:
-                    logger.warning(f"Error loading stream ID from Redis: {e}")
+                    logger.warning(f"Error loading stream/profile ID from Redis: {e}")
             else:
                 logger.warning(f"Unable to get stream ID for channel {channel_id}. "
                              f"Stream switching will rely on URL comparison to avoid selecting the same stream.")
@@ -497,6 +506,13 @@ class StreamManager:
                 close_old_connections()
                 if not self._ensure_owner_or_stop():
                     break
+                
+                # Hourly reset of tried_combinations to allow retrying previously failed profiles
+                if time.time() > self.tried_combinations_reset_time and len(self.tried_combinations) > 0:
+                    logger.info(f"Hourly tried_combinations reset for channel {self.channel_id} - clearing {len(self.tried_combinations)} entries")
+                    self.tried_combinations.clear()
+                    self.tried_combinations_reset_time = time.time() + 3600
+                
                 # Check for stuck switching state
                 if self.url_switching and time.time() - self.url_switch_start_time > self.url_switch_timeout:
                     logger.warning(f"URL switching state appears stuck for channel {self.channel_id} "
@@ -806,6 +822,11 @@ class StreamManager:
                 connection.close()
             except Exception:
                 pass
+            
+            # Cleanup tried_combinations on channel stop
+            if hasattr(self, 'tried_combinations') and len(self.tried_combinations) > 0:
+                logger.info(f"Clearing {len(self.tried_combinations)} tried combinations on channel stop for {self.channel_id}")
+                self.tried_combinations.clear()
 
             logger.info(f"Stream manager stopped for channel {self.channel_id}")
 
@@ -1446,12 +1467,23 @@ class StreamManager:
     def _process_stream_data(self):
         """Process stream data until disconnect or error - unified path for both transcode and HTTP"""
         try:
+            # Track whether we've already cleared tried_combinations for this stable connection
+            stable_streaming_reset_done = False
+            
             # Both transcode and HTTP now use the same subprocess/socket approach
             # This gives us perfect control: check flags between chunks, timeout just returns False
             while (self.running and self.connected and not self.stop_requested
                    and not self.needs_stream_switch and not self.needs_reconnect):
                 if self.fetch_chunk():
                     self.last_data_time = time.time()
+                    
+                    # Success-based reset: clear tried_combinations after 5 minutes of stable streaming
+                    if not stable_streaming_reset_done and len(self.tried_combinations) > 0:
+                        connection_duration = self.last_data_time - getattr(self, 'connection_start_time', self.last_data_time)
+                        if connection_duration > 300:  # 5 minutes
+                            logger.info(f"Stream stable for {connection_duration:.0f}s - clearing {len(self.tried_combinations)} tried combinations for channel {self.channel_id}")
+                            self.tried_combinations.clear()
+                            stable_streaming_reset_done = True
                 else:
                     # fetch_chunk() returned False - could be timeout, no data, or error
                     if not self.running:

@@ -126,6 +126,12 @@ class HTTPStreamReader:
 
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP reader request error: {e}")
+        except AttributeError as e:
+            # Race condition during shutdown: response.close() sets _fp = None while iter_content() is reading
+            if "'NoneType' object has no attribute 'read'" in str(e):
+                logger.debug(f"HTTP reader stopped during shutdown (expected race condition)")
+            else:
+                logger.error(f"HTTP reader attribute error: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"HTTP reader unexpected error: {e}", exc_info=True)
         finally:
