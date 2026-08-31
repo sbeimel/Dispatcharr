@@ -2266,8 +2266,8 @@ class StreamManager:
                     
                     m3u_account = stream_obj.m3u_account
                     
-                    # Get user agent
-                    new_user_agent = m3u_account.get_user_agent().user_agent
+                    # Get user agent string (handles None case with system default)
+                    new_user_agent = m3u_account.get_user_agent_string()
                     
                     # Generate URL using _resolve_live_stream_url (handles XC and STD accounts)
                     new_url = _resolve_live_stream_url(stream_obj, m3u_account, profile_obj)
