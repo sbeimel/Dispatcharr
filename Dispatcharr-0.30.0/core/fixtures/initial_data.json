@@ -1,0 +1,55 @@
+[
+  {
+    "model": "core.useragent",
+    "pk": 1,
+    "fields": {
+      "name": "TiviMate",
+      "user_agent": "TiviMate/5.1.6 (Android 12)",
+      "description": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "core.useragent",
+    "pk": 2,
+    "fields": {
+      "name": "VLC",
+      "user_agent": "VLC/3.0.21 LibVLC 3.0.21",
+      "description": "",
+      "is_active": true
+    }
+  },
+  {
+    "model": "core.streamprofile",
+    "pk": 1,
+    "fields": {
+      "name": "FFmpeg",
+      "command": "ffmpeg",
+      "parameters": "-i {streamUrl} -c:v copy -c:a copy -f mpegts pipe:1",
+      "is_active": true,
+      "user_agent": "1"
+    }
+  },
+  {
+    "model": "core.streamprofile",
+    "pk": 2,
+    "fields": {
+      "name": "Streamlink",
+      "command": "streamlink",
+      "parameters": "{streamUrl} best --stdout",
+      "is_active": true,
+      "user_agent": "1"
+    }
+  },
+  {
+    "model": "core.streamprofile",
+    "pk": 3,
+    "fields": {
+      "name": "VLC",
+      "command": "cvlc",
+      "parameters": "-vv -I dummy --no-video-title-show --http-user-agent {userAgent} {streamUrl} --sout #standard{access=file,mux=ts,dst=-}",
+      "is_active": true,
+      "user_agent": "1"
+    }
+  }
+]

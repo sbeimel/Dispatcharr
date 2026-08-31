@@ -1,0 +1,2359 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.30.0] - 2026-08-29
+
+### Added
+
+- **Per-user DVR access levels.** Admins set a single **DVR Access** dropdown on the user Permissions tab (`none` / `view` / `manage`), stored as `dvr_access` in `custom_properties`. Standard users default to `view` (channel-scoped list and playback) when the key is absent; `manage` is opt-in and includes view, giving the same DVR API surface as an admin for recordings, recurring rules, series rules, stop/extend, metadata, artwork, and comskip (system comskip config stays admin-only). Streamers are excluded (no DVR UI or XC surface). The value is admin-managed only (not writable via `PATCH /me/`). The DVR nav item and manage actions in DVR / Guide follow the same gates. (Closes #1535)
+- **Per-user VOD movie and series access flags.** Admins can turn movies and series on or off independently on the user Permissions tab (**Enable Movies** / **Enable Series**), stored as `vod_movies_enabled` and `vod_series_enabled` in `custom_properties` (both default on, so existing users keep access). The flags follow the `catchup_enabled` pattern: admin-managed only (not writable via `PATCH /me/`), no migration. When a kind is disabled for a user, XC catalog actions return empty lists, detail lookups return 404, and XC plus native proxy playback (GET and HEAD) return 403; authenticated REST list/detail for movies, series, episodes, categories, and `/api/vod/all/` are filtered the same way. (Closes #1188) - Thanks [@brendongl](https://github.com/brendongl)
+- **Series rules can optionally treat untagged episodes as new.** Mode `new` still defaults to requiring an EPG `<new/>` tag. An optional per-rule "Treat untagged episodes as new" switch also accepts programmes carrying neither `<new/>` nor `<previously-shown/>`, for guides that only mark repeats. Programmes tagged `<previously-shown/>` stay excluded; an explicit `<new/>` still wins. Existing rules and stock behaviour are unchanged. The scheduler, preview, and per-row `is_new` flag share one predicate so the editor matches what would record. - Thanks [@v8eta](https://github.com/v8eta)
+- **DVR TV fallback templates support `{original_air_date}`.** When a programme has no usable season/episode, the fallback path template can include the canonical EPG original-air value (`previously_shown_details.start`), normalized to `YYYY-MM-DD`. Supported inputs include ISO dates, compact `YYYYMMDD`, XMLTV timestamps, ISO datetimes, and Gracenote-style `YYYY-MM-DD HH:MM:SS`. Missing metadata resolves to an empty value without substituting broadcast or recording dates. The placeholder is advertised only for the TV fallback template. (Fixes #1518) - Thanks [@nilleiz](https://github.com/nilleiz)
+- **Channels and Streams tables use responsive paired column sizing.** Content columns share the available table width as ratios, and dragging a divider transfers space only to its adjacent column. Ratio limits scale with the table width, resize handles stop at those limits, and each table has a reset-widths action. Channels prioritizes the Name column by default; Streams adapts its ratio budget to visible columns and reserves trailing space for its reset action. (Fixes #1169)
+- **Auto Channel Sync can leave profile memberships entirely manual via No Profiles.** The per-group Channel Profiles control now includes a No Profiles option (stored as `skip_channel_profile_memberships`). When selected, sync still creates and updates channels but does not create, enable, disable, or otherwise reconcile `ChannelProfileMembership` rows. Clearing the selection keeps the historical default of assigning all profiles; selecting one or more real profiles keeps the previous reconciliation behavior. - Thanks [@raclo](https://github.com/raclo)
+- **Channel and Streams table filters, sort order, and channel profile selection persist for the browser tab.** Working filters (including filter-menu toggles), table sort, and the Channels profile dropdown are stored in `sessionStorage` and restored on navigation within the same tab. Values are hydrated synchronously before the first list fetch so restoring does not trigger a second API request. Closing the tab clears them. Page size, column sizing, and column visibility remain in `localStorage`.
+- **Channel profiles can start empty and accept channels via "Add to Profile...".** Creating a profile now offers "Start empty" (`start_empty` on the profiles API; omitted/`false` keeps the previous all-channels backfill). Selected channels can be added to another profile from the Channels toolbar without changing the source profile. (Closes #1080) - Thanks [@Veneziaisking](https://github.com/Veneziaisking)
+
+### Changed
+
+- **VODs page and nav follow per-user movie/series access flags.** Standard users with `vod_movies_enabled` and/or `vod_series_enabled` (both default on) now see **VODs** in the sidebar, matching the DVR nav pattern. `/vods` redirects to Channels when both flags are off. When only one kind is allowed, the type control is hidden and the catalog is locked to Movies or Series.
+- **Dummy EPG generation moved into `apps/output/dummy_epg.py`.** Custom regex dummy, fallback templates, and standard filler generation lived in `apps/output/epg.py` with a second, drifting copy of the standard filler descriptions and grid serialization in `apps/epg/api_views.py`. XMLTV export, the EPG grid API, and XC single-channel EPG now share one implementation, so filler text, program metadata, and export-window clipping stay consistent. The grid prefetches streams in channelstream order, removing a per-channel query for dummy sources configured with `name_source: stream`. Channel logo URL templating in XMLTV export reuses the same regex helpers instead of an inline duplicate.
+- **EPG original air date is stored in the canonical `previously_shown_details.start` slot more consistently.** XMLTV ingest prefers `previously-shown@start`, then falls back to `episode-num system="original-air-date"` when start is missing. Schedules Direct still writes `originalAirDate` to `date` (year / production_date compat) and now also fills `previously_shown_details.start`, so the programme API `original_air_date` field, UI Original Air, and exported `<previously-shown start="...">` work for SD the same way as for rich XMLTV guides. XMLTV `<date>` is not used as an original-air fallback (DTD production/copyright date).
+- **Creating or duplicating a channel profile now selects it in the Channels table.** The profile dropdown switches to the new profile (and persists that choice for the tab) instead of staying on the previous selection.
+- **M3U and EPG table type filters now use `sessionStorage` instead of `localStorage`.** Same keys (`m3u-table-type-filter`, `epg-table-type-filter`); they clear when the tab closes, matching other working table filters.
+- **Renamed `useLocalStorage` to `useBrowserStorage`.** The hook now supports both `localStorage` (default) and `sessionStorage` via `{ storage: 'session' }`, with shared `readStoredJSON` / `writeStoredJSON` helpers for Zustand.
+- **Channels and Streams table header actions are icon-only with tooltips.** Edit, Delete, Add, Add to Profile, Add to Channel, Create Channel(s), Create Stream, and related controls no longer show text labels in the toolbar; each keeps a descriptive tooltip on hover.
+- **Docker base image pinned to FFmpeg 8.1.2.** `linuxserver/ffmpeg:latest` rebased to Ubuntu 26.04 / FFmpeg 9, which requires NVENC API 13.1 (NVIDIA driver 610+). Pascal and other legacy GPUs are capped at driver 580.x (API 13.0), so NVENC transcode profiles fail with "Driver does not support the required nvenc API version." The base now tracks `version-8.1.2-cli` (Ubuntu 24.04 Noble, FFmpeg 8.1.2).
+- **Comskip is built from [erikkaashoek/Comskip](https://github.com/erikkaashoek/Comskip) `master` (0.83.001) instead of the distro package.** The builder compiles current Comskip against distro libav (linuxserver ships libav statically inside `ffmpeg`, with no shared `.so` to link against). Tagged V0.83 does not compile on gcc 15 or newer FFmpeg headers; master plus small source patches are used until a release tag builds cleanly. uWSGI links `libpcre2`. The comskip binary is linked with DT_RPATH to distro libfontconfig so linuxserver's older `/usr/local/lib` does not win at runtime.
+- **The frontend error boundary now shows a diagnostic recovery panel instead of a minimal one-liner.** The copyable report decodes the error and component stacks against a production sourcemap instead of leaving them minified. The sourcemap is not fetched until an error actually occurs and a report is requested.
+- **M3U stream names and EPG channel display names now use the shared `truncate_with_warning` helper introduced for logo names.** Behaviour is unchanged for M3U streams and XMLTV (still warn + clamp to the model field limit). Schedules Direct station display names that exceed `EPGData.name` (512 characters) now log the same style of warning when truncated instead of slicing silently.
+
+### Fixed
+
+- **VODs page no longer double-fetches the catalog on mount.** Content load waits until a stored page size from `localStorage` is applied and (when only movies or only series is allowed) until the type filter is locked, so a mismatched page size or single-type gate no longer triggers an immediate second request.
+- **Forgot-password Docker instructions now include `-it` on `docker exec`.** `manage.py changepassword` prompts interactively for a new password and needs a TTY; without `-it` the command cannot accept input. - Thanks [@andreyan-andreev](https://github.com/andreyan-andreev)
+- **XC VOD playback returns 401/403 instead of 500 on bad credentials or blocked networks.** `stream_xc_movie` / `stream_xc_episode` used DRF `Response` without importing it, so invalid XC passwords and per-user network denials raised `NameError` and surfaced as HTTP 500. - Thanks [@brendongl](https://github.com/brendongl)
+- **Custom dummy EPG now fills the guide from the current time up to a dated event instead of starting at the event day's midnight.** When a channel title yielded both a date and a time, the "Upcoming" filler was anchored to midnight of the event day in the source timezone, so a client requesting a wide window saw no programmes at all until shortly before kickoff (for an event at 23:00 UTC, the first entry appeared around 04:00 the same day). Dated events are now generated along a timeline that starts at the later of now and the export lookback, runs to the event or export cutoff (whichever comes first), and continues with "Ended" filler to the end of the export window, so the channel is never left with an empty guide.
+- **Dummy EPG grid and XC endpoints now honor channel name overrides and stream-based regex parsing.** The grid API used the raw channel name instead of the effective display name from overrides, and XC single-channel EPG ignored stream title parsing and export-window bounds when generating on-demand dummy programmes. When `name_source` is stream and the configured stream index is out of range, parsing now falls back to stream 1 (with a warning) instead of the channel name, so event titles still resolve when possible.
+- **Dummy EPG fallback templates now respect the export window.** When a custom regex pattern missed, fallback programmes were generated for the full day range even if the caller passed a narrower lookback or cutoff (for example the grid's 25-hour window).
+- **XC `get_short_epg` now respects `limit` for on-demand dummy programmes.** Stored EPG already returned only current/upcoming rows capped by `limit` (default 4); custom and standard dummy generation ignored that and returned the full export window. Dummy generation now accepts `max_programs` and stops once that many programmes are produced, so short EPG does not build a multi-day grid and discard it.
+- **DVR TV filenames keep season/episode after an EPG refresh.** Path building re-read `ProgramData` by the id stored at booking time, but XMLTV refreshes delete and recreate those rows, so the lookup often returned nothing and recordings fell through to the date-based fallback template even when S/E were already on the booking snapshot (or on the recording from artwork prefetch). Those persisted fields are now used when the live row is gone. (Fixes #1307) - Thanks [@v8eta](https://github.com/v8eta)
+- **Channels table no longer crashes or gets stuck refreshing when stale client state contains invalid rows.** Nullish channel entries are ignored while rendering, one clean-up refetch restores valid data, and stale invalid-page responses can no longer reset a newer page selection or trigger an obsolete retry.
+- **Series rules no longer double-book when an identity-less recording drifts into an identifiable listing.** Candidates with season/episode skipped the start-time window, so a booking with no identity in its snapshot (e.g. news, or scheduled before those fields were stored) could be scheduled again when the refreshed listing gained identity and nudged start by seconds, with both remuxes writing the same file. The window now runs after an episode-key miss as well. - Thanks [@v8eta](https://github.com/v8eta)
+- **Slash-less artwork URLs no longer return the SPA HTML shell.** Clients that strip trailing slashes from channel logo, VOD logo/image, and SD poster proxy URLs (for example Channels DVR with XMLTV `<icon>` links) missed the DRF routes and nginx cache locations, fell through to the SPA catch-all, and got `200 text/html` instead of the image. Those endpoints now accept both spellings and serve the image directly; nginx matches the optional slash and rewrites internally so both forms share one `proxy_cache` entry. (Fixes #1590)
+- **Auto Channel Sync no longer fails or clears logos when a provider supplies an oversized logo URL.** Oversized values (typically embedded base64 data URIs) are rejected before the uniquely indexed `Logo.url` query, matching bulk channel creation. Channel creation still proceeds without a logo, and an existing valid logo is kept when the provider later sends a rejected value. (Follow-up to #519) - Thanks [@raclo](https://github.com/raclo)
+- **Live web player reconnects after a transient mpegts.js NetworkError instead of stopping until the channel is reopened.** On `NetworkError` the player is destroyed immediately and recreated with exponential backoff (capped at 5 attempts); `MediaError` still surfaces immediately. Late events from an already-replaced player instance are ignored so a stale error cannot tear down a working reconnect. (Fixes #1566) - Thanks [@jstevenscl](https://github.com/jstevenscl)
+- **XC VOD episode streaming no longer returns 500 for a stale or missing episode ID.** `stream_xc_episode` looked up the relation with `.filter(...).first()`, which returns `None` when nothing matches; the `try/except DoesNotExist` around it never ran, so a cached episode ID from before a catalog refresh crashed on `episode_relation.episode.uuid`. Missing relations now return `404` with `Episode not found`. - Thanks [@jstevenscl](https://github.com/jstevenscl)
+- **Live-proxy no longer boots its cleanup thread and `live:events:*` pubsub listener in Celery or Daphne.** Django `AppConfig.ready()` previously called `ProxyServer.get_instance()` in every non-`manage.py` process, so Celery workers/beat and Daphne each ran a full live-proxy singleton they never use for serving streams. Eager start is limited to stream-serving roles (uWSGI / gunicorn). Celery still lazily gets a client-only `ProxyServer` when `ChannelService` needs Redis (stop/publish), without background threads or an extra pubsub client.
+- **Redis idle clients and unbounded redis-py pools no longer accumulate open TCP sockets under gevent load.** `redis-py`'s default `ConnectionPool` opens a new ESTABLISHED connection for every concurrent waiter and never shrinks those idle sockets afterward; each process also keeps separate pools (`RedisClient` client/buffer/pubsub plus django-redis), so a lightly loaded AIO instance measured ~100 Redis clients after a day, most idle since near process start. Fix: (1) Redis server idle-client `timeout` of 300s (`REDIS_IDLE_TIMEOUT`, AIO attach-daemon / modular compose / best-effort `CONFIG SET` on connect; blocked Celery BRPOP waiters are exempt), (2) bounded `BlockingConnectionPool` via `REDIS_MAX_CONNECTIONS` (default 50 per pool).
+- **AIO / modular web workers no longer inherit a soft open-file limit of 1024 after `su -`.** `pam_limits` resets `RLIMIT_NOFILE` soft to 1024 for the login session that starts uWSGI (and its attach-daemons, including Daphne), so compose `ulimits: nofile:` only ever affected PID 1. Busy instances then failed new live streams with `[Errno 24] Too many open files` while the UI and healthcheck still looked healthy. The entrypoint now raises the soft limit inside that session (default 65536, overridable with `DISPATCHARR_NOFILE`). (Fixes #1554) - Thanks [@brendongl](https://github.com/brendongl)
+- **Deleting the currently selected channel profile no longer crashes the Channels page.** The confirmation dialog passed a numeric profile id while the store kept the selection as a string, so selection was not reset to All and URL builders read `.name` on `undefined`. Profile removal and refresh now compare ids as strings, and missing selections fall back to All.
+- **TV Guide no longer shows stale or wrong channel logos after bulk-adding channels.** Guide rows now fetch missing logos on demand instead of a blind cache lookup, and logo refreshes merge into the store instead of replacing it. (Fixes #955)
+- **Uploading a logo with the same filename as an existing one now actually replaces it**, prompting to confirm the overwrite instead of silently keeping the old name and cached image. API clients that upload a colliding filename now get `409` unless they pass `overwrite=true`, instead of the previous silent no-op success. (Fixes #330)
+- **Comskip no longer aborts on decoder init in Docker.** `thread_count=0` is libav autodetect (all cores) and SIGFPEs (or SIGABRTs) during multi-threaded decoder init in this image. Dispatcharr now passes `--threads=1` on the CLI, which is required because a custom or volume-mounted ini with `0` would still crash if we only changed the shipped file. The shipped `docker/comskip.ini` default is also `thread_count=1`. Failures now log returncode, command, and stderr instead of only a UI toast. (Fixes #1251)
+- **Scheduling an in-progress programme now starts the recording immediately.** Guide "just this one" and series-rule matches for a show that has already started were stored as a Celery Beat `ClockedSchedule` with `clocked_time` of now. Beat often missed that due-now entry until a later full sync (or never dispatched it), so the recording sat in Upcoming and never flipped to Recording. Due start times now go to the worker with `apply_async`, the same path startup recovery already uses for in-window recordings. Future start times still use `ClockedSchedule` so long countdowns cannot hit Redis `visibility_timeout` redelivery.
+- **Celery Beat keeps real UTC when `/etc/localtime` is bind-mounted from a non-UTC host.** UTC images ship `/etc/localtime` as a symlink to `Etc/UTC`. Docker follows that symlink, so the host's zone file (e.g. America/Chicago) replaces the IANA UTC zone. Celery `ZoneInfo('UTC')` then compared `start_time` against the host offset and future recordings never started. The base image now copies UTC to `/etc/localtime` as a regular file so that volume overlays only `/etc/localtime` and leaves `Etc/UTC` intact. Same class of issue as the PostgreSQL `UTC0` pin for this bind-mount.
+- **Series rules resolve a tvg_id to the EPG copy a channel actually uses, and new rules also store `epg_source_id`.** `tvg_id` is unique per EPG source, not globally. Evaluation and preview used `.first()`, so a stale unmapped duplicate could win and the rule recorded nothing with no log. Legacy rules (no source) still use every mapped copy of that tvg_id on the backend. The editor and Guide "record series" / "Customize rule" pin a specific source copy instead of offering an "any mapped source" choice. Picking the channel to record on now uses effective values, so a hand-assigned override EPG counts the same as `Channel.epg_data` (previously those channels resolved as mapped but then matched no channel and silently scheduled nothing), and a station with no channel at all is logged and reported as `no_channel_for_epg` instead of doing nothing quietly. Scheduled recordings store `program.epg_source_id` as well, so deleting or bulk-removing one sourced rule leaves the other source's upcoming list intact (untagged recordings scheduled before this tag still come off with the first matching sourced delete). (Fixes #1529)
+- **Series rules no longer schedule a second recording when XMLTV nudges programme start/end times between EPG refreshes.** Dedup keyed on an exact `(tvg_id, start, end)` tuple from the recording snapshot; small boundary drift missed that key, so the same airing was scheduled twice onto one output path. The snapshot now also stores season/episode/onscreen, and that identity is the primary extra guard. Programmes with no identity (e.g. news bulletins) fall back to a 15-minute start-time window, but only when the original slot is gone from the current EPG, so two live listings of the same title a few minutes apart are still both recorded. Each drifted recording can claim at most one replacement candidate. - Thanks [@v8eta](https://github.com/v8eta)
+- **Bulk channel creation and VOD import no longer fail when provider-supplied logo names exceed 255 characters.** Oversized M3U / EPG / VOD titles are truncated on ingest via a shared helper enforced in model `save`, `bulk_create`, and the logo serializers, matching how stream names are already clamped. (Fixes #1470)
+- **Application log timestamps honor the configured display timezone instead of always showing UTC.** App logs were pinned to UTC even when the container `TZ` and Settings → Interface → UI Settings → Time zone differed (nginx in the same container already followed `TZ`). Python logging now renders timestamps in that display timezone via an in-process cache refreshed from the UI setting (and seeded from `DISPATCHARR_TIME_ZONE` / `TZ` on fresh installs). Django `TIME_ZONE`, database storage, and wire/API timestamps stay UTC. (Fixes #1439) - Thanks [@nagelm](https://github.com/nagelm)
+- **Live proxy failover wraps back to the first stream after a cooldown instead of sticking on the last backup.** After every assigned stream had been tried once, automatic failover stopped and left the session on the final URL. Once a channel has connected at least once, exhausting the list now arms a 60s cooldown (`FAILOVER_ROTATION_COOLDOWN`), then continues rotation from the stream after the current one (wrapping to the first). Full-list wraps are capped by the existing `MAX_STREAM_SWITCHES` limit (10) and clear after stable playback or a successful manual stream change. Cold start still fails fast with no wrap. The cooldown is timestamp-based so buffering-timeout failover (stderr reader thread) never blocks on the wait. (Fixes #310)
+- **Manual live stream switches now clear failover bookkeeping on the owning worker.** `change_stream` previously reset `tried_stream_ids` only on the requesting worker's local manager, so when another uWSGI worker owned the channel the clear was a no-op and automatic failover could still skip streams already marked tried. `next_stream` never cleared that state at all. Both paths now reset tried streams and wrap-pass / cooldown state on the owner after a successful switch (direct owner update or Redis `STREAM_SWITCH` handler).
+- **Schedules Direct guide refresh no longer silently drops channels on transient API failures.** A failed `/schedules/md5` check was treated as "no changes," reporting a false "guide data is up to date" instead of an error, and a failed `/programs` metadata batch wrote a placeholder "No Title" entry instead of retrying. The batched `/schedules/md5`, `/schedules`, and `/programs` requests now retry with backoff on network errors, HTTP errors, and Schedules Direct's own embedded error codes (e.g. `SERVICE_OFFLINE`/`SERVICE_BUSY`) returned with HTTP 200.
+- **Login now returns you to the page you originally requested instead of always `/channels`, and no longer flashes the login form on a page load with a valid session.** (Fixes #715, #1526, #1576)
+
+## [0.29.0] - 2026-08-09
+
+### Added
+
+- **VOD movies store and filter `is_adult` like live streams.** XC `get_vod_streams` provider rows (string or int `1`) populate an indexed `Movie.is_adult` field on list sync; a provider row that omits the key leaves an existing flag from another provider untouched, since movies are matched/shared across providers by TMDB/IMDB/name+year. Existing libraries backfill from relation `custom_properties.basic_data.is_adult`. XC `get_vod_streams` / `get_vod_info` and the movies API honor the user's Hide Mature Content setting for non-admins; XC responses emit the real `is_adult` flag instead of always `0`.
+- **VOD and catchup honor Redirect as the default stream profile.** When Redirect is the global default, VOD and catchup GET/HEAD (including XC) return an HTTP redirect to the provider URL instead of proxying. Decided only on the first request (no `session_id`): a fingerprint-matched pool/session adopts and keeps proxying; otherwise the client is handed off to a capacity-aware provider URL (no session mint, no slot hold, no upstream probe). Catchup mirrors the client's PATH vs QUERY XC URL shape onto the provider (native `/proxy/catchup/` defaults to PATH). Existing `session_id` URLs keep proxying. The Redirect check is Redis-cached. Stream settings note that Redirect as the default also redirects VOD and catchup.
+- **Type filter on the M3U and EPG source tables.** M3U & EPG Manager now has a filter dropdown on each table (M3U/XC for playlists, XMLTV/Schedules Direct/Dummy for EPG sources), matching the checklist-style filter menu already used on the Channels page, to narrow the list by type. All types are checked by default; the button highlights and a Reset option appears once anything is unchecked. The selection persists per table across reloads.
+- **Parent-scoped VOD image proxy for backdrops and episode stills.** Movies, series, and episodes expose `GET /api/vod/{movies|series|episodes}/{id}/image/?kind=...` that fetches URLs already stored on the item. Provider-info and XC responses rewrite absolute `backdrop_path` / episode `movie_image` values to those proxy paths; nginx caches them alongside VOD logos. The VOD UI now prefers `logo.cache_url` for posters. Channel logos and VOD images share `core.image_proxy.serve_local_or_remote_image` for fetch timeouts, size caps, and negative failure caching. (Closes #863, Fixes #1174)
+- **`{channelId}` substitution token in Stream Profile parameters.** Stream Profile command-line parameters now support `{channelId}` alongside the existing `{streamUrl}` and `{userAgent}` tokens, letting a single profile embed the channel's primary key (the same ID used by the API) in its ffmpeg arguments. (Closes #1252)
+
+### Security
+
+- **nginx blocks deep Django admin paths without breaking XC streams whose username is `admin`.** The production admin-disable rule previously matched only exact `/admin` and `/admin/`, so `/admin/login/` and other admin UI routes stayed reachable for unrestricted password guessing. The location now matches `/admin` and deeper admin paths while still allowing the three-segment XC stream form `/admin/<password>/<channel_id>`.
+- **Django admin login shares the JWT login rate limit, and that throttle keys off trusted client IP.** `POST /admin/login/` now consumes the same per-IP `login` scope (`3/minute`) as `POST /api/accounts/token/` and `/api/accounts/auth/login/`, as defense in depth if admin is ever exposed. `LoginRateThrottle` also resolves identity through `get_client_ip()` instead of DRF's default `X-Forwarded-For` handling, so a varying spoofed header prefix cannot mint a fresh throttle bucket on every request.
+- **M3U and EPG response caches include the request origin in their keys.** Absolute logo, stream, poster, and `url-tvg` URLs are built from the request Host (and scheme/port). The shared EPG (300s) and M3U (2s) caches previously keyed only on profile/user/query params, so the first client to miss the cache could leak its origin into later clients' playlists and guides (LAN vs public hostname, or a forged Host while `ALLOWED_HOSTS` is `*`). Cache keys now include the same origin used for those URLs. (Fixes #1390)
+- **Channel-profile membership PATCH now enforces profile ownership.** `PATCH /api/channels/profiles/{id}/channels/{channel_id}/` declared owner-or-admin permissions but never applied them after loading the profile, so any authenticated user could enable or disable channels on another user's profile by ID. The endpoint now scopes the profile queryset the same way as channel-profile list/retrieve (admins see all profiles; other users only their assigned ones), so foreign profiles return 404 with no membership side effects.
+- **Channel / VOD image proxy hardens remote artwork fetches against SSRF and same-origin active content.** Provider-controlled logo and poster URLs are fetched through `serve_local_or_remote_image` (channel logo cache, VOD logo cache, and parent-scoped VOD `/image/` endpoints). Outbound targets are checked after DNS on every redirect hop: private LAN addresses stay allowed for self-hosted artwork, while loopback, link-local, and cloud-metadata ranges are blocked. Redirect following is capped and no longer trusts upstream blindly. Response `Content-Type` is taken from magic bytes (JPEG/PNG/GIF/WebP/ICO/BMP/SVG) instead of the upstream header, with `X-Content-Type-Options: nosniff`; SVG responses also get a sandboxed CSP so opening a cache URL as a document cannot run script on the Dispatcharr origin. Shared URL validation lives in `core.http_security` (plugin installs keep the stricter no-private default). nginx also caches `404` responses for those logo/image locations for 1 minute so dead artwork does not stampede Django and upstream across workers.
+- **Live connection telemetry is admin-only over WebSockets and the system-events API.** Standard users still join the shared `updates` group for EPG/notification traffic, but the consumer no longer forwards `channel_stats`, `vod_stats`, `timeshift_stats`, `vod_started`, or `vod_stopped` (channel/content UUIDs, upstream URLs, client IPs, and session details). `system_notification` pushes marked `admin_only` are also dropped for non-admins (matching the REST notifications list filter). `m3u_profile_test` client messages are admin-only as well. `GET /api/core/system-events/` now requires admin instead of any authenticated user.
+- **Client IP detection trusts private-network proxies by default, not client-supplied headers from public peers.** `get_client_ip()` honors `X-Real-IP` / `X-Forwarded-For` only when `REMOTE_ADDR` is a trusted proxy. Unset `DISPATCHARR_TRUSTED_PROXIES` defaults to the same private/loopback CIDRs as local network access (`10/8`, `172.16/12`, `192.168/16`, etc.), so Docker/Traefik-style reverse proxies keep real client IPs for ACLs and logs without configuration. Spoofed headers from a public peer are ignored. Set `DISPATCHARR_TRUSTED_PROXIES` to a specific proxy IP/CIDR to narrow trust, or to `none` to disable header trust entirely. Live, VOD, timeshift, M3U/EPG client identity, setup gating, network access checks, and login/logout/token-refresh plus blocked M3U/EPG/XC system-event logs all go through the same helper. The Debian installer no longer overwrites `X-Real-IP` on the uWSGI location (same pass-through model as Docker nginx). (Closes #1410)
+- **First-time web setup is limited to local networks by default.** `POST /api/accounts/initialize-superuser/` only accepts private/loopback IPv4 and IPv6 ranges unless `DISPATCHARR_SETUP_ALLOWED_IP` is set to a single IP (for remote/VPS setup). While no admin exists, GET reports `client_ip` and `setup_allowed` so the UI can show remote-setup instructions (env override or `createsuperuser`). Once an admin-level user exists, the endpoint only returns `superuser_exists: true`.
+- Updated `Django` 6.0.6 → 6.0.7, resolving the following CVEs:
+  - **CVE-2026-48588**: Potential exposure of private data via cached `Set-Cookie` response in `UpdateCacheMiddleware` / `cache_page()`.
+  - **CVE-2026-53877**: Heap buffer over-read in `GDALRaster` when initialized with certain `bytes` objects.
+  - **CVE-2026-53878**: Header injection possibility since `DomainNameValidator` accepted newlines in input.
+- Updated frontend npm dependencies:
+  - `brace-expansion` 5.0.6 → 5.0.9, fixing **high** severity DoS via exponential-time expansion of consecutive non-expanding `{}` groups ([GHSA-3jxr-9vmj-r5cp](https://github.com/advisories/GHSA-3jxr-9vmj-r5cp)), **high** severity DoS via unbounded expansion length ([GHSA-mh99-v99m-4gvg](https://github.com/advisories/GHSA-mh99-v99m-4gvg)), and **high** severity DoS via unbounded intermediate arrays that bypassed the prior mitigation ([GHSA-rgw5-rvv9-x895](https://github.com/advisories/GHSA-rgw5-rvv9-x895))
+  - `js-yaml` 5.1.0 → 5.2.2, fixing **moderate** severity quadratic CPU via merge-key chains ([GHSA-g796-fgmg-93mv](https://github.com/advisories/GHSA-g796-fgmg-93mv)), **moderate** severity quadratic DoS via `!!omap` in YAML11_SCHEMA ([GHSA-724g-mxrg-4qvm](https://github.com/advisories/GHSA-724g-mxrg-4qvm)), and **high** severity exponential parsing time in flow collections ([GHSA-pm4m-ph32-ghv5](https://github.com/advisories/GHSA-pm4m-ph32-ghv5))
+  - `nanoid` 3.3.16 → 3.3.18, fixing **high** severity infinite loop when a custom generator is called with size zero ([GHSA-2v37-7h3g-55p8](https://github.com/advisories/GHSA-2v37-7h3g-55p8))
+  - `postcss` 8.5.13 → 8.5.23, fixing **high** severity path traversal in previous source map auto-loading ([GHSA-r28c-9q8g-f849](https://github.com/advisories/GHSA-r28c-9q8g-f849))
+  - `react-router` / `react-router-dom` 7.17.0 → 7.18.2, fixing **moderate** severity open redirect via backslash in `<Link>`/`useNavigate` ([GHSA-wrjc-x8rr-h8h6](https://github.com/advisories/GHSA-wrjc-x8rr-h8h6)), **moderate** severity XSS via RSCErrorHandler missing protocol validation ([GHSA-h8fp-f39c-q6mh](https://github.com/advisories/GHSA-h8fp-f39c-q6mh)), **moderate** severity arbitrary constructor injection via `deserializeErrors()` ([GHSA-337j-9hxr-rhxg](https://github.com/advisories/GHSA-337j-9hxr-rhxg)), **high** severity unauthenticated DoS via inefficient route matching ([GHSA-chx6-hx7r-mcp5](https://github.com/advisories/GHSA-chx6-hx7r-mcp5)), and **high** severity RSC Mode CSRF bypass that allowed action execution before a 400 response ([GHSA-qwww-vcr4-c8h2](https://github.com/advisories/GHSA-qwww-vcr4-c8h2))
+
+### Changed
+
+- **User form "Allowed IPs" description clarifies further-restrict semantics.** The field only narrows access within global Network Access; it cannot widen or override the global allowlist. Empty still means inherit global settings only.
+- **Usernames and XC passwords allow a small set of path-safe special characters.** Both the user form and API serializer now accept letters, numbers, `.`, `_`, `@`, and `-` (still rejecting `+` and other symbols that break XC path/query URLs). The previous alphanumeric-only streamer username / XC password checks are replaced by this shared allow-list for all user levels. The XC password generator remains alphanumeric. - Thanks [@write-erase](https://github.com/write-erase)
+- **Default User-Agent string is Redis-cached for hot paths.** `CoreSettings.get_default_user_agent()` caches the configured default string in Redis (same TTL and invalidate pattern as settings groups). Channel/VOD logo proxies use it directly. Provider request paths go through `M3UAccount.get_user_agent_string()`, which prefers the account's own User-Agent when set and otherwise the cached system default (live/VOD/timeshift proxy, M3U/XC refresh, VOD tasks). Hot account loads use `select_related("user_agent")` / `m3u_account__user_agent` so account-specific UAs do not add an extra query. The cache clears when stream settings or any User-Agent row changes.
+- Dependency updates:
+  - `Django` 6.0.6 → 6.0.7 (security patch; see Security section)
+  - `drf-spectacular` 0.29.0 → 0.30.0
+  - `gevent` 26.5.0 → 26.7.0
+  - `torch` 2.12.1+cpu → 2.13.0+cpu
+  - `sentence-transformers` 5.6.0 → 5.6.1
+- **Settings page redesigned as a slide-over panel integrated into the sidebar, replacing the old accordion layout.** Clicking Settings in the main sidebar now slides in a dedicated settings sub-panel (primary nav slides left, settings nav slides in from the right) instead of navigating to a separate page with collapsible sections; Back returns to the main nav while keeping the previously selected settings section active. Main sidebar nav groups render as flat, uppercase-labeled sections instead of collapsible accordions, and the sidebar's collapsed/expanded state is now persisted to `localStorage` across page reloads.
+- **Connections and its separate Logs page are merged into a single Connect page.** The former "Integrations" sidebar group (Connections, Logs) is now one "Connect" entry under System; the log viewer is a collapsible section fixed to the bottom of the Connect page instead of a standalone route.
+- Stream Profiles, Output Profiles, and User-Agents tables on the Settings page grow to fit their content instead of clipping to a fixed height with an internal scrollbar.
+
+### Removed
+
+- **Unused legacy Django dashboard scaffolding.** Removed unmounted example views/URLs/forms under channels, m3u, epg, dashboard, accounts, vod, and core, plus the broken HDHR HTML dashboard routes (template was missing; `discover.json` / `lineup.json` and device APIs are unchanged). Also dropped unused `xc_movie_stream` / `xc_series_stream` helpers from `apps/output` (root XC movie/series streaming already goes through the proxy handlers).
+
+### Fixed
+
+- **Comskip hardware acceleration no longer passes the unsupported `--qsv` flag.** The bundled Comskip build has no `--qsv` option. The former Intel Quick Sync choice is now the generic `hwassist` setting (UI: Hardware assist), which passes `--hwassist`; any previously saved `qsv` value is treated as `hwassist`. NVIDIA still uses `--cuvid`. (Fixes #1503)
+- **M3U profile regex preview no longer stalls Daphne on a catastrophic pattern.** The admin `m3u_profile_test` WebSocket path (and shared `transform_url` used for live URL rewrites) ran sync `regex` substitution with no length or time bounds, so a nested/alternation-heavy pattern could block the shared event loop and drop other real-time clients. Preview inputs are capped to the same lengths as saved profile fields (255 for search/replace, 8KB for the sample URL), and both the preview and `transform_url` apply the same short substitution timeout already used by Auto Channel Sync rename/preview.
+- **Schedules Direct Extra Debugging again clears on code 2055 when a cached token skips `/token`.** Token reuse meant refresh, lineup, and poster calls could keep sending `RouteTo: debug` after SD returned 2055, because only `POST /token` turned the toggle off. Authenticated SD requests now detect 2055, disable Extra Schedules Direct Debugging, and retry once without the header; `/token` does the same clear-and-retry.
+- **Direct-link M3U output restores the VLC-style `@` for multicast UDP URLs.** Stream URLs are stored without `@` for FFmpeg compatibility; `?direct=true` playlists now rewrite multicast `udp://` hosts back to `udp://@...` so players like VLC can join the stream. (Fixes #1406) - Thanks [@haroldm](https://github.com/haroldm)
+- **Hand-assigned / override EPG is treated as mapped for programme import, and XMLTV no longer lags XC after an EPG mapping change.** Assigning EPG on `ChannelOverride` (common for auto-synced channels where `Channel.epg_data` stays null) was ignored by import and Schedules Direct mapped fetches, so those stations never got `ProgramData`. Mapping detection now includes override assignments; setting or bulk-editing override EPG queues a refresh (signals do not run on `bulk_*`). The XMLTV `/output/epg` Redis chunk cache is invalidated when channel or override EPG assignment changes and after programme import completes, so XC and XMLTV stay in sync instead of XMLTV serving stale programmes for up to the cache TTL. `POST /api/epg/current-programs/` with `channel_uuids` also resolves the effective EPG (override wins), matching the `epg_data_ids` path the channel editor already used. (Fixes #1485)
+- **VOD / series artwork prefers the provider relation, then falls back to the shared object / VODLogo.** When multiple M3U accounts share a movie, series, or episode, a lower-priority refresh could overwrite shared `custom_properties` stills/backdrops (and shared `logo` FKs are last-writer-wins). Provider-info, XC detail responses, and XC `get_vod_streams` / `get_series` lists prefer relation artwork (highest-priority account for XC; selected account for the UI), then shared object `custom_properties`, then the synced VODLogo. Absolute URLs stay rewritten through the parent-scoped image proxy (`m3u_account_id` when the UI scopes by provider). List endpoints extract only the needed icon/backdrop JSON paths instead of loading each relation's full `custom_properties` blob. XC's `cover_big`, `movie_image`, and `cover` all return the same resolved URL (real XC servers serve one still for all of them), and neither the XC detail response nor provider-info mixes proxied stills with raw provider URLs anymore.
+- **Series provider-info no longer N+1s episode relations, and the Series modal no longer flashes the previous provider's episodes.** Cached opens already served from the DB, but each episode triggered its own relation lookup (~1s for large shows). Relations are bulk-loaded once. The modal also stopped re-fetching when the default provider was selected, clears episodes while switching providers, and ignores stale in-flight responses.
+- **XC `get_series_info` no longer N+1s episode relations, and Season 0 is preserved.** Episode stream metadata is bulk-loaded once (previously one query per episode). Season numbering used `season_number or 1`, which mapped specials to Season 1; explicit `0` is kept. The unified multi-provider catalog for XC clients is unchanged.
+- **Series modal Season 0 (specials) now gets its own tab.** Grouping used `season_number || 1`, which treated `0` as missing and merged specials into Season 1. It now uses nullish coalescing so explicit Season 0 stays separate.
+- **VOD series episode refresh no longer crashes when XC providers return `episodes` as a JSON array.** PHP panels encode contiguous 0-based season keys (common when Season 0 specials exist) as an array instead of an object; `batch_process_episodes` now accepts both shapes and uses the key or list index as the season number. (Fixes #934)
+- **Bare XMLTV `<episode-num>` values without a `system` attribute are no longer dropped on import.** The XMLTV DTD defaults missing `system` to `onscreen`, but Dispatcharr treated an empty system as unknown and discarded the element. Missing or empty `system` now defaults to `onscreen`, so values like `E119` are stored and re-exported. (Fixes #1491)
+- **Logo Manager no longer resets a custom name when the Logo URL field is focused or blurred.** Leaving the URL field used to always replace Name with the URL filename, which wiped intentional renames. Name is now suggested from the URL only when the name field is empty. (Fixes #845)
+- **Manual expiration on a Standard M3U account no longer reverts to a leftover XC date.** Converting an account from XC to Standard left provider `custom_properties.user_info.exp_date` on the profile. Every profile `save()` still treated that JSON as authoritative and overwrote a manually set `exp_date`, so the UI and expiration notifications immediately showed the old date. Sync from `custom_properties` now runs only when the parent account is still XC; Standard accounts keep the field you set. Background XC profile refresh also `select_related`s the account so that type check does not add a query per profile.
+- **Auto Channel Sync Configure modal no longer crashes with `r.trim is not a function` on existing groups.** Opening the gear icon for a group whose `channel_profile_ids` were stored as numbers (common when an external tool wrote the API) made Mantine MultiSelect call `.trim()` on non-strings and trip the ErrorBoundary. Channel profile IDs are now coerced to ints on API read/write and to strings only for the MultiSelect widget, matching sibling ID fields such as `group_override` and `stream_profile_id`.
+- **M3U refresh status saves no longer rewrite the default profile (and can no longer clobber XC expiration).** Every `M3UAccount.save()` used to load the default profile and full-`save()` it just to mirror `max_streams`, including status/`last_message` updates during refresh. That could race with background `refresh_account_profiles` and overwrite a freshly written `exp_date` / `custom_properties`. The signal now skips when `max_streams` is not in `update_fields`, and when sync is needed uses a targeted `QuerySet.update` so other profile columns are never touched. (Fixes #1430)
+- **Standard M3U account and default-profile expiration stay in sync while the edit form is open.** Changing expiration on the default profile updates the main account picker (via the playlists store). Changing it on the main form seeds the default profile editor with that unsaved value when Profiles is opened, so Save on either path no longer fights a stale date.
+- **VOD list sync no longer wipes movie/series detail fetched on open.** Refreshing an M3U/XC account used to replace each relation's `custom_properties` with only `basic_data` and `detailed_fetched: false`, while leaving `last_advanced_refresh` set. Opening a movie within 24 hours then skipped provider `get_vod_info`, so plots and other detail stayed missing. Sync now keeps existing detailed payloads and fetch flags, and does not overwrite filled movie/series fields (e.g. description) with blank list-API values. Movie provider-info and XC `get_vod_info` also re-fetch when `detailed_fetched` is false even if the timestamp is recent.
+- **Episode VOD API queryset updated for relation tables (needed by the new image proxy).** `EpisodeViewSet` still queried a removed direct `m3u_account` FK left over from the multi-provider rewrite. The UI never called `/api/vod/episodes/` (episodes come nested from series provider-info), so this was unused API surface; the new `.../episodes/{id}/image/` endpoint would have 500'd without the fix. List/filter now use `m3u_relations__m3u_account` like movies/series.
+- **Scheduled recordings no longer silently fail to start when the idempotency guard hits a transient error.** `run_recording` used to abort permanently on a single failed status check at fire time (nothing re-dispatches the task), so a brief Postgres stall left the Recording with no status and no ffmpeg. The guard now retries via `_db_retry` over roughly 30 seconds, treating any `Exception` as retriable at that boundary (in-recording DB helpers still retry only `OperationalError` / `InterfaceError`). Exhausted retries still fail closed to avoid duplicate recordings. (Fixes #1464) - Thanks [@nagelm](https://github.com/nagelm)
+- **A stable stream that goes dead mid-playback now reconnects instead of hanging.** When the health monitor detected that a previously stable stream had stopped sending data, it set an internal reconnect flag, but the chunk-reading loop never checked it, so the stream sat on the dead connection indefinitely and the existing reconnect handling was never reached. The read loop now yields when a reconnect is requested, and the per-URL retry loop clears the flag, closes the old socket, and re-opens the same URL. Each health-driven reconnect counts toward the normal retry budget, so a URL that keeps dying still fails over after `max_retries` within the retry window. (Fixes #1493)
+- **VOD logo/poster proxy sends the configured User-Agent when fetching remote images.** Outbound requests previously used the default `python-requests` User-Agent, which some IPTV image hosts reject with 403. The proxy now uses the same default User-Agent resolution as channel logos, and falls back to guessing `Content-Type` from the URL when the remote response omits it. XC clients that load covers through `/api/vod/vodlogos/{id}/cache/` benefit. - Thanks [@gianlucalauro](https://github.com/gianlucalauro)
+- **Public IP in the sidebar updates again after the server's IP changes (e.g. a VPN/gluetun reconnect).** The lookup result was cached for an hour with no re-check on page load, so the UI kept serving a stale address until the cache expired. The cached value is still served instantly, but a page load more than a minute after the last check now re-verifies in the background and pushes any change over the existing WebSocket update. A failed re-check keeps the last known address instead of blanking the sidebar. (Fixes #1395) - Thanks [@floppy-disk](https://github.com/floppy-disk)
+- **M3U and EPG source tables size to their content instead of a fixed height.** The tables on M3U & EPG Manager were locked to `height: calc(40vh - 15px)`, which produced a nested scrollbar and reserved the same space whether the table held 0 or 50 rows; they now show an empty state, size to fit their data, and only scroll internally once they reach the height of the viewport. - Thanks [@nagelm](https://github.com/nagelm)
+
+## [0.28.2] - 2026-07-23
+
+### Added
+
+- **Schedules Direct Extra Debugging option.** EPG source settings include an **Extra Schedules Direct Debugging** toggle that adds a `RouteTo: debug` header so Schedules Direct support can steer traffic to their debug server. The tooltip states it should only be enabled when SD support asks. If SD returns code 2055 (unexpected debug connection), the toggle is turned off automatically.
+
+### Changed
+
+- **EPG source form places Auto-Apply EPG Logos in the shared middle column for XMLTV and Schedules Direct.** The toggle previously lived in the SD-only right panel when editing a Schedules Direct source; it now uses the same middle-column control as XMLTV so SD-specific options (logo style, posters, debug) stay in the right panel.
+- **Schedules Direct poster proxy shares auth tokens across uWSGI workers via Redis.** Tokens are stored in Django's cache until near `tokenExpires` (24h fallback), so concurrent `/poster/` requests on different workers reuse one SD session instead of each process hitting `/token` separately. Redis failures fall back to re-authentication.
+
+### Fixed
+
+- **Schedules Direct poster proxy no longer ignores daily image download limits or missing-image errors.** SD returns codes 5002/5003 as HTTP 200 with a JSON body; the proxy previously only inspected HTTP 400 and kept requesting images after the limit, which can get accounts blocked. It now detects 5002/5003 (subscriber and trial), stops further image fetches for that source until the next midnight UTC (persisted on the EPG source so all workers honor it), and on explicit IMAGE_NOT_FOUND (code 5000) clears that program's `sd_icon` so the same dead URI is not retried. Transient bare HTTP 404s do not blacklist the URI. Successful SD posters use a dedicated nginx cache under `/data/cache/sd_posters` (14 days); channel/VOD logos remain at `/data/cache/logos` (24 hours). On startup, an existing `/data/logo_cache` directory is moved to `/data/cache/logos` once so warm logo entries are kept. API and XMLTV icon URLs include a `?v=` hash of the stored SD image URI so a new artwork link after refresh uses a new cache key without waiting for TTL expiry. Selecting programs that still need artwork no longer uses a negated JSON `AND` that dropped every row when `sd_icon_missing` / `sd_poster_style` keys were absent (Postgres NULL), which had prevented poster links from being saved after refresh.
+- **Schedules Direct auth and lineup change handling better match SD guidelines.** Token codes 3000/3001 (offline/busy) stop as idle with clear "do not retry" messaging instead of looking like credential failures; 4010 (too many unique IPs) and related account codes get explicit messages. Lineup add/delete respects a known daily change lockout before calling SD, handles 4100 on deletes, and the UI blocks remove when no changes remain (adds and deletes both count toward the 6/day limit).
+- **Schedules Direct stops retrying `/token` on auth failures that will not clear by themselves.** Codes 4002/4003 (bad credentials), 4001/4005/4007/4008 (account state), 4009/4010 (login/IP limits), and 4004 (15-minute account lock) persist a cooldown on the EPG source. Soft codes 3000/3001 use a 1-hour idle cooldown. Lockouts clear when username/password change or the cooldown expires. Token auth is centralized in `sd_obtain_token` for refresh, lineup/form, and poster paths. That helper reuses a Redis-cached token until near `tokenExpires` (bound to a credential fingerprint, and cleared when the EPG source username/password change) so opening the SD form, refreshing EPG, and serving posters do not mint a new token on every call. When an authenticated SD call returns HTTP 401/403 (SD documents TOKEN_EXPIRED as 403), the cached token is cleared and the request is retried once with a fresh `/token`.
+- **Schedules Direct code split out of general EPG modules.** Refresh pipeline and Celery tasks live in `apps/epg/sd_tasks.py`; lineup/poster API mixins in `apps/epg/sd_api.py`; shared protocol helpers remain in `sd_utils.py`. Progress WebSocket updates (`send_epg_update`) live in `apps/epg/utils.py` so XMLTV and SD tasks can import cleanly. `tasks.py` / `api_views.py` re-export or inherit so existing imports and Celery task names are unchanged.
+
+## [0.28.1] - 2026-07-20
+
+### Fixed
+
+- **Fresh AIO installs no longer crash during first-boot migrate when Redis is not up yet.** In AIO, `manage.py migrate` runs in the entrypoint before uWSGI starts Redis via `attach-daemon`. After CoreSettings group caching landed in 0.28.0, data migrations such as `m3u.0003` called live `CoreSettings.get_default_user_agent_id()` → Redis and failed with connection refused, leaving a partially migrated DB and a boot loop. Settings group cache reads/writes now fall back to Postgres on connectivity/timeout errors (with a throttled warning), skip cache fill on backend failure so a flapping Redis cannot re-poison entries after invalidate, and leave auth/protocol Redis errors loud. A regression test migrates a throwaway empty database with Redis unreachable. (Fixes #1459)
+
+## [0.28.0] - 2026-07-19
+
+### Added
+
+- **Catch-up enable/disable controls.** System Settings includes an **Enable Catchup** toggle (default on) that blocks timeshift and catch-up playback for everyone and clears XC `tv_archive` / `tv_archive_duration` advertising when off. Per-user **Enable Catchup** on the user Permissions tab does the same for that user only (admin-managed; not writable via `PATCH /me/`). Channel/stream catch-up indicators remain visible in the web UI.
+- **Native XZ decompression for EPG sources and uploaded M3U playlists.** `.xz`-compressed XMLTV and M3U files are now decompressed using Python's stdlib `lzma` module. EPG ingestion detects XZ via magic bytes, file extension (including compound names like `.xml.xz`), or MIME type; uploaded M3U `.xz` playlists stream line-by-line like `.gz`. The `/data/epgs` auto-import scanner now includes `.xz` files alongside `.xml`, `.gz`, and `.zip`. (Closes #1414) — Thanks [@MotWakorb](https://github.com/MotWakorb)
+- **XC catch-up (timeshift) support**. Adds a native `/timeshift/{user}/{pass}/{duration}/{timestamp}/{channel_id}.ts` endpoint that proxies replay sessions from an Xtream Codes provider to IPTV clients. Auth reuses the same `xc_password` custom-property the live `/live/.../{id}.ts` endpoint already uses. Catch-up sessions appear on the Stats page in dedicated connection cards (separate from live and VOD) and respect per-channel access rules. (Closes #133) — Thanks [@cedric-marcoux](https://github.com/cedric-marcoux)
+  - **Query-style catch-up compatibility.** Accepts `/streaming/timeshift.php` query-string catch-up requests in addition to the path-style endpoint. Path and query requests now use client-supplied duration hints when present, add a short provider-lag buffer, and fall back to EPG duration, then 120 minutes. Thanks [@dillardblom](https://github.com/dillardblom)
+  - **REST catch-up API for native apps.** `POST /api/catchup/sessions/` (JWT or API key) mints a server-side playback session and returns a tokenless `playback_url` at `/proxy/catchup/<channel_uuid>?session_id=...` for headerless video players. Sessions accept an optional programme `duration` in minutes, using the same buffered duration handling as XC clients. `POST /api/catchup/sessions/<session_id>/position/` lets native apps report local playhead / pause state for accurate admin stats without seeking the provider. `DELETE /api/catchup/sessions/<session_id>/` ends the session. OpenAPI docs cover handshake and idle TTL behaviour.
+  - **Catch-up admin APIs.** `GET /proxy/catchup/stats/` lists active catch-up viewers; `POST /proxy/catchup/programs/` returns batch EPG metadata for those sessions; `POST /proxy/catchup/stop_client/` stops a viewer from the admin UI.
+  - **Catch-up Stats UI.** Dedicated catch-up connection cards show channel logo, programme preview (watched/remaining timeline), playback position, bitrate, and a stop button. When playback continues past the original programme into the catch-up buffer, the card advances to the next EPG programme. Stats refresh in real time via WebSocket (`timeshift_stats`) with desktop notifications when catch-up sessions start or end.
+  - **Catch-up flags** (`tv_archive`, `tv_archive_duration`) denormalized at import time for zero-cost output queries; end-of-refresh SQL rollup updates channels linked to the refreshed account and self-heals stale flags on those channels only (e.g. after catch-up streams are removed or an account is deactivated).
+  - **Strictly-UTC API surface, automatic per-provider timezone.** `server_info.timezone` is always `UTC` and the XC EPG `start`/`end` strings are emitted in UTC; the proxy converts the requested instant to the serving provider's own reported timezone (`server_info.timezone` captured on account refresh) at request time. No timezone to configure.
+  - **Multi-provider failover.** Catch-up walks the channel's catch-up streams in order (like live playback): if one provider cannot serve the archive the next is tried, each attempt with its own account context (credentials, reported timezone, user-agent). Accounts that fail with an auth/ban-class status are not retried via their other streams. Attempts prefer streams whose `catchup_days` cover the requested programme age, then fall back to shorter archives in channel order.
+  - **Provider pool accounting.** Catch-up reserves a provider profile slot (`connection_pool`) before connecting upstream — same contract as live and VOD — and releases it when the session ends. When the default profile is at capacity it walks the account's alternate profiles with their own resolved credentials, and answers `503` when every profile is full.
+  - **Per-client session pool.** The first request without `session_id` and no fingerprint match receives a `301` redirect to the same URL with a stable `?session_id=` query parameter; that ID becomes the client identity for stats, stop keys, and pool coordination. Reconnects that omit `session_id` but match an existing pool entry (same user, IP, and user-agent) are served immediately without a redirect, matching IPTV client fast-forward behaviour. Each viewer gets their own Redis-backed pool entry even when watching the same programme; idle sessions can be reclaimed via fingerprint matching. Plain GET restarts stream from byte 0 with upstream `Content-Length` when known (provider-faithful). Real scrubs within a session stop the in-flight stream through the standard stop-key mechanism; parallel startup probes (full-file, open-ended, and EOF tail `Range` requests) are deferred with `503` instead of opening extra upstream connections. Parallel HTTP probes from the same `session_id` for the same programme do not count as extra streams toward the user limit; distinct sessions still each consume a slot.
+  - Verbose timeshift logging follows the standard logger DEBUG level.
+  - **EPG XMLTV `prev_days` auto-detection** from the provider's largest `tv_archive_duration` (capped at 30 days), overridable via per-user `epg_prev_days` or `?prev_days=` URL parameter.
+  - **Byte path streams directly via `iter_content` + generator yield** (same pattern as the VOD proxy), with an upfront MPEG-TS sync peek that strips any PHP-warning preamble before bytes reach strict demuxers. Throughput stays comfortably above the typical 5 Mbps FHD bitrate so clients don't buffer.
+  - **Catch-up indicators in Channels and Streams tables.** Channels and streams with catch-up enabled show a grey history icon beside the name (tooltip includes archive days when known). Expanded channel stream rows show a catch-up badge. Channel and stream API serializers expose `is_catchup` and `catchup_days` for the UI. The Channels and Streams table filter menus include **Only Catch-up** to narrow each list to catch-up entries.
+- **Combined connection stats API.** `GET /proxy/stats/` (admin) returns live, VOD, and catch-up connection stats in one JSON response (`live`, `vod`, `catchup`, `timestamp`). The Stats page polls this endpoint instead of separate live and VOD stats requests.
+- **Frontend unit tests extended to table components.** `ChannelsTable`, `StreamsTable`, `M3UsTable`, `EPGsTable`, `LogosTable`, `CustomTable`, and related header/editable subcomponents now have Vitest + Testing Library suites. Table business logic was extracted into `frontend/src/utils/tables/*` (with shared `M3uTableUtils` for M3U/EPG sort headers) and covered by dedicated util tests. `dateTimeUtils.formatDuration` gained a `human` precision mode for readable content lengths. — Thanks [@nick4810](https://github.com/nick4810)
+- **Frontend unit tests extended to plugin, backup, and settings components.** `AboutModal`, `PluginDetailPanel`, `BackupManager`, `AvailablePluginCard`, `ConnectionSecurityPanel`, and `UserLimitsForm` were refactored with business logic moved into `frontend/src/utils/components/*` and `PluginsUtils`; `pluginUtils` (version comparison, compatibility labels, install/downgrade detection) now lives under `utils/components/`. Vitest + Testing Library suites were added for those components plus `PluginWarnings`. — Thanks [@nick4810](https://github.com/nick4810)
+- **Frontend unit tests extended to forms, modals, Connect, and Plugin Browse.** `OutputProfile`, `ServerGroup`, `CreateChannelModal`, `ProfileModal`, `Connect`, `ConnectLogs`, `PluginBrowse`, and `useEpgPreview` now have Vitest + Testing Library suites. Repo-management UI was extracted from `PluginBrowse` into `ManageReposModal`; form/schema helpers moved into `OutputProfileUtils` and `ServerGroupUtils`, with plugin-repo settings helpers added to `PluginsUtils`. — Thanks [@nick4810](https://github.com/nick4810)
+
+### Changed
+
+- **Channel list API paginates when only `page_size` is provided.** `ChannelPagination` previously required an explicit `page` query parameter; sending `page_size` alone returned the full unpaginated queryset. Requests with `page_size` but no `page` now paginate normally (page 1). Omitting both `page` and `page_size` still returns the full queryset for legacy clients and plugins.
+- **VOD proxy now fails over across M3U accounts when the selected account is at capacity.** `stream_vod()` and `head_vod()` previously picked the highest-priority relation and returned HTTP 503 if that account's profile pool was full, without trying other accounts carrying the same title. The proxy now materialises active relations in a single query, walks them in priority order (preferred stream/account first), and streams from the first account with spare capacity—matching live-channel failover. (Closes #1385) — Thanks [@francescodg89-crypto](https://github.com/francescodg89-crypto)
+- **URL validation now accepts underscores in non-FQDN hostnames.** Stream, M3U server, and EPG source URLs with Docker-style host labels (e.g. `http://my_service/`, `http://dispatcharr_web:8000/`) were rejected because the flexible-URL fallback did not allow underscores in hostname characters. — Thanks [@recurst](https://github.com/recurst)
+
+### Performance
+
+- **CoreSettings JSON groups are cached in Redis.** `CoreSettings._get_group()` caches stream, system, proxy, DVR, EPG, user-limit, and network-access settings so hot paths (including `network_access_allowed` on every stream/XC/catchup request and catch-up enable checks) no longer hit Postgres on each call. Cache entries invalidate on `CoreSettings` save or delete; proxy workers also clear their short process-local proxy-settings copy when `proxy_settings` changes.
+- **M3U/XC stream refresh is faster on large accounts.** Steady-state refreshes split `bulk_update` into a lightweight touch pass (`last_seen` / `is_stale` only) for unchanged streams and a full column update only when provider metadata or catch-up fields actually change.
+- **M3U stream filters compile once per refresh.** Account filters are regex-compiled before batch workers start; accounts with no filters skip per-stream filter checks entirely.
+- **M3U refresh releases parse catalogs sooner.** Standard accounts stream-parse the on-disk M3U instead of loading the full file into RAM; `extinf_data` is dropped immediately after batch DB work, before stale cleanup and auto-sync.
+- **XC live refresh avoids redundant work during catalog filtering.** `collect_xc_streams` skips disabled categories before building entries and uses a shared URL prefix instead of formatting each stream URL separately. Auto-sync releases per-group logo/EPG caches after each group iteration.
+- **Celery workers return RSS after memory-intensive tasks.** `cleanup_memory()` accepts an optional `trim_heap` flag (glibc `malloc_trim`); Celery `task_postrun` enables it after `close_old_connections()` for M3U account/group refresh, EPG, VOD, and channel-matching tasks so worker memory drops back toward baseline instead of ratcheting across successive large jobs.
+
+### Security
+
+- **Authentication boundaries and local logo serving.**
+  - Logo and VOD logo `cache` endpoints no longer serve arbitrary filesystem paths: local URLs must resolve under `/data/logos` (blocks `/data/../…` traversal). Empty logo URLs return 404 instead of attempting a remote fetch.
+  - EPG source file upload API (`POST /api/epg/sources/upload/`) is admin-only and uses `safe_upload_path` so uploaded filenames cannot escape `/data/uploads/epgs`. The web UI does not expose this endpoint (EPG sources are added via URL, Schedules Direct, or dummy); the fix hardens the API-only path.
+  - M3U account passwords are omitted from API responses for non-admins; admins still receive them (the M3U edit form already blanks the password field on load).
+  - Channel bulk-regex rename, EPG name/logo/tvg-id apply, channel reorder, channel-group cleanup, recording stop/extend/comskip/metadata actions, and Connect integration APIs require admin. Guide-facing channel read helpers (`summary`, `ids`, etc.) remain available to standard users.
+  - System notifications: any authenticated user can still list and dismiss notifications visible to them; create/update/delete require admin (previously any authenticated user could create notifications).
+  - Django `auth.Group` CRUD (`/api/accounts/groups/`) and the permissions list endpoint require admin. Dispatcharr authorization uses `user_level`, not these groups; the React UI does not call these endpoints.
+  - Removed unused unauthenticated routes: `/proxy/hls/` (HLS proxy package retained for possible future use) and legacy `/output/stream/<uuid>/` (including the nginx location). Live playback continues via `/proxy/ts/stream/`.
+
+### Fixed
+
+- **Deleting or sync-removing a channel while it is playing no longer leaves a hung proxy session.** Manual deletes no longer force-stop playback (optional `stop_stream` on the API / "Also stop active channel if playing" in the UI). M3U auto-sync and account cleanup still stop proxy sessions before removing channel rows. If a stream is left playing after a delete, later Stats stop / disconnect still releases the M3U profile connection slot from Redis metadata even when the Channel row is gone. (Fixes #870)
+- **Cron builder quick presets with step intervals (e.g. every 6/12 hours) no longer apply the wrong expression.** Selecting `0 */6 * * *` or `0 */12 * * *` previously rebuilt through Simple-mode controls that could not express hour steps, so Apply saved `0 6 * * *` / `0 12 * * *` instead. Hourly frequency now includes an Interval dropdown (every hour, every 2/3/4/6/8/12 hours), and those presets load into it so editing keeps the step pattern. (Fixes #1320)
+- **Live proxy fMP4/profile output Redis keys no longer expire during long sessions.** `output:{fmt}:owner`, `state`, and fMP4 `init` were written once with a 3600s TTL and never refreshed, so sessions longer than an hour lost coordination keys even while the remux/transcode was still running (late joiners and cross-worker `ensure_output_format` could fail). Those TTLs are now extended about once per minute from the manager reader loop while alive; graceful stop still deletes the keys immediately.
+- **Ghost channel sessions stuck in `initializing` no longer block playback forever.** Failed live-proxy initialization previously wrote `state=initializing` to Redis _before_ acquiring the channel ownership lock. If init died in that window (exception, worker race), metadata was left behind with no owner lock, no URL, and no TTL. Later play requests treated the live worker heartbeat as proof the channel was healthy, attached to the dead session, and got `Error: Connection stalled` forever; failover never ran. The M3U profile connection slot from the failed init also leaked. Initialization now writes `initializing` only after ownership is held, tears down Redis/local leftovers immediately on failure, and gives temp/init metadata a TTL backstop. Play setup claims ownership (plus a same-worker in-progress flag) under a short gevent lock _before_ `generate_stream_url`, then releases that lock so followers are not blocked for the URL/init work.
+- **Live proxy no longer leaks geventpool DB connections across stream setup / teardown.** `stream_ts()` released its checkout only on the happy path before `StreamingHttpResponse`, so early JSON failures, exceptions, 404s, and aborted channel init left slots counted against `MAX_CONNS` until restart (XC/`player_api` hung while `/api/core/version/` stayed fast). Setup now always calls `close_old_connections()` in a `finally` (including re-raised `Http404`); `ProxyServer.initialize_channel`, `ChannelService.initialize_channel`, XC auth, `next_stream`, channel status, and the ffmpeg stderr reader do the same. Channel/stream display names are taken from the caller or Redis during `StreamManager` / TS / fMP4 generator construction so those paths no longer check out the pool just to resolve a name. (Fixes #1418)
+- **uWSGI/Daphne boot no longer leaves a permanent geventpool checkout on `core_coresettings`.** `AppConfig.ready` paths that sync the backup scheduler (cron timezone via `system_settings`), developer notifications, and plugin repo refresh now call `close_old_connections()` in `finally`, so a stuck idle `system_settings` query no longer burns one of the 8 pool slots from process start.
+- **Live channel Redis `state` no longer stays latched at `buffering` after a buffering-timeout failover.** When FFmpeg speed dipped below the buffering threshold and the timeout triggered a stream switch, the in-memory buffering flag was cleared without rewriting Redis, and the same stats sample could re-write `buffering`. After the new stream recovered, the speed-good path only cleared Redis when that flag was still set, so a healthy session could report `buffering` until restart or retune. A successful buffering-timeout switch now writes `active` and skips the fallthrough `buffering` write. (Fixes #1449)
+- **Plugin discovery no longer force-reloads on every connect event in multi-worker setups.** Reacting to a newer `.reload_token` (after install/update/reload) previously re-touched the token, so each uWSGI worker's next discovery re-staled every other worker and never converged. Streaming connect/disconnect events then re-imported every enabled plugin on the request path, leaking plugin background threads and degrading workers until restart. Stale-token reactions now reload locally without bumping the shared token; only an explicit `force_reload=True` (install/update/reload API) broadcasts. (Fixes #1452)
+- **Channels table "Copy URL" no longer includes the web player's output profile.** The kebab-menu action was reusing the in-app preview URL builder, so copied links could include `output_format=mpegts` and `output_profile=...` from web-player prefs. Copy now emits a plain `/proxy/ts/stream/{uuid}` URL suitable for external players; Watch still applies player prefs.
+- **Redis-backed VOD sessions no longer leave stale profile connection reservations after multi-worker range-request teardown.** Jellyfin/FFmpeg clients that issue concurrent byte-range requests for one VOD session could finish teardown while another worker held the session metadata lock (`vod_connection_lock:*`). `decrement_active_streams_and_check()` then failed with `DECR-AS-CHECK failed: could not acquire lock`, skipped the profile-slot release, and left `profile_connections:*` and the session hash occupied until restart or manual Redis cleanup. Per-session `active_streams` is now mutated with Redis Lua (independent of the metadata lock), metadata saves omit and never clobber that counter, idle cleanup deletes the session hash only when still idle, and late metadata writes cannot recreate a deleted session. (Fixes #1426)
+- **EPG programme times no longer shift when PostgreSQL's server default timezone is non-UTC.** After the psycopg3 / Django upgrade, geventpool sessions were no longer pinned to UTC: Django's connection timezone setup is skipped whenever `self.pool` is truthy, and the older `connection_created` `SET TIME ZONE 'UTC0'` receiver was a nested closure registered with a weak reference, so it did not reliably stay registered (in production with `DEBUG=False` it was garbage-collected and never ran; `DEBUG=True` could keep it alive via Django's inspect LRU cache). Sessions that lacked a live pin therefore inherited the server default; on deployments whose default is non-UTC (for example from `/etc/localtime` bind-mounts), psycopg3 decoded `timestamptz` values under that zone and XMLTV output labeled local wall-clock times as `+0000`. The pool backend now sets `TimeZone=UTC` in the libpq startup packet so every pooled connection starts in UTC (and `RESET TimeZone` returns to UTC), and the fragile signal is removed. Stored data was never corrupted, only reads were wrong. (Fixes #651) — Thanks [@nagelm](https://github.com/nagelm)
+- **Frontend date/time unit tests no longer fail outside UTC / en-US.** Three tests encoded the machine timezone or locale into their expectations (`dateTimeUtils.isSame`, `RecordingUtils.toDateString`, `SeriesModalUtils.getEpisodeAirdate`), so the suite failed on boxes east of UTC or non-US locales. Fixtures now use local calendar datetimes and locale-computed expectations so the suite passes in every environment. — Thanks [@nagelm](https://github.com/nagelm)
+- **API error toasts no longer dump raw HTML error pages.** Failed responses that return Django or nginx HTML (for example 500/502/504 when the backend is down) were interpolated into the toast body as markup. Errors are now formatted for display: JSON bodies prefer `detail` / `error` / field messages, HTML and empty bodies collapse to a short status line, and long plain-text bodies are truncated. (Fixes #1261) — Thanks [@nagelm](https://github.com/nagelm)
+- **Swagger/OpenAPI schema generation no longer fails under concurrent gevent requests.** Concurrent hits to `/api/schema/` (for example Swagger UI loading) could race on DRF's shared `AutoSchema` state and raise `AssertionError: Schema generation REQUIRES a view instance`, leaving Swagger empty. Cold builds could also hang the gevent uWSGI worker. Schema introspection now runs in a real OS thread, builds are single-flight per process, and the result is cached in Django's cache (Redis) so all workers share it.
+- **`/proxy/ts/change_stream` now persists `stream_id` and waits for the real switch outcome in multi-worker deployments.** When the request landed on a worker that didn't own the channel, the owning worker's `STREAM_SWITCH` pubsub handler performed the switch but wrote only `url`/`user_agent` back to the channel's Redis metadata, so `GET /proxy/ts/status` kept reporting the old `stream_id` indefinitely; the handler now persists the full switch metadata (`stream_id`, `m3u_profile`, stream name) via the same `_update_channel_metadata()` helper the direct owner path uses. `stream_name` from the initial `get_stream_info_for_switch()` lookup is now forwarded through the pubsub payload (and from `change_stream` / `next_stream` on the direct owner path) so the owner no longer re-queries the database when writing metadata. The endpoint also no longer returns an optimistic 200 on the non-owner path: the requesting worker waits (up to 15s) for the owner to confirm via the `switch_status` Redis key and answers 502 if the owner reports failure or 504 if no confirmation arrives (e.g. owner worker gone); `next_stream` gets the same treatment. Requesting a switch to the URL the channel is already playing is now treated as success (with a metadata refresh) instead of a silent no-op, and the `switch_status` key now expires (60s TTL) instead of persisting forever. (Fixes #1412)
+- **XC live streams, `/panel_api.php`, and `/xmltv.php` no longer crash when a visible channel has no channel number.** Since `channel_number` became nullable, auto-sync and compact numbering can leave a channel with `effective_channel_number=None` while it remains visible in output (`hidden_from_output=False`). The XC live-stream number map skipped those rows but still tried to emit them, causing `KeyError` on `get_live_streams` and a 500 on `/panel_api.php` (`xc_get_info`). Authenticated XMLTV export (`/xmltv.php`, profile EPG with a logged-in user) had the same gap and could fail chunk-cache rebuilds with `KeyError` on `channel_num_map[channel.id]`. Null-number channels are now deferred into the existing collision-free integer assignment pass (same second loop as fractional numbers) and receive the next available integer; `_xc_channel_entry` also falls back to `channel.id` if a row is still unmapped. HDHR lineup behaviour is unchanged (null-number channels remain omitted there).
+- **System events and Connect dispatch no longer close the DB connection mid-call outside worker contexts.** `log_system_event()` and `dispatch_event_system()` always called `close_old_connections()` in `finally` blocks, which broke Django `TestCase` transactions and could interrupt in-flight ORM work when Connect/plugin handlers ran synchronously. Closes are now limited to gevent uWSGI workers (and the Celery sync-dispatch path where gevent is patched but no hub runs). Celery workers still reset connections via existing `task_postrun` / `task_prerun` hooks on the standard PostgreSQL backend (no geventpool).
+- **Connect `trigger_event` no longer releases DB connections during plugin discovery.** Event dispatch calls `discover_plugins(use_cache=True)` to resolve plugin handlers; its unconditional `close_old_connections()` could tear down the caller's connection before `log_system_event()` or Schedules Direct refresh finished. Discovery from event dispatch now passes `release_connections=False`; boot-time discovery (`worker_process_init`, `post_migrate`, admin reload) still releases connections by default.
+- **EPG Celery tasks no longer reset the DB connection when invoked outside a worker.** `_release_task_db_connection()` is gated on `_is_celery_worker_context()` so synchronous test runs and in-process task calls do not close the test database connection; active Celery tasks still reset poisoned connections after transient ORM errors.
+- **Celery workers no longer use django-db-geventpool (fixes Postgres protocol errors under concurrent tasks).** Celery's default queue runs prefork (`--autoscale=6,1`), not gevent, but it was sharing the same `django-db-geventpool` backend as uWSGI. That pool is a process-wide singleton of warm connections; `fork()` (including autoscale spawning new children on demand) duplicated those sockets across processes and corrupted Postgres session state (`the last operation didn't produce records (command status: SET/BEGIN/ROLLBACK)`, `connection ... in transaction status INTRANS`, and matching server-side `there is already a transaction in progress` on one backend). Celery workers and beat now use Django's standard PostgreSQL backend (`CONN_MAX_AGE=0`, no warm pool); uWSGI keeps geventpool. Plugin discovery moved from `worker_ready` (arbiter) to `worker_process_init` (each child after `connections.close_all()`), so the prefork parent no longer opens DB handles that children would inherit. (Fixes #1404)
+- **EPG channel parsing progress no longer exceeds 100%.** During `parsing_channels`, progress used the pre-parse database channel count as the denominator while the numerator counted channels found in the XML. When the guide grew (or on sources where the file had more channels than the DB), the UI could show values well above 100% (e.g. ~300%). The estimate now bumps when the XML exceeds the DB baseline, progress is capped at 98% until final cleanup, and update frequency adapts to the known total (~20 ticks on steady-state refreshes; coarse every-100-channel updates for first import or when the file outgrows the estimate). A final in-loop update reports the true parsed count before completion.
+- **EPG refresh and per-channel parses no longer race.** Full-source refresh holds an `epg_source_file` lock through download, channel parse, and bulk programme swap; programme index builds acquire the same lock separately (after refresh releases it). Per-channel `parse_programs_for_tvg_id` tasks run concurrently for different tvg-ids (no file lock between them) but defer while a source refresh is in progress. Refresh waits until in-flight per-channel parses finish (Redis counter) before downloading. Channels matched mid-refresh are excluded from the bulk-parse snapshot but receive a follow-up per-channel parse when refresh finishes; orphan cleanup at swap time uses live channel assignments so mid-refresh matches are not wiped. Duplicate tasks for the same `epg_id` are deduped via `parse_epg_programs` lock with a log noting how many channels map to that EPG. Busy file/index deferrals retry for up to two hours (15s interval).
+- **Per-channel EPG parse no longer wipes guide data on failure.** `parse_programs_for_tvg_id` used to delete existing programmes before streaming the XML and flush new rows in batches as it parsed, so any failure partway through left a mapped channel with no guide data. It also re-fetched the `EPGData` row mid-task instead of reusing the instance loaded at task start. The task now reuses the initial row and replaces programmes in one transaction at the end (delete old, insert new), so a parse failure leaves the previous guide intact.
+- **Cold `/output/epg` rebuild no longer freezes the gevent uWSGI worker.** CPU-bound XMLTV generation in the chunk-cache leader loop ran without yielding to the gevent hub, so login, API, and HDHomeRun requests on the same worker hung for the full rebuild duration. `_stream_build` now calls `_cooperative_yield()` (`gevent.sleep(0)`) after each cached chunk so other greenlets can run between programme batches. (Fixes #1396)
+- **M3U refresh completion counts now reflect actual stream changes.** The "updated" count previously included every existing stream because the summary treated `last_seen` touch-only rows as updates; it now counts only streams whose provider metadata changed. "Total processed" includes unchanged streams separately. The completion message, WebSocket payload, and parsing notification now also report how many streams were **marked stale** (missing from this refresh, pending retention-gated deletion) versus **removed** (deleted this run).
+- **M3U group processing retries on poisoned DB connections.** `_db_query_with_retry` now treats psycopg desync errors (`DatabaseError`, e.g. `lost synchronization with server`) as transient; `process_groups` relationship loading uses it so a stale Celery worker connection resets once instead of failing the whole refresh.
+- **Auto Channel Sync's Find and Replace preview now matches the rename it performs.** The preview rendered the literal `$1` instead of substituting numbered capture groups, and compiled patterns with a stricter engine than the rename, so patterns like `^*` previewed a change the sync silently skipped. The live rename now uses the same `regex` engine as the preview (with a substitution timeout to bound catastrophic backtracking), both apply the `$1`→`\1` conversion through one shared helper, and a rename whose result exceeds the channel-name column length is truncated instead of aborting the whole sync. (Fixes #1332) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- **XC refresh no longer wipes auto-created channels on an empty provider fetch.** When `collect_xc_streams()` returned no live streams (transient upstream failure, fetch exception, or no enabled category matched), the refresh used to continue into stale-marking and auto-sync, which deleted the account's entire auto-created channel lineup. An empty XC result now aborts before those steps, sets the account to `ERROR`, and preserves the existing lineup—matching the standard M3U path's empty/failed-download guards. (Fixes #1377) — Thanks [@Jacob-Lasky](https://github.com/Jacob-Lasky)
+- **VOD refresh no longer wipes group selections on an empty category fetch.** When `get_vod_categories` or `get_series_categories` returned `[]` (transient provider outage, rate limiting, or VOD API hiccup during a scheduled refresh), `batch_create_categories` treated every existing relation as orphaned, deleted category links and often the `VODCategory` rows themselves, and the follow-up cleanup removed thousands of movie relations. On the next successful refresh, groups were recreated with `enabled=False` when `auto_enable_new_groups_vod` was off—matching reports of all VOD groups appearing unselected after routine M3U refreshes. An empty category list now aborts the VOD refresh before any relation deletion or content cleanup when the account already has category selections (new accounts with no existing relations are unchanged).
+- **`ChannelUtils.requeryChannels()` returns the API promise again** so bulk channel delete, drag reorder, and inline channel-number saves await the table refetch before clearing selection or continuing. — Thanks [@nick4810](https://github.com/nick4810)
+- **VOD connection card Content Duration badge** shows human-readable lengths (`45m`, `2h 0m`) again on the Stats page instead of bare minute integers. — Thanks [@nick4810](https://github.com/nick4810)
+- **Frontend unit tests pass on Node 25+ again.** Node 25+ exposes a native `localStorage` stub on `globalThis` that lacks Storage API methods (`getItem`, `clear`, etc.), which shadows jsdom's implementation and breaks tests that touch `localStorage` (e.g. `TypeError: localStorage.clear is not a function`). `setupTests.js` now installs an in-memory shim on `globalThis` and `window` when those methods are missing; the shim is skipped automatically once Node provides a working implementation. — Thanks [@nick4810](https://github.com/nick4810)
+- **Live proxy failover works with the default VLC stream profile.** When `cvlc` could not open an upstream URL it often stayed running in dummy mode without writing TS data, so the stream manager never left its read loop and never exhausted retries to switch streams. The locked VLC profile now passes `--play-and-exit` (migration 0027 for existing installs), and `VLCLogParser` treats `unable to open the mrl` as a fatal input error so the connection is closed and the normal retry → failover cycle can proceed. (Fixes #1415)
+- **Live proxy no longer fails over after isolated provider disconnects.** Connection retries on the same URL used to accumulate indefinitely, so three brief drops spread across many hours of otherwise stable playback could exhaust retries and switch streams even when each reconnect succeeded. Retries now reset after 30 minutes without a failure (`RETRY_WINDOW_SECONDS`), so periodic provider drops (for example every few hours) each get a full retry budget on the current stream. Failover still triggers when three failures occur within that window.
+- **Live proxy failover now walks backup streams in channel order.** After a stable session on a backup stream, `tried_stream_ids` is cleared so rotation continues from the current position (stream 2 → 3 → 4 → 1) instead of jumping back to stream 1. `get_alternate_streams()` returns alternates in that rotated order, matching the manual next-stream API.
+- **Live proxy preview no longer 500s when joining an active channel on a non-owner worker.** `stream_ts()` now pre-registers the client before `ensure_output_profile()` (the same watchdog protection owners already had), so the non-owner cleanup thread no longer tears down `client_manager` while output-profile transcode is still starting. Failed setup paths remove the client again and return 503 instead of an unhandled `KeyError`.
+- **Backend test suite reliability.** `dispatcharr.settings_test` creates `test_dispatcharr` as UTF-8 (`template0`) so EPG programme indexes and Unicode XMLTV data round-trip correctly. Tests were updated for DOCTYPE-based HTML entity resolution, EPG name-normalization expectations, migration 0037 unit invocation, Schedules Direct mocks, and other areas; full app test modules are discoverable when listed explicitly (bare `manage.py test` still only runs `core.tests` and top-level `tests/`).
+- **Backup Manager "Created" column now updates when date/time format preferences change.** The table column definitions were memoized with an empty dependency array while closing over `fullDateTimeFormat`, so changing display preferences did not refresh backup timestamps until the page was reloaded.
+
+## [0.27.2] - 2026-06-30
+
+### Added
+
+- **New proxy setting: Client Connect Grace Period (`channel_client_wait_period`, default 5s).** Adds a dedicated timeout for channels that have filled their buffer but still have no viewers (`waiting_for_clients`). Previously that window reused `channel_shutdown_delay` (default 0s), so those channels were torn down almost immediately.
+
+### Changed
+
+- **Proxy grace-period settings are now split into three distinct timeouts.** The cleanup watchdog already applied `channel_init_grace_period` while a channel was still connecting (buffer not ready) and reused `channel_shutdown_delay` once `connection_ready_time` was set, including for `waiting_for_clients` with zero viewers. With the default `channel_shutdown_delay` of 0s, a buffered channel waiting for its first viewer was stopped almost immediately; raising shutdown delay was the only workaround, but that also delayed teardown after real disconnects. Behaviour is now:
+  - **`channel_init_grace_period` (default 60s, max 300s):** how long the proxy may spend connecting and cycling failover streams before giving up on startup.
+  - **`channel_client_wait_period` (default 5s):** how long a ready channel with no viewers stays up waiting for the first client (the original grace-period use case).
+  - **`channel_shutdown_delay` (default 0s):** delay after the last client disconnects only; no longer applies when the buffer is ready but no viewer has connected yet.
+- **Migration 0026 bumps `channel_init_grace_period` to 60s when the stored value is below 60.** Existing installs on the old 5s default (or any custom value under 60) are raised automatically. Values already at 60s or higher are unchanged. If you previously raised `channel_shutdown_delay` to keep buffered channels alive with no viewers, set `channel_client_wait_period` instead (Settings → Proxy → Advanced).
+- **Proxy settings UI: less-used options moved under Advanced.** Settings → Proxy now shows the day-to-day tuning fields by default (`buffering_timeout`, `buffering_speed`, `channel_shutdown_delay`, `new_client_behind_seconds`). **Buffer Chunk TTL**, **Channel Initialization Timeout**, and **Client Connect Grace Period** are tucked under **Show Advanced Settings**.
+
+## [0.27.1] - 2026-06-25
+
+### Security
+
+- Updated `Django` 6.0.5 → 6.0.6, resolving the following CVEs:
+  - **CVE-2026-6873**: Signed cookie salt namespace collision in `HttpRequest.get_signed_cookie()`.
+  - **CVE-2026-7666**: Potential unencrypted email transmission via STARTTLS in the SMTP backend.
+  - **CVE-2026-8404**: Potential private data exposure via case-sensitive `Cache-Control` directives in `UpdateCacheMiddleware`.
+  - **CVE-2026-35193**: Potential private data exposure via missing `Vary: Authorization` in `UpdateCacheMiddleware`.
+  - **CVE-2026-48587**: Potential private data exposure via whitespace padding in the `Vary` header.
+- Updated frontend npm dependencies to resolve 4 audit vulnerabilities (1 low, 2 moderate, 1 high):
+  - Updated `vite` 7.3.2 → 7.3.5, resolving **moderate** NTLMv2 hash disclosure via UNC path handling on Windows ([GHSA-v6wh-96g9-6wx3](https://github.com/advisories/GHSA-v6wh-96g9-6wx3)) and **high** `server.fs.deny` bypass on Windows alternate paths ([GHSA-fx2h-pf6j-xcff](https://github.com/advisories/GHSA-fx2h-pf6j-xcff))
+  - Updated `js-yaml` 4.1.1 → 5.1.0, resolving **moderate** quadratic-complexity DoS in merge key handling via repeated aliases ([GHSA-h67p-54hq-rp68](https://github.com/advisories/GHSA-h67p-54hq-rp68))
+  - Updated `esbuild` 0.27.3 → 0.28.1, resolving **low** arbitrary file read when running the development server on Windows ([GHSA-g7r4-m6w7-qqqr](https://github.com/advisories/GHSA-g7r4-m6w7-qqqr))
+
+### Added
+
+- **Isolated backend test settings (`dispatcharr.settings_test`).** `python manage.py test` now switches to this module automatically (via `manage.py`). It creates an empty PostgreSQL `test_<dbname>` database (same engine as production), uses the standard Postgres backend instead of geventpool so `TestCase` transactions isolate correctly, and leaves Celery tasks queued (no eager `post_save` signal runs during tests). Set `TEST_USE_SQLITE=1` for an in-memory SQLite fallback when Postgres is unavailable.
+
+### Performance
+
+- **`get_vod_streams` and `get_series` XC API endpoints are faster and no longer exhaust Docker `/dev/shm`.** Large libraries (e.g. 125k movies) previously ran one wide `DISTINCT ON` query with parallel workers, which could fail with `could not resize shared memory segment … No space left on device` on the default 64MB container shm. Both endpoints now fetch display columns via `.values()` (no ORM model instantiation per row). Redundant `category` and `logo` joins were dropped in favor of FK ids; alphabetical sort runs in SQL. Typical full-library response time drops from ~23–28s to ~8–10s with stable shm usage.
+- **XMLTV EPG export is faster and no longer balloons worker memory.** `generate_epg()` was reworked end-to-end for large guides. (Fixes #1366)
+  - Streams incrementally: on a cache miss each chunk is pushed to a Redis list as it is yielded (no `''.join()` in the worker); repeat requests within 300s stream chunks back from Redis. `malloc_trim` runs after cold builds.
+  - Channel streams are prefetched once (only `id`/`name`) instead of one query per custom-dummy channel; dummy `EPGData` programme existence is bulk-checked in a single query.
+  - The primary channel id is escaped once per `epg_id` group instead of once per programme (~750k fewer `html.escape` calls on a large guide).
+  - The channel query no longer JOINs multi-MB `programme_index` blobs per channel (~13s saved on a ~2000-channel guide; indices live in `EPGSourceIndex`).
+  - Programme export uses `(epg_id, id)` keyset pagination with a per-source `start_time` sort; a matching composite index on `ProgramData` (created `CONCURRENTLY` on PostgreSQL) lets each chunk use an ordered index range scan instead of re-sorting every chunk.
+- **EPG grid endpoint releases its payload memory back to the OS.** `/api/epg/grid/` drops the redundant full-list copy when appending dummy programmes and runs `malloc_trim` once the response is sent, so worker RSS no longer ratchets up ~20MB per request.
+
+### Changed
+
+- **`programme_index` moved off `EPGSource` into a dedicated `EPGSourceIndex` table.** The multi-MB byte-offset index was repeatedly pulled into web and Celery workers by ordinary `EPGSource` queries and `select_related` JOINs (which ignore manager-level `defer()`). It now lives in a one-to-one `EPGSourceIndex` row, read only when explicitly accessed through the `EPGSource.programme_index` property, so no list, detail, or JOIN query can load it by accident. Migration `0026` copies existing indices across. No API or index-build behavior change.
+
+- **EPG generation extracted into `apps/output/epg.py`.** All XMLTV output logic (`generate_epg`, `generate_dummy_programs`, `generate_custom_dummy_programs`, `generate_dummy_epg`, and supporting helpers) moved from `apps/output/views.py` into a dedicated module. `views.py` retains the thin HTTP endpoint wrappers and auth checks; `epg.py` handles all content generation. No behavior change.
+
+- **Channel list with nested streams loads faster.** `GET /api/channels/channels/?include_streams=true` (Channels UI and single-channel fetch) now builds nested stream payloads from the prefetched `channelstream_set` instead of issuing one extra streams M2M query per channel.
+
+- Dependency updates:
+  - `Django` 6.0.5 → 6.0.6 (security patch; see Security section)
+  - `requests` 2.33.1 → 2.34.2
+  - `gevent` 26.4.0 → 26.5.0
+  - `torch` 2.11.0+cpu → 2.12.1+cpu
+  - `sentence-transformers` 5.4.1 → 5.6.0
+  - `lxml` 6.1.0 → 6.1.1
+
+### Fixed
+
+- **Channel Initialization Grace Period is honoured during live stream startup.** Preview and playback no longer abort after a hardcoded 10s while the channel is still connecting with an empty buffer; the TS generator init-wait stall check and upstream health monitor now use the configured `channel_init_grace_period` (same as the server cleanup watchdog) instead of `CONNECTION_TIMEOUT`. (Fixes #1380)
+- **Channels are marked `active` as soon as the buffer threshold is met and a client is streaming.** Once the initial buffer fills, state is set to `active` immediately when viewers are attached, or `waiting_for_clients` when the buffer is ready but no client is connected yet (e.g. proxy API warmup). The cleanup watchdog no longer waits an extra grace period before promoting to `active`. Proxy settings copy now describes `channel_init_grace_period` as an initialization buffer timeout.
+- **DVR recording playback auth is complete for native video, HLS segments, and redirects.** Completed recordings use `/file/` with native `<video src>`, which cannot send `Authorization` headers. Playback accepts `?token=` query-param JWT (matching VOD streams), and the floating video player appends the token when assigning native URLs. The explicit HLS URL route (`/api/channels/recordings/.../hls/...`) now registers the same authenticators as the ViewSet `@action` handlers—previously only header JWT applied on that path, so `?token=` failed for native HLS clients. When the request used `?token=`, rewritten playlist segment URLs and `/file/`↔`/hls/` redirects preserve the token; hls.js clients that authenticate via `Authorization` are unchanged. `QueryParamJWTAuthentication` reads `request.query_params` on DRF requests.
+- **In-progress DVR playback no longer jumps to the live edge.** The floating video player still opens in-progress recordings at the start of the seekable range, but hls.js was configured with `liveMaxLatencyDurationCount: 10`, which forced the playhead forward to "now" shortly after playback began. Live-edge sync is now disabled for recording HLS so users can watch, pause, and scrub from the beginning while the recording continues. (Fixes #1329)
+- **`refresh_single_m3u_account` no longer re-raises after setting account ERROR.** Matches `refresh_epg_data`: the account status and UI already reflect the failure; Celery no longer marks the task FAILED after the terminal error state is persisted.
+- **M3U refresh recovers DB connections and account status after failures.** Celery workers now call `close_old_connections()` before and after every task; `refresh_single_m3u_account` also resets its DB connection at task start and retries account loads once after a connection reset (avoids opaque `list index out of range` errors from poisoned worker connections). Accounts leave `fetching`/`parsing` for a terminal `error` or `success` state when refresh aborts. Error-path status updates use `QuerySet.update()` on a clean connection instead of `save()` on a connection that may already be INTRANS after `refresh_m3u_groups` or batch ORM failures. Failed group downloads now set `error` instead of returning silently. Refresh start replaces stale `last_message` text. `refresh_account_profiles` releases DB connections after each profile failure. (Fixes #1338)
+- **EPG refresh recovers DB connections and source status after failures.** `refresh_epg_data` now mirrors the M3U hardening: connection reset at task start/end, retried source load after a poisoned-worker connection reset, `QuerySet.update()` for error status on a clean connection, and a `finally` guard that moves sources stuck in `fetching`/`parsing` to `error`. Programme index builds are skipped when programme parsing fails. `parse_channels_only` now persists the error status when a missing file has no URL to refetch.
+- **M3U `custom_properties` JSON normalization.** Legacy rows and some API writes could store a JSON-encoded string instead of an object in `custom_properties`, causing refresh, profile sync, and auto-sync to fail with `'str' object has no attribute 'get'`. M3U account, profile, and group-relation models normalize on `save()`; group settings bulk writes and read/merge paths use shared helpers in `core.utils` without re-parsing dict values.
+- **`POST /api/epg/import/` no longer loads the full EPG source row.** The dummy-source guard uses a narrow existence query instead of `objects.get()`, keeping the import trigger lightweight. Request/response shape is unchanged for the UI, plugins, and external importers.
+- **XC live playback URL building now normalizes account server URLs.** On-demand live URLs (introduced for Server Group profile rotation in 0.27.0) rebuild `/live/{user}/{pass}/{stream_id}.ts` from current credentials instead of reusing the synced `stream.url`. That path now runs `normalize_server_url()` so pasted API URLs (e.g. `/player_api.php` with query params) are stripped while sub-paths like `/server1` are preserved. `get_transformed_credentials()` normalizes the base URL at the source; VOD movie and episode relations use the same helper instead of constructing a throwaway `XCClient` (which also avoided per-request HTTP session setup). (Fixes #1363)
+- **Live proxy now releases geventpool DB connections on more paths.** `stream_ts()` calls `close_old_connections()` before `StreamingHttpResponse` so clients waiting on channel init do not keep a pool slot while the generator polls Redis. `generate_stream_url()`, `get_stream_info_for_switch()`, `get_alternate_streams()`, and `get_connections_left()` release in `finally` blocks after ORM work on stream-manager failover paths that run outside Django's request cycle. TS client disconnect cleanup matches fMP4, and `ChannelService` metadata helpers release after their ORM lookups.
+- **OpenAPI schema paths for nested M3U profiles and filters no longer contain escaped slashes.** Router regex prefixes used unnecessary `\/`, which drf-spectacular serialized literally into the schema and broke client generators (e.g. oapi-codegen). Runtime URL matching is unchanged. (Fixes #1384)
+- **Auto-sync range conflict warning no longer flags a group's own channels when using a channel-group override.** The M3U group settings "Range conflict" check compared occupant channel groups against the source group being configured. Auto-sync with `group_override` creates channels in the override target group, so those channels were misclassified as conflicts. The frontend now resolves the effective target group (override target when set, otherwise the source group) for classification. Genuine conflicts—manual channels, other accounts, different groups, or user-pinned numbers—still surface. (Fixes #1331) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+
+## [0.27.0] - 2026-06-16
+
+### Added
+
+- **Manual Server Groups for shared M3U connection limits.** The existing `ServerGroup` model and account FK are now wired into live and VOD playback. Accounts assigned to the same group share a credential-scoped Redis counter when their provider logins match (hashed fingerprint); unrelated logins in the same group keep separate counters. Enforcement uses each profile's `max_streams` - not a group-wide cap - and profiles with `max_streams=0` skip credential pooling for that profile while still rotating on their own per-profile counter. New `apps/m3u/connection_pool.py` centralizes reserve/release, profile rotation, and credential moves on profile switch. (Closes #1137) — Thanks [@Goldenfreddy0703](https://github.com/Goldenfreddy0703)
+  - **Server Groups manager UI** on the M3U Accounts page: create, rename, and delete groups with account counts and delete confirmation. Groups load on login via a new Zustand store and REST helpers (`/api/m3u/server-groups/`).
+  - **M3U account form** adds a Server Group picker (including inline “add group”), reorganized into three columns (source/auth, connection limits, sync/content), and a Manage server groups shortcut.
+  - **VOD profile selection** uses `pool_has_capacity_for_profile()` so grouped accounts respect shared credential limits before a profile is chosen (non-grouped accounts behave as before).
+  - **Live profile switches** move the shared credential counter when the new profile uses a different provider login; same-login switches leave the credential counter unchanged.
+  - **Credential release keys** stored at reserve time allow counters to be released even if the M3U profile row is deleted afterward.
+- **PostgreSQL `application_name` tagging by process role.** Pool connections now set `application_name` at connect time (e.g. `Dispatcharr-uwsgi-{pid}`, `Dispatcharr-celery-worker-{pid}`, `Dispatcharr-celery-dvr-{pid}`) so `pg_stat_activity` shows which Dispatcharr process owns each backend instead of a generic client label.
+
+### Changed
+
+- **Plugin repo manifests support split download and metadata base URLs.** `download_base_url` and `metadata_base_url` are optional alternatives to `root_url` in the plugin repository manifest, so repo authors can serve metadata (manifests, icons) and release zips from different origins without absolute URLs everywhere. Manifest and icon URLs resolve via `metadata_base_url` then `root_url`; latest/download URLs resolve via `download_base_url` then `root_url`. When `metadata_base_url` is set and a plugin entry has `manifest_url` but no `icon_url`, the icon defaults to `logo.png` in the same directory as the per-plugin manifest. Manifests using only `root_url` behave identically to before. — Thanks [@sethwv](https://github.com/sethwv)
+- **Live and VOD connection slot logic now routes through `connection_pool`.** `Channel.get_stream()`, direct `Stream.get_stream()`, VOD profile selection, and the multi-worker VOD connection manager all call `reserve_profile_slot()` / `release_profile_slot()` instead of inline Redis INCR/DECR. VOD profile selection also checks `pool_has_capacity_for_profile()` before choosing a profile.
+- **Live XC upstream URLs use current credentials.** `_resolve_live_stream_url()` builds `/live/{user}/{pass}/{stream_id}.ts` from transformed account credentials and the stream's provider `stream_id`, so playback stays aligned with the active login after credential or profile changes instead of reusing a stale `stream.url` from sync.
+- **Channel stream switches check pooled capacity.** `get_stream_info_for_switch()` uses `profile_available_for_channel_switch()` when targeting a specific stream, and releases a reserved slot if URL assembly fails after `get_stream()` allocated one.
+- **Live proxy init reads Redis assignment once.** After `generate_stream_url()` reserves a slot, the stream handler reads `channel_stream` / `stream_profile` from Redis instead of calling `get_stream()` again, avoiding double INCR under concurrent release.
+- **Centralized Dispatcharr User-Agent construction in `core.utils`.** Outbound HTTP calls (Schedules Direct API, update checks, logo/VOD fallbacks, DVR recording clients) now use `dispatcharr_user_agent()`, `dispatcharr_dvr_user_agent()`, and `dispatcharr_http_headers()` instead of ad-hoc `Dispatcharr/{version}` strings and stale `Dispatcharr/1.0` fallbacks.
+- **EPG auto-match overhaul** — matching logic moved to `apps/channels/epg_matching.py`; Celery tasks in `tasks.py` are thin wrappers.
+  - Single-channel auto-match is now asynchronous: the API returns `202 Accepted` and pushes the result over WebSocket (`single_channel_epg_match`), so large EPG libraries no longer hit the previous 30-second HTTP timeout.
+  - Progress, bulk completion, and single-channel results use `send_websocket_update` instead of `async_to_sync(channel_layer.group_send)`, so notifications work reliably under gevent-patched uWSGI and Celery workers.
+  - Single-channel and selected-channel auto-match always run, even when the channel already has EPG assigned; match-all (no channel IDs) still only processes channels without EPG.
+  - Rematching to the same EPG no longer re-saves the channel or queues program-parse tasks; only assignments that actually change are written and refreshed.
+- **Easier EPG search when editing a channel.** The filter in the EPG picker now works more like a normal search box. You can type several words at once (e.g. `sky uk`) and it finds channels where every word appears somewhere in the name or TVG-ID, the order doesn't matter, and a word in the name can pair with one in the ID. Accents are ignored too, so `decale` matches `Décalé` and the other way around. — Thanks [@FiveBoroughs](https://github.com/FiveBoroughs)
+
+### Performance
+
+- **XC live refresh releases bulk catalog data sooner during batch processing.** After filtering the single `get_all_live_streams` response, the full provider catalog list is dropped before batch DB work. `process_m3u_batch_direct` (the path XC refreshes use) now runs `gc.collect()` after each batch and clears batch slice references as thread futures complete. Large structures are still `del`'d in the refresh `finally` block before Celery's `task_postrun` runs `cleanup_memory()`.
+- **VOD movie/series batch matching no longer scans the full no-ID catalog.** `process_movie_batch` and `process_series_batch` previously loaded every `Movie`/`Series` row without TMDB or IMDB IDs on each 1000-item chunk to resolve name+year duplicates. Lookup is now scoped to the names in the current batch via `lookup_by_name_year()`, which reduces memory and DB time per chunk. `refresh_vod_content` and `batch_refresh_series_episodes` are registered for Celery post-task memory cleanup (one GC pass at task end, not per chunk).
+- **EPG programme parse now streams through PostgreSQL staging instead of holding the full catalogue in Python.** `parse_programs_for_source` writes parsed rows into a session-scoped temp table in batches (`_EPG_PARSE_BATCH_SIZE=2500`), then atomically swaps them into `ProgramData` with batched `DELETE ... RETURNING` + `INSERT` (`_EPG_SWAP_BATCH_SIZE=5000`) so Postgres never materializes the entire guide in one statement. Peak Celery memory during large XMLTV refreshes drops sharply compared with building a monolithic in-memory list before bulk insert. The byte-offset programme index build is deferred until after the swap completes so index construction no longer competes with parse for memory and I/O. `refresh_epg_data` closes its DB connection in `finally`, and `build_programme_index_task` is registered as a memory-intensive Celery task. SQLite/dev installs keep an in-memory fallback path.
+- **Pooled PostgreSQL connections now rotate on a bounded lifetime.** psycopg3 client-side cache grows on handles kept open indefinitely by `django-db-geventpool`; recycling uWSGI workers would interrupt live streams. A thin custom backend (`dispatcharr.db.backends.postgresql_psycopg3`) closes and replaces pool connections after `DATABASE_POOL_CONN_MAX_LIFETIME` seconds (default 600, env-overridable; set `0` to disable) on checkout and return while preserving warm-pool reuse within the window. (Fixes #1343)
+- **Schedules Direct refresh only fetches guide data for mapped channels.** Schedule MD5 checks and schedule downloads now target mapped lineup stations instead of the entire lineup, and schedule MD5 cache for unmapped stations is pruned each refresh. Unmapped lineup entries no longer trigger wasted schedule API calls when their MD5 changes.
+- **EPG auto-match memory and throughput improvements.**
+  - Single-channel matching streams active EPG rows and keeps only the best match plus the top 20 candidates in memory; ML validates at most 21 names per channel instead of embedding the full catalog.
+  - Strong fuzzy matches (≥75% single channel, ≥80% bulk) skip ML entirely, avoiding a ~500MB PyTorch load when the fuzzy result is already reliable.
+  - Bulk matching uses a single fuzzy pass per channel instead of scanning the full catalog twice for best match and top candidates.
+  - Bulk exact `tvg_id` / Gracenote matching uses an in-memory index built alongside the EPG catalog (`build_epg_matching_catalog()`), giving O(1) lookups with no extra database queries.
+  - Bulk match apply uses batched queries (two fetches plus `bulk_update`) instead of one `EPGData.objects.get()` per matched channel.
+  - EPG normalization settings are cached once per matching run, avoiding repeated `CoreSettings` reads when normalizing thousands of names.
+
+### Fixed
+
+- **Live proxy channels could remain running with no clients after disconnect.** `stop_channel` called `log_system_event('channel_stop')` synchronously before local cleanup and Redis key deletion; Connect integrations or DB event writes on that path could block teardown indefinitely while the cleanup thread kept refreshing metadata TTL for a stale `stream_buffers` entry. Teardown now signals shutdown (`buffer.stopping`), runs model `release_stream()` and Redis key deletion, releases ownership, stops ffmpeg/output managers and local buffers, and only then logs the stop event asynchronously. Metadata TTL refresh skips channels mid-shutdown and non-owned channels; a stuck-stop watchdog forces cleanup if `stop_channel` does not return within ~10s (or 2× `channel_shutdown_delay`, whichever is greater). Stream buffers ignore late `add_chunk()` writes once shutdown begins (`buffer.stopping` set at teardown start).
+- **Client reconnect during channel teardown could wedge the channel across uWSGI workers.** The disconnect path called `proxy_server.stop_channel()` directly, so other workers were not notified and reconnecting clients could attach while ownership was released on the owner worker. The cleanup thread then re-acquired expired ownership and looped on orphaned clients while the upstream connection stayed open. All lifecycle stops now go through coordinated Redis teardown (`channel_stopping` flag, metadata `stopping` state, and `CHANNEL_STOP` pubsub). New stream requests are rejected with `503 Retry-After` only during active teardown (not during the post-disconnect shutdown delay grace period); `initialize_channel()` and ownership re-acquisition refuse to proceed in those states; non-owner workers clean local resources only on pubsub; and orphaned-client sweeps force cleanup when teardown is already active. (Fixes #1342)
+- **Orphaned upstream threads kept writing Redis after teardown.** Partial cleanup could remove a channel from `stream_managers` while the `stream-{uuid}` OS thread kept running, so orphan metadata sweeps only deleted Redis keys and chunks/metadata were immediately recreated (bare `total_bytes` hash with TTL -1). Stream managers now stop upstream when ownership is lost, orphan cleanup stops local ffmpeg/stream threads even when registry entries are gone (`_live_stream_managers` tracks managers until the thread exits), and forced recovery stops processes before Redis deletion instead of dropping dict entries without calling `stop()`.
+- **Rapid channel switching could leave bare `buffer:index` keys in Redis.** `buffer.stop()` flushed a final partial chunk via `INCR` during teardown, creating a persistent index key (TTL -1) after chunk keys expired; under load overlapping disconnect and cleanup-thread stops could race on `_stop_local_stream_activity`, blocking on ffmpeg stderr join before `_clean_redis_keys` ever ran. Teardown no longer writes to Redis from `buffer.stop()`, disconnect uses coordinated stop only (no duplicate upstream stop), model `release_stream()` runs before Redis keys are scanned/deleted (so `profile_connections` counters are not left stuck), ownership is released after Redis cleanup but before the blocking local ffmpeg stop, and a `finally` block guarantees Redis cleanup if local teardown raises.
+- **Live proxy could leak geventpool DB checkouts outside HTTP requests.** With `django-db-geventpool`, `connection.close()` returns handles to the per-worker pool (`MAX_CONNS=8`); without it, greenlets and OS threads keep connections checked out until the pool blocks on `pool.get()`. Proxy paths that touch the ORM outside Django's request cycle now call `close_old_connections()` after work completes: `_clean_redis_keys()`, profile lookup in `_establish_transcode_connection()` before spawning ffmpeg, and fMP4 client disconnect cleanup when releasing streams (TS disconnect relies on `log_system_event()`). (Fixes #1345)
+- **System events could block callers on Connect and plugin handlers.** `log_system_event()` ran Connect subscriptions and plugin `"events"` hooks synchronously after the DB write, so slow integrations could stall live-proxy and streaming paths even when inserting the event row was fast. Connect/plugin dispatch now runs on a separate gevent when the hub is available (synchronously in Celery workers without a hub). `log_system_event()` and `dispatch_event_system()` also call `close_old_connections()` in `finally` blocks so integration work does not leave pool slots checked out on the caller or dispatch greenlet.
+- **Plugins could leak geventpool DB checkouts after UI or Connect event runs.** Third-party plugins run inline on uWSGI greenlets (manual actions and Connect `"events"` hooks) with no guaranteed connection cleanup at the plugin boundary. `PluginManager.run_action()` and `stop_plugin()` now call `close_old_connections()` in a `finally` block so each action returns its pool slot whether the plugin succeeds or raises.
+- **Connect events repeatedly queried the full plugin catalog during streaming.** `trigger_event()` called `list_plugins()` on every `client_connect` / `client_disconnect`, loading all `PluginConfig` rows and sometimes hitting plugin-repo work even when no plugin subscribed to the event. Dispatch now walks the in-memory registry via `iter_actions_for_event()`, returns immediately when no handlers exist, and runs a single batched `enabled` lookup for matching plugins only. Failed plugin actions are logged per handler instead of aborting the rest.
+- **Plugin discovery left idle Postgres backends after worker boot.** `discover_plugins()` runs outside Django's request cycle during uWSGI and Celery startup; it now calls `close_old_connections()` in a `finally` block so bootstrap `PluginConfig` queries return their pool slot instead of appearing as long-lived idle connections in `pg_stat_activity`.
+- **VOD proxy could leak geventpool DB checkouts during playback and stats updates.** `stream_vod()` ran ORM lookups for content and M3U profiles, then returned a long-lived `StreamingHttpResponse` without releasing the checkout, so each movie/episode stream could hold a pool slot for its full duration. Background VOD stats refresh (`build_vod_stats_data()`, triggered on start/stop and by the admin stats API) also queried movie, episode, and profile rows from daemon threads with no cleanup. `stream_vod()` now calls `close_old_connections()` before handing off to the streaming generator, and `build_vod_stats_data()` releases its checkout in a `finally` block.
+- **Channel shutdown delay did not reset after a reconnect within the grace period.** `handle_client_disconnect()` used a fixed `gevent.sleep(shutdown_delay)` from the first last-client disconnect. If a client reconnected and disconnected again during the delay, an earlier disconnect handler could still stop the channel on the original timer instead of waiting the full delay from the latest disconnect. Shutdown now polls Redis (`last_client_disconnect` timestamp and client count) so concurrent disconnect handlers and multi-worker reconnects always honour the latest disconnect time.
+- **Zombie ffmpeg could survive owner-lock expiry and orphan Redis sweeps.** When the 30s owner lock lapsed under single-worker load, disconnect handling treated the worker as non-owner so coordinated stop never ran, while ffmpeg kept writing and the orphan sweeper only deleted Redis keys (recreating them immediately). Disconnect now re-acquires ownership when local upstream is still active, stops locally when the last client leaves without a lock, orphan cleanup stops local ffmpeg before Redis deletion via `_has_local_upstream_activity`, re-init stops lingering upstream before starting a duplicate thread, and `is_channel_teardown_active` includes channels mid-`stop_channel` on this worker so rapid reconnect gets 503 during teardown.
+- **Stale `channel_stream` Redis keys after a channel stopped could skip connection accounting on retune.** On `dev`, `get_stream()` reused any existing `channel_stream` / `stream_profile` assignment without reserving a new slot. If those keys were left behind after a stop, the next tune-in could reach the provider without incrementing Redis counters. `get_stream()` now releases stale assignments when proxy metadata shows the channel is inactive, then reserves fresh slots.
+- **EPG auto-match reliability fixes.**
+  - Memory could spike to multiple GB on large EPG sources when building a full in-memory catalog before fuzzy matching; single-channel matching now streams rows and bounds ML work to a small candidate set.
+  - Wrong channel assignments from global ML similarity; ML validation now checks the fuzzy best match (or top fuzzy candidates as a last resort) instead of scoring the entire catalog.
+  - Channel form auto-match spinner could stick after errors or early task exits; all single-channel outcomes now push a WebSocket result, and the UI clears loading state after a 3-minute timeout.
+  - Bulk auto-match completion no longer calls `batch-set-epg` from the WebSocket handler, which had been re-applying every match and queueing redundant `parse_programs_for_tvg_id` tasks even when assignments were unchanged.
+- **Schedules Direct lineup search country dropdown.** The country list was fetched directly from the SD API in the browser, which failed due to CORS and silently fell back to a 14-country hardcoded list. Countries are now included in the `GET sd-lineups` response (server-side fetch with proper User-Agent) so the full SD country list populates correctly. — Thanks [@sethwv](https://github.com/sethwv)
+- **Schedules Direct program poster proxy omitted User-Agent on image requests.** The poster endpoint authenticated with SD correctly but fetched images with only the `token` header, which violates SD's API requirements (error 1003). Image requests now include the standard `Dispatcharr/{version}` User-Agent via `dispatcharr_http_headers()`.
+- **Schedules Direct guide data missing after mapping a channel.** Lineup refreshes cached schedule MD5s for all stations, but `ProgramData` was only written for mapped channels. Mapping a channel later could leave MD5s looking unchanged so schedules were skipped and the channel had no guide until dates rolled outside the cached window. Refreshes now backfill fetch-window dates that lack `ProgramData` (including newly mapped stations with stale cache), fetch program metadata when no local `ProgramData` exists for a `programID`, and clean up orphaned `ProgramData` on unmapped `EPGData` entries. — Thanks [@sethwv](https://github.com/sethwv)
+- **Schedules Direct guide fetch on channel map.** Mapping a channel (or bulk-assigning EPG) now triggers a targeted guide fetch for that `EPGData` entry—mirroring XMLTV's `parse_programs_for_tvg_id` flow—without waiting for the next full source refresh. Skips the fetch when `ProgramData` already exists so additional channels sharing the same `tvg-id` do not trigger redundant API calls. Bulk assignment of three or more SD stations without guide data on the same source queues one batched mapped-station fetch instead of separate per-station API sessions. Concurrent batch and single-EPG fetches coordinate via source-level locks with deferred retries so mappings are not dropped and overlapping SD API sessions are avoided when possible.
+- **Auto-sync numbering modes now read only the fields each mode's UI exposes.** After the auto-sync overhaul, switching between Provider, Next Available, and Fixed modes left stale `auto_sync_channel_start` / `auto_sync_channel_end` values in the database while each mode's UI only edits a subset of those fields. Sync treated the hidden values as authoritative in every mode, which discarded valid provider numbers (floored at an auto-computed start), capped Next Available at a stale End, and ran range-enforcement deletes against provider- and next-available-numbered channels. Provider mode now honors `stream_chno` verbatim when free (Start/End bound only the fallback for numberless streams); Next Available ignores End; overflow-delete runs in Fixed mode only. Duplicate or already-taken provider numbers fall back to a free slot instead of being dropped or overwriting an existing channel. Provider mode's Start # field now drops End when it would invert the fallback range (matching Fixed mode). (Closes #1273) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+
+## [0.26.0] - 2026-06-07
+
+### Added
+
+- **EPG logo auto-apply for XMLTV and Schedules Direct.** Channel logos are applied from `EPGData.icon_url` through a shared helper used by bulk "Set Logos from EPG", optional per-source auto-apply on refresh (`auto_apply_epg_logos` in source `custom_properties`), and a new `epg_source_id` option on the set-logos-from-epg API. Large libraries are processed in 500-channel chunks without loading every mapped row into memory.
+- **Schedules Direct EPG integration.** Dispatcharr now supports Schedules Direct as a first-class EPG source type alongside XMLTV and dummy EPG, with credential auth, lineup management, and guide refresh through the existing EPG pipeline and WebSocket progress. (Closes #1246) — Thanks [@Shokkstokk](https://github.com/Shokkstokk)
+  - Lineup manager in EPG source settings: search by postal code, add/remove up to four active lineups, with SD's six-adds-per-24-hours limit and midnight-UTC reset surfaced in the UI.
+  - MD5 delta refresh skips unchanged schedule and program downloads; a two-hour minimum interval between full refreshes is enforced (bypassable via force refresh).
+  - Station logos in dark, light, gray, or white variants (`logo_style`), stored in `EPGData.icon_url` alongside XMLTV channel icons.
+  - Optional program poster fetch (off by default): configurable style preference (SD Recommended via Gracenote's `primary` flag, or portrait/landscape banner/iconic variants with fallbacks), served through a backend proxy cached by nginx on first view.
+  - XMLTV-compatible cast output (`role` for character names, `guest` for guest stars).
+  - Lightweight stations-only fetch on source creation so EPG entries exist for auto-matching before the first full schedule pull.
+- **Live EPG program preview in the channel create/edit modal.** When selecting an EPG channel in the channel form, a "Current Program" card appears showing the currently-airing program title, description, and a progress bar. The backend builds a byte-offset index over the raw XMLTV file after each EPG refresh so lookups seek directly to the relevant file positions rather than parsing the full file - returning results in 1-10ms regardless of source size. If the index has not yet been built for a source, the API dispatches an async background build and the frontend retries up to 20 times over a 3-minute window. The `ProgramPreview` component was extracted into a shared component reused by the Stats page. The `programme_index` field on `EPGSource` is excluded from all API list responses to avoid returning multi-MB blobs. — Thanks [@FiveBoroughs](https://github.com/FiveBoroughs)
+- **Public IP display in the sidebar is now blurred by default and reveals on click.** Prevents accidental exposure in screenshots and screen shares. A new toggle in Settings > System Settings lets users disable IP and geolocation fetching entirely. A `DISPATCHARR_ENABLE_IP_LOOKUP` environment variable provides a container-level override; when set to `false` the toggle is hidden from the UI and cannot be changed. (Closes #1302) — Thanks [@sethwv](https://github.com/sethwv)
+- **Configurable per-page count and sticky pagination footer in Plugin Browse.** The pagination controls now live in a fixed footer bar at the bottom of the page. A page-size selector (9 / 18 / 27 / 36) sits alongside the pagination widget and an item range readout (`X to Y of Z`). The selected page size is persisted in `localStorage` so it survives page navigations. — Thanks [@sethwv](https://github.com/sethwv)
+- **VOD basic sync now stores additional metadata from the provider's stream list.** When a provider includes `director`, `cast`, `release_date`, or `trailer`/`youtube_trailer` in its `get_vod_streams` response, Dispatcharr now captures and stores those fields in `custom_properties` during the initial sync pass. Previously, this data was discarded and only populated if an advanced per-movie refresh was triggered. - Thanks [@nemesbak](https://github.com/nemesbak)
+
+### Changed
+
+- **`send_websocket_update` now detects Celery worker context when gevent is monkey-patched.** EPG refresh progress (including Schedules Direct) uses the shared `send_epg_update` helper instead of a duplicate synchronous Redis sender. In Celery prefork workers that inherit gevent patching, WebSocket messages are delivered synchronously via the existing `_gevent_ws_send` Redis path; uWSGI continues to use `gevent.spawn` as before.
+- **Schedules Direct EPG delete confirmation shows username only.** The delete dialog no longer surfaces password or API key fields for credential-based SD sources.
+- **Channel edit form reorganized into three semantic columns.** Fields are now grouped as Identity (name, number, group, logo), Guide Data (TVG-ID, Gracenote StationId, EPG picker, current program preview), and Behavior/Access (stream profile, user level, mature content, hidden). The EPG section having its own column gives the `ProgramPreview` card enough width to truncate long titles correctly rather than expanding the column.
+- **IP lookup result delivered via WebSocket push.** When the background lookup completes, an `ip_lookup_complete` event is pushed to all connected clients so the sidebar IP field populates without polling. A `Skeleton` placeholder is shown while the lookup is in progress.
+- **`get_host_and_port` and `build_absolute_uri_with_port` moved from `apps/output/views.py` to `core/utils.py`.** Both helpers have no dependencies on anything in `apps/output` and are now used in `apps/channels/serializers.py` as well. Moving them to `core/utils` eliminates the need for a local import inside `LogoSerializer` and makes them available to the rest of the codebase without circular-import risk. `LogoSerializer.get_cache_url()` was also updated to use `build_absolute_uri_with_port` instead of `request.build_absolute_uri()`, so logo cache URLs now correctly include non-standard ports (fixing port-stripping for logo URLs behind reverse proxies, matching the existing fix applied to M3U and EPG URLs).
+- **nginx logo/poster proxy cache moved to `/data/logo_cache`.** `proxy_cache_path` now uses the persistent data volume instead of `/app/logo_cache`, and the init script ensures the directory exists with correct ownership on container start.
+- **`debian_install.sh` switched from Gunicorn to uWSGI with gevent workers.** The Debian/LXC bare-metal installer now deploys Dispatcharr under the same uWSGI + gevent stack used by the Docker image, eliminating a class of compatibility differences between the two deployment paths. The installer writes a `uwsgi-debian.ini` next to the app and manages uWSGI via a systemd service. The nginx site config now uses `uwsgi_pass` + `include uwsgi_params` instead of `proxy_pass`, which correctly populates `SERVER_PORT` in the WSGI environ so M3U playlist URLs include the configured port number (fixing the port-stripping bug from #1267 for bare-metal installs). Python 3.13 is now provisioned through uv's managed runtime so the install works on Debian 12 and Ubuntu 24.04 LTS regardless of the system Python version.
+- **`get_vod_streams` XC API response was missing metadata fields available from basic sync.** When a provider includes `director`, `cast`, `release_date`, `plot`, `genre`, or `year` in its `get_vod_streams` response, Dispatcharr stores those fields during the basic sync pass but was not including them in its own `get_vod_streams` XC output. The endpoint now outputs all six fields. The `trailer` key in the response also mapped to the wrong internal key (`trailer` instead of `youtube_trailer`) following the storage key rename, so the trailer field was always empty until an advanced refresh ran. Both issues are corrected. Users with existing libraries should trigger a VOD provider refresh to populate the missing fields. (Fixes #1228)
+- **Docker base image now uses a multi-stage build.** The builder stage installs compilers and dev headers (`gcc`, `g++`, `gfortran`, `build-essential`, `libopenblas-dev`, `libpcre3-dev`, `python3.13-dev`, `ninja-build`) to create the virtual environment and compile the legacy NumPy wheel (cpu-baseline=none for old hardware). The final runtime image starts from the same ffmpeg base, copies only the prebuilt venv and wheel from the builder, and installs only the runtime libraries needed at runtime - eliminating compiler binaries from production containers and reducing final image size. — Thanks [@kensac](https://github.com/kensac)
+- **`libpq-dev` removed from both build and runtime stages.** The project uses `psycopg[binary]` (psycopg3), which bundles its own statically linked copy of libpq inside the wheel. No system libpq headers or shared library are needed at build or runtime.
+- **Database driver upgraded from `psycopg2` to `psycopg3` (`psycopg[binary]`).** psycopg3 rewrote its network I/O layer in Python, so `gevent`'s `monkey.patch_all()` makes it gevent-cooperative without any additional patching. The `psycogreen` dependency and its driver-patching block in `gevent_patch.py` have been removed. Django's native psycopg3 connection pool is explicitly disabled (`pool: False`) so `django-db-geventpool` remains in sole control of connection lifecycle. The `dropdb` management command was updated to the `psycopg` API (`psycopg.connect`, `psycopg.sql`).
+- **Frontend unit tests extended to additional form components and the Guide page.** `ProgramRecordingModal`, `Recording`, `RecordingDetailsModal`, `RecurringRuleModal`, `ScheduleInput`, `SeriesRecordingModal`, `SeriesRuleEditorModal`, `Stream`, `StreamProfile`, `SuperuserForm`, `User`, `UserAgent`, and `VODCategoryFilter` now have Vitest + Testing Library test suites. Business logic was extracted from these components into corresponding utility modules and is exercised through the new tests. The Guide page was similarly refactored with extracted utils, and `dateTimeUtils.js` was extended to support the new test coverage. — Thanks [@nick4810](https://github.com/nick4810)
+- **Official plugin repository manifest URL moved to GitHub Pages.** The default `OFFICIAL_REPO_URL` now points to `https://dispatcharr.github.io/Plugins/manifest.json` instead of the raw GitHub content URL. GitHub Pages avoids opaque caching on raw content that could serve stale manifests without indication. A data migration updates existing `PluginRepo` rows marked `is_official=True` in place; fresh installs pick up the new URL from the model default after the seed migration runs. — Thanks [@sethwv](https://github.com/sethwv)
+
+### Performance
+
+- **M3U and EPG channel logo URLs no longer call `build_absolute_uri_with_port()` per channel.** The host/port/scheme base URL and logo path prefix/suffix are computed once per request; each row appends only the logo ID. M3U proxy stream URLs use the same pattern for channel UUIDs.
+- **`get_vod_streams` and `get_series` XC API response times reduced significantly for large libraries.** Both endpoints previously loaded all active relations per title (one row per account that carries the same movie/series), then discarded duplicates in Python. With large libraries across multiple active accounts this fetched a multiple of N rows. Both queries now use a single `DISTINCT ON (movie_id/series_id)` pass over the relation table ordered by account priority, returning exactly one row per title. Logo URL construction (`reverse()` + `build_absolute_uri_with_port()`) is also computed once and reused via prefix/suffix string concatenation, matching the existing pattern in `get_live_streams`. The `m3u_account` JOIN in `get_series` was also removed (it was fetched but never read in the loop). Additionally, `get_series` previously had no `order_by` on `M3USeriesRelation`, so output order was non-deterministic (physical storage order). Both endpoints now sort alphabetically by title. Observed improvements: 18s → 12s for 48k movies; 9.5s → 3.5s for 11k series.
+- **Database connections are now managed by a persistent per-worker pool.** Previously each request opened a fresh TCP connection to PostgreSQL, paid a full authentication handshake, and closed the connection at request end. `django-db-geventpool` now maintains a pool of warm connections per uWSGI worker; requests borrow a connection and return it when done, eliminating connection-setup overhead on every request. Pool size is bounded (`MAX_CONNS=8` per worker, `REUSE_CONNS=3` warm connections kept idle) to stay comfortably within PostgreSQL's default `max_connections=100` across all uWSGI workers, Celery workers, and Daphne. — Thanks [@JCBird1012](https://github.com/JCBird1012)
+- **Reduced Redis round-trips on the Stats page channel status endpoint.** `get_basic_channel_info` was making up to 6 individual `HGET` calls per connected client plus a redundant `HGET` for `TOTAL_BYTES` (already present in the preceding `HGETALL` result). Client metadata is now fetched with a single `HMGET` per client, and `TOTAL_BYTES` is read from the already-fetched hash. Under load with many active streams this significantly reduces the time each uWSGI worker holds the GIL servicing the stats endpoint, reducing the chance of concurrent requests from other pages timing out with a 503. The same `HGET`-to-`HMGET` consolidation was applied to `stream_ts` and `get_user_active_connections`. The Stats page frontend was also fixed to fire the initial fetch only once on mount (previously two `useEffect` hooks both triggered an immediate fetch on load). — Thanks [@JCBird1012](https://github.com/JCBird1012)
+
+### Security
+
+- **M3U endpoint no longer reflects POST body content in error responses.** The error message for disallowed POST requests previously echoed the raw request body back to the caller in a `text/html` response, which could be used for reflected XSS. The body is no longer included in the response. - Thanks [@sebastiondev](https://github.com/sebastiondev)
+- Updated frontend npm dependencies to resolve 5 audit vulnerabilities (2 moderate, 2 high, 1 critical):
+  - Updated `react-router` and `react-router-dom` 7.13.0 → 7.17.0, resolving **high** unauthenticated RCE via turbo-stream TYPE_ERROR deserialization ([GHSA-49rj-9fvp-4h2h](https://github.com/advisories/GHSA-49rj-9fvp-4h2h)), **high** open redirect via protocol-relative `//` paths ([GHSA-2j2x-hqr9-3h42](https://github.com/advisories/GHSA-2j2x-hqr9-3h42)), **high** XSS in unstable RSC redirect handling via `javascript:` targets ([GHSA-8646-j5j9-6r62](https://github.com/advisories/GHSA-8646-j5j9-6r62)), **high** stored XSS via unescaped `Location` header in prerendered redirect HTML ([GHSA-f22v-gfqf-p8f3](https://github.com/advisories/GHSA-f22v-gfqf-p8f3)), **high** DoS via unbounded path expansion in the `__manifest` endpoint ([GHSA-8x6r-g9mw-2r78](https://github.com/advisories/GHSA-8x6r-g9mw-2r78)), and **high** DoS via reflected user input in single-fetch ([GHSA-rxv8-25v2-qmq8](https://github.com/advisories/GHSA-rxv8-25v2-qmq8))
+  - Updated `vitest` 3.2.4 → 4.1.8, resolving **critical** arbitrary file read and execution when the Vitest UI server is listening ([GHSA-5xrq-8626-4rwp](https://github.com/advisories/GHSA-5xrq-8626-4rwp))
+  - Updated `brace-expansion` 5.0.5 → 5.0.6, resolving **moderate** DoS when large numeric ranges defeat the documented `max` limit ([GHSA-jxxr-4gwj-5jf2](https://github.com/advisories/GHSA-jxxr-4gwj-5jf2))
+  - Updated `ws` 8.19.0 → 8.21.0, resolving **moderate** uninitialized memory disclosure ([GHSA-58qx-3vcg-4xpx](https://github.com/advisories/GHSA-58qx-3vcg-4xpx))
+
+### Fixed
+
+- **HDHR lineup and discovery URLs now use the shared port-aware URI builder.** `lineup.json`, `discover.json`, and `device.xml` previously called Django's `request.build_absolute_uri()`, which drops non-standard ports behind reverse proxies and on dev installs. They now use `build_absolute_uri_with_port()` from `core/utils.py`, matching M3U, EPG, XC, and logo cache URLs.
+- **EPG channel list did not refresh after a source finished parsing channels.** The `epg_refresh` WebSocket handler closed over a stale `epgs` snapshot from when the socket connected. When a newly created source was not found in that snapshot, the handler updated progress and returned early without calling `fetchEPGData()`, so the channel picker and EPG assignment UI stayed empty until a full page reload. The handler now reads the current store via `getState()` and still calls `fetchEPGData()` when `parsing_channels` completes.
+- **DVR recordings no longer stop immediately when FFmpeg exits mid-stream.** If FFmpeg crashes, stalls, or loses the source before the scheduled end time, `run_recording` now restarts it in-process instead of going straight to HLS→MKV concat and marking the recording complete. Each restart reuses the same HLS working directory and continues segment numbering (`append_list`, `-start_number`) so the final MKV is a single continuous file. Retries are bounded by a per-outage time window matching live-proxy client tolerance (`STREAM_TIMEOUT` + `FAILOVER_GRACE_PERIOD`, default 80s); the window resets whenever new segments resume, so a long recording can survive multiple separate outages. Reconnect pacing between attempts follows the same `min(0.25 × attempt, 3s)` backoff used by the live-proxy `StreamManager`. Input demuxing also uses `-err_detect ignore_err` to tolerate minor TS corruption without aborting the process. If the outage window expires without recovery, the recording is saved as `interrupted` with `ffmpeg_outage_window_exhausted` rather than falsely reported as `completed`. (Closes #1170)
+- **DVR HLS→MKV concat now tolerates timestamp splices and corrupt segments.** The finalize step (and startup recovery concat) previously used a bare `ffmpeg -f concat -c copy`, which could fail on truncated tail segments or PTS discontinuities from FFmpeg restarts mid-recording. Concat now uses a shared `_dvr_build_hls_concat_cmd` helper with `-fflags +genpts+igndts+discardcorrupt`, `-err_detect ignore_err`, and `-avoid_negative_ts make_zero`; the existing MP4-intermediate fallback path uses the same tolerant input flags.
+- **DVR FFmpeg restart no longer skips HLS segment numbers.** On restart, `-start_number` was set to the existing segment count while `append_list` also incremented the internal sequence for each segment reloaded from `index.m3u8`, so the first post-restart segment could land at roughly double the expected index (e.g. `seg_00028.ts` after 14 segments). Restarts now pass `-start_number 0` when the playlist already lists segments and let `append_list` continue numbering; loose `.ts` files without a playlist still seed from the highest filename index + 1.
+- **Null TS keepalive packets during channel initialization caused Emby (and Jellyfin) to force a deinterlace transcode or fail playback entirely.** While waiting for a channel to become ready, the generator sent a null TS packet (PID `0x1FFF`) every 0.5 s to keep the HTTP connection alive. Emby probes the initial bytes of the response via ffprobe; receiving a null packet instead of real stream data produced incorrect codec metadata and triggered a forced transcode. The null-packet yield has been replaced with a plain `gevent.sleep(0.1)`. (Fixes #1280)
+- **VOD proxy stream URLs survive M3U import refresh cycles.** When `process_movie_batch` / `process_series_batch` create duplicate content records during a refresh, existing `M3UMovieRelation` / `M3UEpisodeRelation` rows are repointed at the new records, orphaning the old UUIDs. External players (Emby, Jellyfin, ChannelsDVR) that cached `.strm` URLs with the dead UUID would then 404 even though the same request carried a stable `stream_id` that maps to an active relation. The proxy now falls back to stream_id resolution when the UUID lookup misses, using strictest-match-first logic (account-scoped relation preferred, then highest-priority account). A `[STREAMID-FALLBACK]` WARNING log keeps the underlying import churn. — Thanks [@R3XCHRIS](https://github.com/R3XCHRIS)
+- **IP lookup no longer blocks the settings page load.** The `environment` endpoint previously made up to three sequential HTTP calls (ipify, ipapi.co, ip-api.com) with 5s timeouts each, blocking the page for up to 15s if any were unreachable. The lookups now run in a background thread on first request and results are cached in Redis for 1 hour, so the endpoint returns immediately on every call. — Thanks [@sethwv](https://github.com/sethwv)
+- **Authenticated users were not identified in VOD connection cards and stream events when streaming via the web player.** The VOD proxy now accepts a JWT via a `?token=` query parameter so browser `<video>` elements (which cannot send `Authorization` headers) can authenticate. The token is read on the initial request, the resolved user ID is stored in Redis, then retrieved on the actual streaming request after the session redirect. Previously the redirect discarded auth context and all JWT-authenticated VOD sessions were tracked as anonymous. (Fixes #1224)
+- **Deleting the last playlist (or any playlist) crashed the entire UI.** `removePlaylists()` in the playlists store filtered the `playlists` array but never removed the corresponding entries from the `profiles` map. After deletion, components reading `profiles[deletedId]` received `undefined` and crashed with `undefined is not an object (evaluating 'P[R].name')`, replacing the entire page with an error screen. The profiles map is now cleaned up atomically in the same state update as the playlists array. (Fixes #1269) - Thanks [@nemesbak](https://github.com/nemesbak)
+- **Switching providers in the VOD or Series detail modal had no effect.** The `provider-info` endpoints for movies and series always fetched data from the highest-priority provider, ignoring the `relation_id` the frontend sent when the user selected a different provider from the dropdown. The endpoints now accept an optional `relation_id` query parameter and fetch from that specific relation. The VOD modal also now shows the "Loading additional details..." indicator while the provider switch is in flight, matching the existing behaviour in the Series modal. (Fixes #1285) - Thanks [@nemesbak](https://github.com/nemesbak)
+- **Per-channel stream profile override was ignored during streaming.** `Channel.get_stream_profile()` read `self.stream_profile` directly, bypassing any `ChannelOverride.stream_profile` set by the user on auto-synced channels. The method now resolves through `effective_stream_profile_obj`, which checks the channel's override record first and falls back to the channel's own field. Channels without an override continue to behave identically to before. (Fixes #1268) - Thanks [@nemesbak](https://github.com/nemesbak)
+- **Web-player output profile was ignored for live streams started outside the Channels page.** `getShowVideoUrl` in `RecordingCardUtils.js` returned a raw proxy URL without calling `buildLiveStreamUrl`, so the output profile preference stored in `localStorage` was not applied when launching a stream from the TV Guide, Program Detail modal, DVR page, Recording Details modal, or Recording Card. Only the Channels page (StreamsTable) was calling `buildLiveStreamUrl` correctly. One additional import and one changed return value fix all affected entry points. (Fixes #1304) - Thanks [@nemesbak](https://github.com/nemesbak)
+- **Plugins with available updates were not sorting to the top of the Plugin Browse list.** The sort weight function previously treated `update_available` plugins the same as any other installed plugin, leaving them buried. They now receive the highest sort priority (below the search/filter results header) so users can spot pending updates immediately. — Thanks [@sethwv](https://github.com/sethwv)
+- **Disabled state on the size-labeled install button rendered with a warm tint instead of appearing clearly disabled.** The CSS filter was `brightness(0.65) saturate(0.7)`, which left a faint color cast. It is now `grayscale(1) brightness(0.55)`, matching the standard disabled appearance. — Thanks [@sethwv](https://github.com/sethwv)
+- **Restoring a backup from an older version left the database with missing schema.** The restore task ran `pg_restore` which replaced the entire database (including the `django_migrations` table) but did not run migrations afterward. If the backup predated a schema migration, the restored database was missing tables and columns added by those migrations, causing 500 errors on every API call. `migrate --noinput` now runs automatically after every restore. The success notification also now recommends a restart to clear stale service state.
+- **Cast and actors lists were silently truncated to the first name.** When a provider returns `cast` or `actors` as a JSON array, the helper used during both movie and series basic sync and movie advanced refresh only extracted the first element. All names in the array are now joined into a comma-separated string. Providers that return cast as a plain string are unaffected.
+- **Channel Group Override interactions in compact numbering and override display.** Two related bugs surfaced when Channel Group Override was used with auto-synced channels. First, compact numbering silently failed: with an override on the source `ChannelGroupM3UAccount`, sync stores channels under the override target group's id (not the source group id), so hide/unhide/repack operations all missed their channels and slot accounting broke silently (hidden channels kept their numbers, unhides got none, repack saw zero channels). The compact paths now include an override-aware fallback to match channels under both source and override-target group ids. Second, the clear-override reset button disappeared when an override's stored value coincidentally matched the provider value. The frontend `isFormFieldOverridden` function was value-based only; it now also checks for a persisted override row regardless of value, so the reset button remains available to clear any override. (Fixes #1263, Fixes #1276) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- **Compact numbering repack is now idempotent.** Auto-synced channel numbers reshuffled within their configured range on every sync, even when the provider returned no changes. The compact repack queried channels with no `ORDER BY`, so packing followed PostgreSQL's physical row order, which drifts after each repack's UPDATEs and autovacuum. The channel query now uses `.order_by("id")` (creation order tracks provider stream order for the default "provider" sort), and explicit name / tvg_id / updated_at sorts carry `c.id` as a secondary tiebreaker so equal values keep a stable relative order instead of churning. (Fixes #1321) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+
+## [0.25.1] - 2026-05-23
+
+### Fixed
+
+- **`SynchronousOnlyOperation` and permanent loading state in series rules save.** `_evaluate_series_rules_locked` and `reschedule_upcoming_recordings_for_offset_change_impl` called `async_to_sync(channel_layer.group_send)` directly from WSGI views. In a uWSGI/gevent worker this has two effects: (1) it sets Python 3.10+'s C-level OS-thread-local running-loop flag, causing Django's `@async_unsafe` guard to raise `SynchronousOnlyOperation` on any ORM call made by another greenlet on the same thread; (2) the asyncio event loop it creates cannot make progress because the gevent hub is blocked waiting for the request greenlet to complete, so the request hangs and the frontend spinner never clears. Both functions now use `send_websocket_update` - the same gevent-aware helper used elsewhere - which takes a direct Redis path (no asyncio) in gevent workers. (Fixes #1260)
+- **Migration 0037 fails on PostgreSQL when channels have been orphaned from their M3U account.** Channels created by auto-sync retain `auto_created=True` but get `auto_created_by=NULL` when the originating M3U account is deleted (`on_delete=SET_NULL`). The data migration step that re-attributes or demotes those channels updates the FK column via ORM `.save()` calls, which queues deferred constraint trigger events in PostgreSQL. The subsequent `ALTER TABLE ... DROP NOT NULL` on the same table then fails with `ObjectInUse: cannot ALTER TABLE because it has pending trigger events`. Fixed by issuing `SET CONSTRAINTS ALL IMMEDIATE` at the end of the data migration function to flush those pending events before the DDL runs. (Fixes #1259)
+- **XC stream URLs with no file extension now respect output format defaults.** `stream_xc` previously treated any extension other than `.mp4` as a forced `mpegts` request, including the empty-extension URLs that XC-compatible M3U playlists produce via `get.php`. Requests with no extension now pass `force_format=None` so the standard resolution chain (request param, user default, server default) applies correctly.
+- **XC M3U stream URLs now carry output profile and output format parameters.** The `get.php` M3U playlist previously emitted bare `/live/user/pass/id` URLs with no query string, causing per-user and server-wide output profile and output format settings to be silently ignored for XC clients. When `output_profile` or `output_format` parameters are present on the playlist request, they are now appended to every stream URL in the playlist so the proxy honours them on playback.
+
+### Performance
+
+- **M3U playlist URL building moved outside the channel loop.** `generate_m3u` previously rebuilt the query-string suffix (and for XC requests, called `build_absolute_uri_with_port`) on every channel iteration even though both inputs are request-level constants. The XC base URL and both query-string suffixes (`xc_qs_suffix`, `proxy_qs_suffix`) are now computed once before the channel loop; per-channel URL assembly is a single f-string interpolation.
+
+## [0.25.0] - 2026-05-21
+
+### Security
+
+- Updated `Django` 6.0.4 → 6.0.5, resolving the following CVEs:
+  - **CVE-2026-6907**: Cache leak exposing sensitive information via `cache.get_or_set()` race condition.
+  - **CVE-2026-35192**: Persistent session cookies retaining sensitive information after logout.
+  - **CVE-2026-5766**: Improper handling of length parameter inconsistency in multipart form parsing.
+
+### Added
+
+- **About modal.** A `?` button in the sidebar footer opens an About dialog showing the current version, links to Documentation, Discord, GitHub, and Open Collective, a contributors acknowledgment, and a memorial note for Jesse Mann. The button is visible in both expanded and collapsed sidebar states.
+- **Comskip mode setting.** DVR Settings now includes a "Comskip mode" option:
+  - **Cut** (default): FFmpeg permanently removes commercial segments from the recording file in place. The EDL file is deleted after a successful cut.
+  - **Mark**: comskip analysis runs as normal but the recording file is left untouched. The EDL file is kept alongside the recording so players that support EDL-based commercial skipping (e.g. Kodi) can use it. The recording's `custom_properties` record the EDL filename, commercial count, and mode so the UI can surface this.
+- **Comskip hardware acceleration setting.** DVR Settings now includes a "Hardware acceleration" option that passes a hardware-decode flag to the comskip binary, reducing CPU load during commercial detection on capable hosts:
+  - **None** (default): software decode.
+  - **NVIDIA NVDEC (`--cuvid`)**: uses CUVID decoders; requires the NVIDIA container toolkit and a supported GPU inside the container.
+  - **Hardware assist (`--hwassist`)**: passes Comskip's generic `--hwassist` switch (the bundled build does not accept `--qsv`).
+- **HDHR output profile URL support.** HDHomeRun lineup URLs now support an `output_profile` path segment so HDHR clients (Plex, Channels DVR, Emby, etc.) can request a specific transcode profile without any query-parameter support. URL formats accepted:
+  - `/hdhr/output_profile/<id>/lineup.json` - output profile only
+  - `/hdhr/<channel_profile>/output_profile/<id>/lineup.json` - channel profile + output profile
+  - Bare `/hdhr/lineup.json` - existing behavior, uses the new system default (see below)
+  - The profile ID is resolved against active `OutputProfile` rows; if the ID is inactive or does not exist, a warning is logged and the stream is served without transcoding.
+- **HDHR default output profile setting.** A new "HDHR Default Output Profile" select in Settings → Stream Settings lets admins pick an output profile that is applied to all HDHR stream URLs that do not specify one in the path. When cleared, streams are served as-is (pass-through).
+- **fMP4 streaming support.** Dispatcharr can now serve live channels as fragmented MP4 in addition to MPEG-TS. A dedicated `FMP4RemuxManager` runs a single FFmpeg remux process per active channel, muxes incoming TS data into fMP4 fragments, and stores them in a Redis-backed ring buffer. Multiple clients requesting the same channel in fMP4 all read from the same shared buffer, so only one FFmpeg process runs regardless of viewer count. Clients that request MPEG-TS continue to be served as before. The output format is selected via `?output_format=mpegts|fmp4` on the stream URL, or by the per-user default configured by an admin on the user account, or by the server-wide default in Stream Settings.
+- **Output profiles.** Admins can define named transcode profiles under Settings → Output Profiles. Each profile specifies an executable (e.g. `ffmpeg`) and a parameter string that reads raw TS from `pipe:0` and writes the transcoded output to `pipe:1`. When a client requests a profile, one FFmpeg transcode process runs per active (channel, profile) pair and all requesting clients share the resulting output buffer. Common use case: a profile that converts AC3 audio to AAC for browser and mobile clients while the native stream (AC3 intact) continues to serve Plex/Emby/Jellyfin. Profiles are applied via `?output_profile=<id>` on the stream URL, or by per-user and server-wide defaults. Two locked built-in profiles are seeded on first run: **Media Server (AC3 Audio)** (copies video, re-encodes audio to AC3 384k) and **Web Player (AAC Audio)** (copies video, re-encodes audio to AAC 192k). (Closes #407)
+- **Container format and output profile shown in Stats client rows.** The expanded client row on the Stats page now displays the container format (`mpegts` or `fmp4`) and, when an output profile is active, the profile name.
+- **Browser-local web player output profile setting.** A new "Web Player Output Profile" select in Settings → UI Settings lets each browser choose which output profile (if any) is applied when previewing streams in the built-in floating player. The preference is saved to `localStorage` (`dispatcharr-player-prefs`) and picked up by every preview URL builder at click time, so a user whose account default transcodes to AC3 for their media server can still get a browser-compatible audio stream from the preview player without changing their account settings.
+- **DVR series rules: EPG channel is now optional.** Series recording rules no longer require a `tvg_id`. Rules with only a title or description filter search across all EPG channels in the 7-day horizon. The evaluator pre-loads one channel per EPG source (lowest channel number) in a single query and resolves the recording channel per-program, so cross-channel searches remain efficient. Saves and the preview endpoint now require at least one of `title`, or `description` instead of requiring `tvg_id`. The preview response includes a `warn: true` flag when more than 50 programs match, and the editor shows an orange alert when this flag is set. The upsert key for rules changed from `tvg_id` alone to `(tvg_id, title)` so multiple rules can target the same channel.
+- **DVR series rules: rich title and description matching.** Series recording rules now accept the same boolean / quoted-phrase / regex / whole-word semantics as the EPG Program Search API on both the title and description fields, plus an optional pinned channel. Existing rules continue to work unchanged (default `title_mode=exact`, no description filter, no pinned channel). (Closes #570)
+  - New rule fields: `title_mode` (`exact` / `contains` / `search` / `regex`), `description`, `description_mode` (`contains` / `search` / `regex`), and `channel_id` (optional integer to pin recordings to a specific channel; defaults to the lowest-numbered channel for the EPG as before).
+  - The boolean/quoted/regex/whole-word parser was extracted from `apps/epg/api_views.py` into a shared `apps/epg/query_utils.py` so the rule evaluator and the search endpoint use the same code path. No behavioral changes to the existing `/api/epg/programs/search/` endpoint.
+  - The evaluator builds a single `ProgramData` queryset with `.distinct()` and reuses the existing `(tvg_id, start_time, end_time)` dedup key, so dropping in a description filter or a fuzzy title still preserves the dedup, episode collapsing, and offset-adjustment behavior. No N+1 introduced.
+- **`POST /api/channels/series-rules/preview/`** returns up to 25 (configurable, max 100) upcoming programs that a candidate rule would match within the standard 7-day evaluation horizon, without persisting anything. Used by the new rule editor to give live feedback as the user types.
+- **`GET /api/epg/programs/search/?tvg_id=`** filter parameter for exact `epg.tvg_id` matches.
+- **Series rule editor modal** with form (title + match mode, description + match mode, episodes mode, pinned channel) and a debounced (500ms) preview pane backed by an `AbortController` so per-keystroke calls don't pile up. A "Customize rule..." link in the program record-choice modal opens the editor pre-filled with the program's `tvg_id` and title; the series rules modal gains an "Add rule" button and an "Edit" button per existing rule.
+- **Shift+click and Ctrl+click row selection in tables.** Clicking anywhere on a non-interactive area of a row now participates in selection:
+  - **Shift+click**: extends selection from the last-clicked row to the current row (range select), identical to shift+clicking the checkbox.
+  - **Ctrl+click** (Cmd+click on Mac): toggles the clicked row in or out of the current selection without disturbing other selected rows.
+  - Plain clicks on action buttons, checkboxes, inputs, links, and menus are unaffected. The expand chevron uses `stopPropagation` so expanding a row does not also trigger selection.
+
+### Changed
+
+- **Custom SVG icons extracted to `icons.jsx`.** `DiscordIcon` and `GitHubIcon` were moved from `PluginDetailPanel.jsx` into a new shared `frontend/src/components/icons.jsx` module so they can be reused across components without cross-importing from an unrelated file.
+
+- **Comskip `.ini` overhauled.** The shipped `docker/comskip.ini` was replaced with a fully documented configuration covering all tunable sections: Main Settings, Output, Commercial Break Timing, Black Frame Detection, Logo Detection, Silence Detection, and Live TV. Key defaults: `detect_method=127` (all seven detection methods, up from the comskip default of 107), `min_commercialbreak=25` (slightly stricter floor for US broadcast TV), `output_default=0` (suppresses the `.txt` stats file comskip writes by default), `edl_skip_field=3` (Kodi commercial-break action code). All values include inline source references and plain-language explanations.
+- **Comskip enable switch label updated.** The DVR settings switch was relabeled from "Enable Comskip (remove commercials after recording)" to "Enable Comskip (commercial detection after recording)" to remain accurate when mark mode is selected.
+- **Settings reorganization: Preferred Region and Auto-Import Mapped Files moved to System Settings.** These two settings were previously stored in the `stream_settings` database group and shown under Stream Settings in the UI. They are now stored in `system_settings` and displayed under System Settings, which better reflects that they are server-wide behavior settings rather than stream delivery settings. A data migration (0025) moves existing values from the old group to the new one for all existing installs.
+- **Stream Settings descriptions added.** Default User Agent, Default Stream Profile, Default Output Format, M3U Hash Key, and HDHR Default Output Profile all now have inline description text below their labels explaining their purpose and effect.
+- **System Settings descriptions added.** Maximum System Events, Preferred Region, and Auto-Import Mapped Files now have inline description text. The redundant description paragraph that duplicated the accordion header text has been removed.
+- **`get_client_ip()` in `dispatcharr/utils.py` cleaned up.** Removed dead `.split(',')[0]` call and misleading variable name left over from a copy-paste of the `X-Forwarded-For` pattern. `X-Real-IP` is always a single IP (set by nginx from `$remote_addr`), so no splitting is needed. Behavior is unchanged.
+- **`ts_proxy` module refactored and renamed to `live_proxy`.** The live-streaming proxy was reorganized into a structured package (`apps/proxy/live_proxy/`) with explicit submodules for each stage of the pipeline: `input/` (HTTP streamer, stream manager, TS ring buffer), `output/ts/` (MPEG-TS client generator), `output/fmp4/` (fMP4 remux manager, Redis buffer, client generator), and `output/profile/` (output profile transcode manager). A dedicated `redis_keys.py` module centralizes all Redis key name construction for the proxy. Existing behavior for MPEG-TS clients is unchanged.
+- **XC API `allowed_output_formats` now includes `mp4`.** The `user_info` block returned by `player_api.php` and `get.php` previously advertised only `["ts"]`. It now advertises `["ts", "mp4"]` for all users, enabling XC-compatible clients that support fMP4 to request `.mp4` stream URLs which are proxied as fMP4.
+- **Browser preview URLs always force `mpegts` output.** The four in-app preview buttons (Channels table, channel stream list, Streams table, Stats client row) now append `?output_format=mpegts` (and the web player profile, if set) to the preview URL so the built-in `mpegts.js` player always receives a compatible stream, regardless of the user's configured default output format.
+- **Series rules modal redesign.** Rules now display a one-line summary with the title-match mode, description filter (when present), and a "Pinned channel" badge when a `channel_id` is configured. The previous list rendering remains for legacy rules.
+- **EPG Program Search API** (`GET /api/epg/programs/search/`): a new endpoint for querying EPG program data with rich filtering and query support. - Thanks [@northernpowerhouse](https://github.com/northernpowerhouse)
+  - **Text search** on title and description with AND/OR boolean operators (case-insensitive), quoted phrase matching (`"Law and Order"` treats _and_ as literal text), parenthetical grouping (`(Newcastle OR NEW) AND (Villa OR AST)`), whole-word mode (`title_whole_words=true`), and regex mode (`title_regex=true`).
+  - **Time filters**: `airing_at` (programs live at a specific instant), `start_after`, `start_before`, `end_after`, `end_before`.
+  - **Relational filters**: `channel`, `channel_id`, `stream`, `group`, `epg_source`.
+  - **Field selection**: `fields=title,start_time,channels` returns only the requested keys; channel and stream data is skipped server-side (no wasted serialization) when not requested.
+  - **Pagination**: default 50 results per page, configurable up to 500 via `page_size`.
+  - **Access control**: results are scoped to channels the requesting user can access. `user_level` and the per-user adult-content filter are both enforced, matching the access model used by the M3U playlist, XC API, and stream proxy. Admin users receive unfiltered results.
+  - Full OpenAPI/Swagger documentation available.
+  - Requires `IsStandardUser` permission (user level ≥ 1).
+- **Per-user IP/CIDR network allowlists**. Admins can now assign IP address and CIDR range restrictions to individual user accounts via the API & XC tab on the user edit form. When a user has one or more allowed ranges configured, requests from IPs outside that list are rejected with `403 Forbidden` regardless of the global network access policy; if no ranges are configured, the user inherits global settings unchanged. The existing `network_access_allowed()` utility is extended with an optional `user` argument so the per-user check is enforced at all access-controlled entry points (M3U/EPG, Streams, XC API, UI) without duplicating IP-matching logic. Per-user restrictions are stored in `custom_properties['allowed_networks']`; no model changes or migrations are required. — Thanks [@sethwv](https://github.com/sethwv)
+- **`reset_user_network` management command**: `manage.py reset_user_network <username>` clears the per-user `allowed_networks` restriction for the specified account, restoring it to global-policy inheritance. Useful for recovering a user locked out by a misconfigured allowlist. — Thanks [@sethwv](https://github.com/sethwv)
+- **Auto-sync overhaul**: comprehensive rebuild of the M3U auto-channel-sync flow. Introduces a per-field override system, hide-from-output flag, range-bounded auto-numbering with a re-pack helper, multi-stream channel safety, multi-provider shared-range merging, and an across-the-board move from per-row writes to bulk operations. (Closes #1196) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Per-field channel overrides for auto-synced channels.** A new `ChannelOverride` table (one-to-one with `Channel`) holds user-specified values for `name`, `channel_number`, `channel_group`, `logo`, `tvg_id`, `tvc_guide_stationid`, `epg_data`, and `stream_profile`. Sync writes only to `Channel.*` columns; the override row takes precedence at read time via a new `with_effective_values()` queryset helper that coalesces both sources at the SQL layer. Every output surface that consumes channel data reads through this helper so overrides surface consistently: HDHR (`/hdhr/lineup.json` and per-profile variants, `/hdhr/discover.json`), M3U (`/output/m3u`, per-profile variants), EPG (`/output/epg`, per-profile variants), XC API (`get_live_streams`, `xmltv.php`), the channels list/detail endpoints, and the TV Guide summary endpoint (`GET /api/channels/channels/summary/`). Channel API responses now include both the raw `name`/`channel_number`/etc. fields AND new `effective_*` annotations plus the `override` object, so frontend consumers can show both "what the user picked" and "what the provider sent" simultaneously.
+  - **Per-field reset-to-provider icon.** FK pickers (channel group, logo, EPG, stream profile) and scalar inputs (name, channel_number, tvg_id, tvc_guide_stationid) display a small reset icon ("Provider: <value>" subtext + Undo2 button) when the field has an active override on an auto-synced channel. Clicking it sets the form value back to the provider value; the override for that field is cleared on save while other overrides remain intact.
+  - **Auto-created channel source attribution.** The channel edit form shows an "Auto-created from: <provider name> / <stream name>" label at the top of auto-synced channels so the user can see which M3U account and which stream produced the row.
+  - **Hide-from-output flag (`hidden_from_output`).** A user-toggleable boolean that excludes a channel from HDHR, M3U, EPG, and XC output without deleting it. Hidden channels are preserved across auto-sync refreshes and excluded from auto-cleanup. The channels table shows an EyeOff icon on hidden rows.
+  - **Channels table visibility filter and inline indicators.** The table header has a new visibility selector ("Active Only" / "Hidden Only" / "Show All") plus a "Has Overrides" filter that narrows to channels with an active override row. Each row's name cell renders a yellow Pencil icon when overrides are active (tooltip lists the overridden field names) and an EyeOff icon when the channel is hidden.
+  - **Bulk hide / unhide in the bulk edit modal.** Selecting any number of channels and toggling `hidden_from_output` in bulk edit applies the change in a single PATCH; auto-routes through the override-aware bulk endpoint so it works equivalently for auto-synced and manual channels.
+  - **Auto-sync channel ranges per group.** `ChannelGroupM3UAccount` accepts `auto_sync_channel_start` (lower bound, inclusive) and `auto_sync_channel_end` (upper bound, inclusive; nullable for unbounded fill). Channels created by auto-sync are assigned numbers within the configured range; streams that do not fit are surfaced in the failure detail modal with a typed "RANGE_EXHAUSTED" reason.
+  - **Per-group inline configuration in the M3U Live group filter.** Each group row now exposes a Sync toggle, a Numbering Mode selector (Provider / Next Available / Fixed), and Start/End channel-number inputs alongside the existing fields. The numbering modes control how each stream's channel number is chosen during sync: Provider tries the M3U-supplied number first then falls back to next-available; Next Available always picks the lowest free number from 1 upward; Fixed picks sequentially from the configured Start.
+  - **Per-group "Configure" modal.** A gear-icon button on each group row opens a `GroupConfigureModal` containing the full set of advanced options. Fields surfaced in the modal: Channel Sort Order (provider order / name / tvg_id / updated_at, with reverse toggle), Compact Numbering toggle and "Re-pack now" button, Group Override (re-route this group's auto-created channels into a different `ChannelGroup` so multiple provider groups merge into one logical group), Name Regex Find/Replace pattern, Exclude Regex pattern, Force Dummy EPG, and a live regex preview pane.
+  - **Live regex preview pane.** A new `GET /api/channels/streams/regex-preview/` endpoint scans the group's streams (capped at 5000) for the find / match / exclude patterns the user is editing and returns up to 10 sample matches per pattern plus accurate total counts. The frontend debounces the call (500ms) and runs it inside the configure modal so the user sees live evidence of what their patterns will match before saving.
+  - **Live overlap warning across rows.** As the user edits Start/End values across multiple groups in the same provider, an `AbortController`-debounced scan calls a new `GET /api/channels/channels/numbers-in-range/` endpoint to detect (a) cross-row range overlaps (in-memory, all group pairs) and (b) channels already occupying the configured range that are not the expected occupants for that group. An informational warning surfaces inline; configurations are not blocked.
+  - **Compact numbering with re-pack helper.** When `compact_numbering=True` on a group's account relation, sync packs visible auto-sync channels sequentially into the configured range. A "Re-pack now" button in the group config modal runs the pack manually via a new `POST /api/m3u/accounts/{id}/repack-group/` endpoint. Hidden channels do not occupy slots; un-hiding shifts visible numbers down to fill the gap. Override-pinned channel numbers are respected as fixed anchors. Single-channel hide / unhide via the post-save signal triggers an incremental `assign_compact_numbers_for_channels` pass without requiring a full sync.
+  - **Multi-stream channel safety in sync.** A user-attached second stream on an auto-created channel no longer causes the channel to be deleted when one of those streams disappears from the provider. The deletion path filters out channels where at least one current stream remains alive, and per-stream iteration mutates the same `Channel` instance so `bulk_update` writes the merged final state.
+  - **Orphan channel cleanup mode (3-state, account-scoped).** Stored under `M3UAccount.custom_properties.orphan_channel_cleanup` and surfaced as a SegmentedControl at the top of the M3U account's group-settings page. Three positions: `always` (default; removes every auto-channel whose source stream has disappeared), `preserve_customized` (removes orphans without a `ChannelOverride` row, preserves those with one), and `never` (preserves all orphans, intended for users with manual redundancy/failover stream setups). Hidden channels are universally preserved regardless of mode.
+  - **Failure modal grouped by reason.** The auto-sync completion notification's failure detail modal groups entries by typed reason (`RANGE_EXHAUSTED`, `INTEGRITY_ERROR`, `OTHER`) with collapsible sections and a per-group cap. The in-memory cap was raised from 50 to 1000 so realistic multi-provider failure sets are not truncated. The notification's auto-close timeout extends from 4s to 12s when failures are present so users have time to see and click into the modal.
+  - **Multi-provider shared-range merging.** Two M3U accounts can target the same group with overlapping channel-number ranges. Sync seeds `used_numbers` globally so the second provider's channels pick up where the first left off without colliding. The overlap warning in the group-settings UI surfaces this configuration as informational; the merge is intentional, not a hard error.
+  - **Selection summary in the bulk edit modal.** The bulk edit form shows `Selection: X auto-synced, Y manual` at the top so users can see how a single set of changes will route between override rows and direct writes.
+  - **Delete-Playlist preview.** A new `GET /api/m3u/accounts/{id}/auto-created-channels-count/` endpoint returns the count and up to 5 sample names of auto-created channels owned by the account. The Delete Playlist confirmation dialog uses this to show the user exactly how many channels will cascade away before they confirm.
+  - **Custom `Channel.objects` manager.** A thin manager wraps the existing `with_effective_values()` helper so new code can call `Channel.objects.with_effective_values(...)` directly. The module-level helper remains the canonical implementation; existing call sites are unchanged.
+- **Frontend unit tests added for form components.** `GroupManager`, `LiveGroupFilter`, `LoginForm`, and `Logo` now have Vitest + Testing Library test suites covering rendering, user interactions, API integration, and edge cases (144 tests total). Business logic that was extracted into utility modules (`ChannelGroupUtils`, `LiveGroupFilterUtils`, `LogoUtils`, `M3uUtils`, `M3uFilterUtils`, `M3uGroupFilterUtils`, `M3uProfileUtils`, `AutoSyncAdvancedUtils`, `AutoSyncBasicUtils`) is also exercised through these tests. — Thanks [@nick4810](https://github.com/nick4810)
+- **Global Network Access settings use tag-style inputs**: the IP/CIDR range fields in the Network Access settings panel now use tag-style chip inputs instead of a plain text field, making it easier to add, review, and remove individual addresses or ranges. — Thanks [@sethwv](https://github.com/sethwv)
+- **Auto-sync overhaul** sync and channel behavior changes for the new override system. — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **`Channel.channel_number` is now nullable.** Auto-sync may produce channels without an assigned number (for example, a sync run where the configured range was exhausted before this stream could be slotted, or a hidden channel in compact mode whose slot was released for visible channels). Existing channels are unchanged. HDHR / M3U / EPG / XC output endpoints filter out channels with `null` channel_number, so a number-less row is invisible to clients but visible in the channels page where the user can assign one. The 0037 auto-sync overhaul migration includes a reverse-direction backfill on the `channel_number` AlterField step so a rollback that re-imposes NOT NULL still succeeds even if NULLs are present.
+  - **M3U account delete always cascades auto-created channels.** The delete dialog is a single confirmation showing the count of affected channels (fetched from the new auto-created-channels-count endpoint). Auto-created channels are removed regardless of `hidden_from_output` or override state: override rows cascade via the one-to-one FK; hidden status does not preserve the channel because there is no provider left to populate it on the next sync. Manual channels are unaffected; their non-provider streams remain intact, and only streams owned by the deleted account are removed. The destroy response now returns `{"deleted_channels": N}` (HTTP 200) instead of an empty 204 so the confirmation toast can show the actual count.
+  - **Bulk channel edit auto-routes auto-created channels through the override path.** When a bulk edit includes auto-synced channels, the changed fields are written to each channel's `ChannelOverride` row instead of the raw `Channel.*` columns, so the edit survives the next sync. Manual channels in the same selection write directly to `Channel.*`. A "Clear all overrides" affordance pre-clears overrides on the selection before applying new edits in the same submit (clear runs before the routing PATCH so a same-submit clear cannot wipe just-written overrides).
+  - **Inline edits on the channels table route through the override row for auto-synced channels.** Editing a cell directly in the table (number, name, group, EPG, logo) now writes to `ChannelOverride.<field>` for auto-synced rows so the edit survives the next refresh; manual rows continue to write directly. The save mechanic and validation are unchanged from the user's perspective.
+  - **Channel-number duplicates are explicitly allowed.** Sync's `used_numbers` seed still avoids assigning the same number to two newly-created auto channels in the same run, so accidental duplication during sync remains impossible. Manual or override-driven duplication is permitted; downstream client behavior on duplicates varies by client.
+- **gevent cooperative multitasking enabled in all uWSGI workers.** `gevent-early-monkey-patch = true` and `import = dispatcharr.gevent_patch` are now set in all four uWSGI configuration files (`uwsgi.ini`, `uwsgi.modular.ini`, `uwsgi.dev.ini`, `uwsgi.debug.ini`). The new `dispatcharr/gevent_patch.py` module ensures gevent's stdlib monkey-patching is applied before application code loads (replacing blocking socket, threading, and OS primitives with cooperative gevent equivalents) and installs psycogreen's wait-callback so psycopg2 database I/O yields to the gevent hub instead of blocking the OS thread. Without these settings, any blocking psycopg2, `requests`, or DNS call froze every greenlet on the affected worker for the duration of the call.
+- **WebSocket group sends rewritten to bypass asyncio in gevent workers.** `gevent.monkey.patch_all()` removes `select.epoll` from the stdlib `select` module, which breaks asyncio event loop creation in threadpool threads. The previous `send_websocket_update` and `_send_async` paths dispatched via `async_to_sync(channel_layer.group_send)()` from a threadpool thread, which failed with `AttributeError: module 'select' has no attribute 'epoll'`; the exception was caught at WARNING level, so every WebSocket push from REST views was silently discarded. A new `_gevent_ws_send()` in `core/utils.py` replicates the channels_redis 4.x `group_send` wire format directly using the synchronous Redis client - group membership lookup from the `asgi:group:{name}` sorted set, msgpack serialization with a 12-byte random prefix, and `ZADD` to per-channel sorted sets. Both `send_websocket_update()` and `_send_async()` detect gevent patching at call time and dispatch via `gevent.spawn(_gevent_ws_send)` instead. Celery workers, which are not gevent-patched, continue to use the `async_to_sync` path unchanged.
+- Dependency updates:
+  - `Django` 6.0.4 → 6.0.5 (security patch; see Security section)
+
+### Removed
+
+- **`python-gnupg` dependency dropped.** GPG manifest signature verification now calls the `gpg` binary directly via `os.posix_spawn` (see Fixed below). The `python-gnupg` Python library was the only consumer and has been removed from `pyproject.toml`. The `gpg` binary itself is still required on the host (it was always required since `python-gnupg` is just a wrapper around it).
+
+### Fixed
+
+- **DVR settings form no longer flashes back to old values during save.** The comskip mode and hardware acceleration selects briefly showed stale values while the save was in flight because the Zustand settings store update (triggered by the API response) fired the `useEffect([settings])` re-hydration hook mid-save. An `isSavingRef` guard now suppresses the reactive re-hydration while a save is in progress; after a successful save the form is explicitly synced from the freshly-updated store state instead.
+- **`_cleanup_local_resources` skipped `ClientManager.stop()` on channel removal.** `ProxyServer._cleanup_local_resources` deleted each channel's `ClientManager` entry with `del`, which removed it from the dict but gave the object no signal to terminate. The per-channel heartbeat greenlet inside the manager continued running until it next checked its running flag and found the channel absent from Redis. The entry is now removed with `pop()` and `stop()` is called on the captured manager before it is discarded, terminating the heartbeat immediately on channel cleanup.
+- **XC profile `exp_date` not updating on account refresh.** `refresh_account_profiles` saved the freshly-fetched `custom_properties` with `update_fields=['custom_properties']`, which excluded `exp_date` from the SQL `UPDATE`. The model's `save()` method parses the new expiry from `custom_properties` and assigns it to `self.exp_date`, but that value was silently dropped because the column was not listed in `update_fields`. Added `'exp_date'` to the `update_fields` list so both columns are written together.
+- **~25-second transcode startup delay and worker freeze when starting ffmpeg under gevent+uWSGI.** Enabling gevent cooperative multitasking (see Changed above) exposed a deadlock: `fork()` hangs indefinitely in gevent's `_before_fork` pthread_atfork handler when called from any thread while gevent is running - including from real OS threads. `subprocess.Popen`, which all three ffmpeg spawn sites used, calls `fork()` internally, stalling the uWSGI worker for ~25 seconds or freezing it entirely and blocking all other clients on that worker.
+  - `input/manager.py`: replaced `subprocess.Popen` with `os.posix_spawn` + a minimal `_SpawnedProcess` wrapper. `os.posix_spawn` is POSIX-specified to skip pthread_atfork handlers entirely.
+  - `output/fmp4/manager.py`, `output/profile/manager.py`: replaced `subprocess.Popen` with a new shared `posix_spawn_proc()` helper in `live_proxy/utils.py`. The helper also sets `O_NONBLOCK` on the stdin pipe write-end: under gevent, `threading.Thread` is monkey-patched to greenlets, so a blocking write to a full 64 KB pipe would stall the entire hub. `_write_all()` in both output managers now treats a `None` return (EAGAIN on the non-blocking FD) as a cooperative wait via `select.select()` rather than a fatal error.
+  - `input/http_streamer.py`: set `O_NONBLOCK` on the HTTP-to-pipe relay write-end with an EAGAIN retry loop for the same reason.
+  - `core/views.py` (`stream_view`): replaced `subprocess.Popen` with `os.posix_spawn`; also fixed a pre-existing indentation bug where the `return StreamingHttpResponse(...)` was accidentally nested inside `stream_generator` (making every successful response return `None` and raise a Django error). Also corrected two `NameError` references to the undefined `stream_id` variable in log messages.
+  - `apps/connect/handlers/script.py` (`ScriptHandler`): replaced `subprocess.run` with a `_posix_run` helper that uses `os.posix_spawn` + cooperative `select.select` reads + non-blocking `waitpid` polling. Without this fix, any script-type connect integration configured for events fired from a uWSGI worker (e.g. `client_connect`) would deadlock the serving greenlet. Note: `cwd` is no longer set to the script's directory during execution (it inherits the worker's cwd); this was a minor convenience, not a documented guarantee.
+- **`POST /api/plugins/repos/plugin-detail/` hung for up to 105 seconds under gevent+uWSGI.** The plugin detail endpoint called GPG via `subprocess.Popen` to verify per-plugin manifest signatures, triggering the same `fork()` atfork deadlock described above. Replaced with a `_gpg_run()` helper that uses `os.posix_spawn`, matching the pattern used by the ffmpeg and script-handler fixes. `select.select()` drains stdout/stderr cooperatively (gevent-patched) and `os.waitpid(WNOHANG)` with `time.sleep(0.01)` reaps the child without blocking the hub. Results are cached in Redis for 5 minutes per manifest URL so repeat detail fetches skip GPG entirely. The cache is also invalidated per-plugin when the owning repo's hub manifest is refreshed, so a newly released version is visible immediately after a manual hub refresh.
+- **XC server sub-path URLs now work correctly.** When a provider serves its XC API from a sub-path (e.g. `http://server/Pluto/gb/player_api.php`), Dispatcharr was stripping the path entirely and hitting the root (`/player_api.php`) instead. `_normalize_url` now preserves sub-path components and only strips any trailing `.php` segment (covering `player_api.php`, `get.php`, `xmltv.php`, and any future endpoint without a maintained list). The same fix is applied to `get_transformed_credentials` in the M3U profile transformation path. (Fixes #1218)
+- **M3U filter delete confirmation showed wrong field name and had a typo.** The confirmation dialog for deleting an M3U filter read `filter.type` (always `undefined`) instead of `filter.filter_type`, leaving the "Type:" line blank, and displayed "Patter:" instead of "Pattern:". Both are corrected. — Thanks [@nick4810](https://github.com/nick4810)
+- **M3U form FileInput expanded the modal width on long filenames.** Uploading a local M3U file with a long name caused the `FileInput` to expand beyond the modal's layout bounds. The input now clips overflow with `textOverflow: ellipsis`. — Thanks [@nick4810](https://github.com/nick4810)
+- **Login loading spinner not cleared on successful login.** `setIsLoading(false)` was inside the `catch` block only, so a successful login that immediately navigated away left the loading state as `true` if the component re-mounted. Moved to a `finally` block so it always resets. — Thanks [@nick4810](https://github.com/nick4810)
+- **Bulk channel edit silently failed on API rejection.** The bulk-edit submit handler in `ChannelBatch.jsx` only wrote `console.error` when the PATCH was rejected; the user saw the spinner stop but received no notification, leading them to assume the save succeeded. The catch block now surfaces a red toast with the server-provided detail (or a generic fallback), and the form stays open with the in-progress selection intact so the user can correct and retry. — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- **Recurring rule edit modal showed a blank Channel field.** The `RecurringRuleModal` read channel data from a Zustand store slice (`channels`) that nothing populates - the channels page and all other consumers switched to on-demand summary fetches in a prior release. Opening the edit modal from the DVR page always produced an empty Channel select. The modal now fetches channels via `API.getChannelsSummary()` when it opens, matching the lightweight approach used by the one-time recording form and other modals.
+- **DVR section count badges appeared at the far right of the screen.** The "Currently Recording", "Upcoming Recordings", and "Previously Recorded" section headers wrapped the title and badge in a `Group justify="space-between"`, which pushed the badge to the opposite edge of the full-width container. Changed to `Group gap="xs" align="center"` so each badge sits inline with its heading.
+- **Plugin event dispatch aborted silently on first disabled plugin.** `trigger_event` in `apps/connect/utils.py` iterated `pm.list_plugins()` and, for disabled plugins, logged a debug message using `plugin.key` / `plugin.name` (attribute access). Because `list_plugins()` returns dicts, this raised `AttributeError` on the first disabled plugin encountered. Fixed by changing the two accesses to `plugin['key']` / `plugin['name']`. (Fixes #1231) - Thanks [@R3XCHRIS](https://github.com/R3XCHRIS)
+- **Plugin periodic tasks silently missed the first beat tick after every Celery worker restart.** Plugin modules live outside `INSTALLED_APPS` so `autodiscover_tasks()` never imports them, and worker startup skips plugin discovery via `should_skip_initialization()`. Any plugin using module-level `@shared_task` had its tasks unregistered with the worker until a lazy event import warmed the module; beat fired on schedule but the worker rejected with `Received unregistered task` and advanced `last_run_at` anyway, hiding the miss. A `worker_ready` hook in `dispatcharr/celery.py` now eagerly calls `PluginManager.discover_plugins(sync_db=False)` on every worker boot so plugin tasks are registered before beat starts firing. (Fixes #1244) - Thanks [@R3XCHRIS](https://github.com/R3XCHRIS)
+- **Plugin monkey-patches and module-level hooks were never applied in uWSGI workers.** Both uWSGI configs use `lazy-apps=true`, meaning each worker boots independently and never inherits state from the master. `should_skip_initialization()` correctly skipped one-shot startup tasks in workers, but also blocked `discover_plugins`, so plugin modules were never imported in any of the 4 request-serving workers. Plugins relying on patching request handling (monkey-patches, signal registrations) were silently inactive until a Connect event lazily triggered discovery in that specific worker. Discovery is now run in every process that serves requests, gated only for Celery processes (which use `worker_ready`) and management commands that don't serve requests.
+- **PostgreSQL connection pool exhausted under load in gevent workers.** uWSGI's gevent pool runs many greenlets concurrently on a single OS thread. With `CONN_MAX_AGE = 60`, each greenlet that touched the database retained its own open connection for the full 60 seconds (gevent thread-locals are greenlet-locals), rapidly exhausting PostgreSQL's `max_connections` limit under moderate concurrency. `DATABASE_CONN_MAX_AGE` is now `0` so connections are closed after each request. `close_old_connections()` is also called at the top of the long-running stream manager and cleanup watchdog loops so stale handles accumulated across greenlet switches are released promptly.
+- **Stream proxy race: cleanup watchdog could stop a channel still in the connecting phase.** When the first viewer triggered channel initialization, the client was registered only after the connect-wait loop completed. The cleanup watchdog runs concurrently and stops channels with zero connected clients after a grace period; if the grace period elapsed during the connect-wait, the watchdog killed the channel and left the viewer stuck. The client is now registered before the connect-wait loop begins so the watchdog always sees at least one client.
+- **2-second "stream thread did not terminate within timeout" warning on every channel stop.** `_close_socket` in `input/manager.py` was closing the relay pipe read-end (`self.socket`) before killing the ffmpeg process. The stream OS thread blocks in `select()` on that fd; on Linux, closing an fd from another thread while a `select()` is in progress on it does not reliably interrupt the call (POSIX allows this to be undefined). The thread stayed blocked for the full chunk-timeout (5 s), and `stream_thread.join(timeout=2.0)` always expired first. Fixed by killing ffmpeg first: when ffmpeg dies its copy of the relay write-end closes, delivering EOF to `select()` immediately. `self.socket` is closed afterward as cleanup only.
+- **Duplicate `stop_channel` calls on every channel shutdown.** `StreamGenerator._cleanup` triggered channel shutdown via two parallel paths: `client_manager.remove_client()` (which fires `handle_client_disconnect` on the owning worker, the correct path) and `_schedule_channel_shutdown_if_needed` (which independently spawned a delayed `stop_channel` greenlet). The duplicate call was suppressed by the `_stopping_channels` guard but produced a redundant log entry and unnecessary greenlet on every shutdown. `_schedule_channel_shutdown_if_needed` has been removed; `handle_client_disconnect` is the sole shutdown trigger.
+- **Concurrent greenlets could re-enter `_close_socket` during `proc.wait()`.** `self.transcode_process` was set to `None` at the end of the `if proc:` block rather than immediately after capturing the reference. Under gevent, `proc.wait(timeout=0.5)` yields the hub, allowing a second greenlet to enter `_close_socket`, find `self.transcode_process` still set, and attempt a second kill+close. `self.transcode_process = None` is now assigned immediately after `proc = self.transcode_process` so concurrent callers see `None` and skip the block.
+- **Channel card "started at" tooltip jumping by 1 second on every stats poll.** The Stats page channel card tooltip showed the channel start time by computing `Date.now() - uptime * 1000` on every render. Because `uptime` is a server-side elapsed-seconds value recomputed each response, this reconstruction drifted by up to 1 second per tick. The basic channel info path now emits `started_at` (the raw Unix timestamp from Redis) alongside `uptime`, matching what the detailed stats path already sent. The frontend `getStartDate` helper now accepts the stable `started_at` timestamp directly, so the displayed wall-clock time is fixed from the first poll and never changes.
+- **Shift+click range selection in the channels table broken after row memoization.** After `MemoizedTableRow` was introduced, `handleShiftSelect` captured `lastClickedId` from its render-time closure. Because the memo comparator intentionally excludes callback function references, unselected rows retained the stale closure where `lastClickedId === null`, so every shift+click from a previously unchecked row fell through to a plain toggle instead of selecting the range. Added `lastClickedIdRef` and `allRowIdsRef` alongside the existing `selectedTableIdsRef`; `handleShiftSelect` now reads from those refs so every row uses the current anchor ID and full ID list regardless of which render produced the closure.
+- **Selected rows in the channels table did not show the teal highlight.** `MemoizedTableRow` applied `backgroundColor: '#163632'` based on `row.getIsSelected()` from TanStack Table's API. Because `state.rowSelection` was never wired into `useReactTable`, `row.getIsSelected()` always returned `false` and selected rows remained unstyled. Changed to use the `isSelected` prop, which is correctly derived from `selectedTableIdsSet` and already tracked by the memo comparator.
+- **`blur` event listener in `useTable` leaked on component unmount.** The `useEffect` cleanup function called `window.removeEventListener('blur', ...)` with a newly created anonymous function literal that never matched the handler registered at setup time, so the listener was never removed. Extracted to a named `handleBlur` constant so setup and cleanup reference the same function.
+
+### Performance
+
+- **EPG HTTP response cache replaced with `django-redis`.** The default Django cache backend was `LocMemCache`, an in-process memory store. With multiple uWSGI workers, each worker independently generated and cached the full EPG XML in its own heap; with 4 workers the peak memory cost was up to 4 times the size of the EPG document. The cache backend is now `django_redis.cache.RedisCache`, backed by the same Redis instance used by `channels_redis`, so a single cached EPG copy is shared across all workers.
+- **`AutoSyncAdvanced` and `LogoForm` are now lazy-loaded in the M3U group filter.** Both components are large and only needed when the user opens the gear modal or logo upload modal. Wrapping them in `React.lazy` + `Suspense` removes them from the initial bundle and defers their parse/execute cost until first use. — Thanks [@nick4810](https://github.com/nick4810)
+- **Auto-sync at scale**: the new override-aware sync flow is more capable than the prior path but the implementation choices below keep it viable on libraries with thousands of channels. — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Bulk writes throughout `sync_auto_channels`.** Per-row `Channel.objects.create()` and `.save()` calls were replaced with `bulk_create()` and `bulk_update()` paths that batch the entire group's create + update sets into single round-trips. The renumber pass collects all dirty channels into one list and flushes with a single `bulk_update` at the end of the loop. `ChannelStream.order` writes were similarly consolidated into a single `bulk_update`.
+  - **Single-pass collision detection via a global `used_numbers` set.** Choosing a free channel number was previously an `O(N)` DB query per stream. The new path seeds a `set()` of all reserved numbers (existing channels + override pins) once per run; `_next_available_number()` is `O(cluster size)` against that set. The seed deliberately excludes only this account's visible auto-created channels (the rows about to be reassigned), so cross-account and hidden-channel reservations are honored without extra queries.
+  - **SQL-level effective-value coalescing via `with_effective_values()`.** All channel-data consumers (HDHR, M3U, EPG, XC, channel list / detail, TV Guide summary) read effective values directly from a single annotated queryset that left-joins the override row at the database layer. Prevents N+1 `ChannelOverride` lookups across the channel scan and lets the same query serve the join.
+  - **EPG dispatch deduplication.** `bulk_create` and `bulk_update` bypass `post_save`, so the post-loop step explicitly dispatches `parse_programs_for_tvg_id.delay` once per unique `epg_data_id` actually changed in the run, not per channel. Avoids fan-out where one EPG source change otherwise queued thousands of redundant parse tasks.
+  - **Logo and EPGData lookup caching during sync.** `sync_auto_channels` now caches Logo and EPGData lookups in a per-run dict so repeated provider URLs / IDs across many streams do not produce duplicate `Logo.objects.get_or_create` or `EPGData.objects.filter` calls.
+  - **Override-aware bulk PATCH endpoint.** `update_channels_with_override_routing` partitions the bulk-edit selection into auto-created (override write) vs manual (direct write) once, then issues two bulk PATCHes instead of N single-row updates.
+- **`xc_get_live_streams` response-build overhead reduced.** Previously the function iterated the full channel queryset three times (two passes for collision-free integer number mapping, one pass to build the response list) and called `reverse()` and `build_absolute_uri_with_port()` once per channel to construct logo URLs, amounting to N URL-pattern lookups and N header-parse calls per request. The number-mapping passes are now combined into one full queryset pass that immediately classifies channels with integer numbers, deferring only the fractional-number subset to a second, smaller loop. Logo URL construction is precomputed once per request using a single `reverse()` call; per-channel URLs are assembled with string interpolation. `_get_default_group_id()` is also called at most once per null-group channel instead of twice. The `get_live_streams` API endpoint now returns a `StreamingHttpResponse` backed by a generator that serializes one channel entry at a time instead of building the full JSON array in memory before writing; time-to-first-byte is lower on large channel libraries and peak worker memory is O(1) per channel rather than O(N). (Fixes #1220)
+- **Stream filter-options fast path when no filters are active.** `GET /api/channels/streams/filter-options/` previously ran `DISTINCT` queries across the full streams table while also mutating the underlying Django request object to strip inapplicable filter params. With no active filters the fast path now queries the streams table directly with two simple `DISTINCT` aggregations, skipping the request mutation and filterset instantiation overhead.
+- **Channel list queryset drops unconditional `DISTINCT`.** `ChannelViewSet.get_queryset()` previously appended `.distinct()` unconditionally. `DISTINCT` is only needed when the query joins a one-to-many table - specifically when `channel_profile_id` or `only_stale` filters are active. The queryset now returns plain results in the common case, eliminating sort-and-deduplicate overhead on most channel list fetches.
+- **`JsonResponse` for ID list and channel summary endpoints.** The `stream_ids`, `channel_ids`, and channel `summary` endpoints now use `django.http.JsonResponse` instead of DRF's `Response`, bypassing the DRF renderer pipeline (content-type negotiation, serializer dispatch) for responses that are already plain Python structures. Removes overhead on every channel-table load and stream-table load.
+- **Logo queryset annotates `channel_count` to eliminate N+1 in `LogoSerializer`.** `LogoViewSet.get_queryset()` now annotates each row with `Count('channels')`. `LogoSerializer.get_channel_count()` and `get_is_used()` read the annotation directly instead of issuing a separate `COUNT(*)` per logo. The `used=true` and `used=false` list filters use the annotation for their conditions, removing the `DISTINCT` that was previously required.
+- **`ChannelProfileSerializer` reads prefetched memberships.** `ChannelProfileViewSet.get_queryset()` now prefetches enabled `ChannelProfileMembership` rows into `enabled_memberships`. `ChannelProfileSerializer.get_channels()` uses the prefetched set when available, eliminating one query per profile in any response that lists multiple profiles.
+- **Channel table selection re-render reduction.**
+  - Removed `isShiftKeyDown` React state from `useTable`. Setting it on every `keydown`/`keyup` event triggered a re-render of any table consumer (`ChannelsTable`, `CustomTableBody`, ~50 memoized row comparisons) each time shift was pressed or released. The visual shift-key effect is handled entirely by `document.body.classList` manipulation, so the React state served no purpose.
+  - Removed the `selectedChannelIds` reactive Zustand store subscription from `ChannelsTable`. Each checkbox click wrote to both local `selectedTableIds` state and the store via `onRowSelectionChange`, causing two sequential re-renders of `ChannelsTable` per click. The two consumers of this subscription (`deleteChannel` and `ChannelBatchForm`) now read from `table.selectedTableIds` directly.
+  - Removed the dead `rowSelection` useMemo that built a TanStack row-selection map from `selectedTableIds`. The map was placed in `tableInstance` but `state.rowSelection` was never passed to `useReactTable`, so TanStack never consumed it. Eliminated a full page-row iteration on every selection change.
+
+## [0.24.0] - 2026-05-03
+
+### Security
+
+- **HDHomeRun discovery endpoints now respect the `M3U_EPG` network access policy**. `DiscoverAPIView`, `LineupAPIView`, `LineupStatusAPIView`, and `HDHRDeviceXMLAPIView` were marked `AllowAny` so HDHR clients (Plex, Emby, Jellyfin, Channels DVR, etc.) can discover the tuner without authenticating, but they were not gated by any network allowlist. The lineup enumerates every channel name and per-channel UUID stream URL, so any client that could reach the server could full-enumerate the lineup. All four views now call `network_access_allowed(request, "M3U_EPG")` and return `403 Forbidden` for clients outside the allowlist, matching the gating already applied to the M3U and EPG endpoints (and matching what the Network Access settings UI already advertised: "Limit access to M3U, EPG, and HDHR URLs"). Operators with a restrictive `M3U_EPG` policy will see HDHR discovery start being blocked for off-LAN clients on upgrade; loosen the policy if remote HDHR access is required.
+- **Removed `dangerouslySetInnerHTML` from the M3U Profile regex preview**. The "Matched Text" preview in the M3U Profile editor built an HTML string by interpolating the user's sample input into a `<mark>` wrapper and rendering it via `dangerouslySetInnerHTML`. A crafted sample input (admin-only, so self-XSS only) could inject arbitrary HTML into the preview pane. The preview now returns an array of plain strings and `<mark>` React elements, so user input is always treated as text by React.
+- **Authorization on DVR recording playback endpoints**. `RecordingViewSet.file` and `RecordingViewSet.hls` now require an authenticated session and enforce a per-user channel-access check before serving any bytes. Admins (`user_level >= 10`) are always allowed; standard users are allowed only when the recording's source channel is visible under their channel-profile assignments and within their `user_level`, mirroring the same logic used by `stream_xc` for live channels. Unauthenticated requests now receive `403 Forbidden` instead of being served. The pre-existing `network_access_allowed(request, "STREAMS")` perimeter check is retained as a separate, prior gate so external IPs can be blocked from streaming entirely even with a valid token.
+- Updated `lxml` 6.0.3 → 6.1.0, resolving the following CVE:
+  - **CVE-2026-41066**: External entity injection (XXE) in `iterparse()` and `ETCompatXMLParser`.
+- Updated frontend npm dependencies to resolve 5 audit vulnerabilities (1 moderate, 4 high):
+  - Updated `@xmldom/xmldom` 0.8.12 → 0.8.13, resolving **high** uncontrolled recursion in XML serialization causing DoS ([GHSA-2v35-w6hq-6mfw](https://github.com/advisories/GHSA-2v35-w6hq-6mfw)), **high** XML injection via unvalidated `DocumentType` serialization ([GHSA-f6ww-3ggp-fr8h](https://github.com/advisories/GHSA-f6ww-3ggp-fr8h)), **high** XML node injection via unvalidated processing instruction serialization ([GHSA-x6wf-f3px-wcqx](https://github.com/advisories/GHSA-x6wf-f3px-wcqx)), and **high** XML node injection via unvalidated comment serialization ([GHSA-j759-j44w-7fr8](https://github.com/advisories/GHSA-j759-j44w-7fr8))
+  - Updated `postcss` 8.5.6 → 8.5.13, resolving **moderate** XSS via unescaped `</style>` in CSS stringify output ([GHSA-qx2v-qp2m-jg93](https://github.com/advisories/GHSA-qx2v-qp2m-jg93))
+
+### Fixed
+
+- **EPG program times shifted by the host system's UTC offset when `/etc/localtime` is bind-mounted into the container**. Mounting `/etc/localtime` from a non-UTC host causes PostgreSQL to silently resolve the `'UTC'` timezone name to the host's local timezone (e.g. CDT, CET) rather than actual UTC - even though `SHOW timezone` returns `UTC` and the zoneinfo file exists. This made PostgreSQL format all stored `timestamptz` values with the host's UTC offset, and psycopg2 returned datetimes shifted by that offset, causing every EPG program time to be read back N hours wrong and written to the XML output incorrectly. The fix registers a Django `connection_created` signal that issues `SET TIME ZONE 'UTC0'` on every new database connection. `UTC0` is a POSIX timezone string that bypasses the broken zoneinfo name-lookup path entirely; it resolves unconditionally to UTC+00 regardless of the host timezone or what files are mounted. (Fixes #651)
+- **Xtream Codes `player_api.php` missing `active_cons` and reporting wrong `max_connections`**. The `user_info` block returned by the XC API did not include the `active_cons` field, which Enigma2 clients (XStreamity, XKlass) read unconditionally and crash with `KeyError: 'active_cons'` when it is absent. `max_connections` was also hardcoded to the system-wide tuner count for every user, ignoring per-user `stream_limit` configuration. `xc_get_info` now reports `max_connections` as the user's `stream_limit` when set, falling back to the system tuner count for unlimited users; `active_cons` is the user's own active connection count when they have a per-user limit, or the system-wide active connection count when they do not (so unlimited clients can still see how much of the global tuner pool is in use). The existing `get_user_active_connections` helper was generalized to accept `user_id=None` for the system-wide query rather than duplicating its Redis scan logic. (Fixes #990)
+- **Plugin discovery re-running on every connect event**. The `PluginManager` cache hit check used `if self._registry and ...`, which always evaluated false when zero plugins were installed because an empty dict is falsy. Every Connect event (`recording_start`, `client_connect`, `channel_start`, etc.) was therefore triggering a full filesystem walk of `/data/plugins` and emitting `Discovering plugins (no DB sync) in /data/plugins` / `Discovered 0 plugin(s)` log lines. Tracked separately via a new `_discovery_completed` flag so the cache short-circuits subsequent calls regardless of registry contents, dropping discovery to once per worker process lifetime.
+- **Empty show/season folders left behind after deleting a recording**. Deleting a recording removes the MKV (or HLS working directory if still in progress) but previously left the parent show / season directories on disk even when they no longer contained any other recordings. After file cleanup, `RecordingViewSet.destroy` now walks up from the deleted file's parent directory and removes any now-empty directories, stopping at the `/data/recordings` library root so the root itself is never touched.
+- **Premature DVR concat on graceful Celery worker shutdown**. A `worker_shutting_down` signal handler in `apps/channels/tasks.py` now sets a module-level `_DVR_SHUTTING_DOWN` flag. The `run_recording` loop checks this flag after FFmpeg exits and, if the recording's `end_time` has not yet passed, skips concatenation and persists `status="interrupted"` with `interrupted_reason="server_shutdown"`. The HLS working directory is preserved across the restart so the recovery path on the next worker startup can resume segment numbering from where it left off rather than truncating the show.
+- **Channel start/stop notifications missing name**: the "channel started" toast never showed up and the "channel stopped" toast showed the raw UUID instead of the channel name. `channel_name` is now written into the Redis metadata hash at init time and included in every stats payload pushed over WebSocket; the frontend notification functions read `ch.channel_name` from the stats payload directly, falling back to the store lookup and then a formatted placeholder. Both notifications now display the correct channel name.
+- **Channel form reset on group creation**: creating a new channel group from within the channel create/edit form no longer wipes all filled-in form fields. The newly created group is also automatically selected in the channel group field after it is saved. (Fixes #545)
+- **EPG channel name truncation**: EPG sources that include long `<display-name>` values (e.g. event-based channels with descriptions appended to the name) would crash the channel-parse task with a `value too long for type character varying(255)` PostgreSQL error and silently discard the entire batch. The `EPGData.name`, `Stream.name`, and `Channel.name` fields have been widened to 512 characters, and names exceeding this limit are now truncated with a warning log rather than aborting the import. (Fixes #1134)
+- **Channel start/client connect notifications suppressed on first stats poll after page load**: after logging in or navigating to the Stats page, the notification logic was not firing for any connections present in the first stats response, even for streams that had started after the page loaded. Replaced the flag-based approach with a `pageLoadTime` module-level constant compared against each client's `connected_at` Unix timestamp from Redis; connections that pre-date the page load are filtered out, while genuinely new ones fire immediately. `get_basic_channel_info` now also includes `connected_at` in each client entry so this check works for the Stats page's API poll path as well as the WebSocket path.
+
+### Added
+
+- **In-progress recording playback from the DVR page**. The Watch button on a recording card is now enabled while the recording is still in progress, and the in-app floating player can play the live HLS playlist with full timeshift / scrub-back to the start of the recording.
+  - The frontend now bundles `hls.js` and routes any `.m3u8` URL through it (Chrome, Edge, Firefox, and other Chromium-based browsers). Native HLS via `<video src=>` is reserved for Safari, where it Just Works for the same playlist.
+  - hls.js requests are authenticated via `xhrSetup`, attaching the same `Authorization: Bearer <accessToken>` header the live mpegts.js player already uses, so the new per-user authorization check on the recording endpoints (see Security) is satisfied for every playlist refresh and segment fetch.
+- **Watch DVR recordings live while they are still recording**: `run_recording` has been refactored from a single TS file capture to an FFmpeg HLS segmentation pipeline. While recording is in progress, the `file_url` exposed on the recording points to a new `/api/channels/recordings/{id}/hls/index.m3u8` endpoint instead of the eventual MKV path, so any HLS-capable client (the built-in web player, VLC, infuse, channels DVR clients, etc.) can join the stream at any time and watch from the live edge. When the recording ends, the segments are concatenated into the final MKV, `file_url` is updated to point to the existing `/file/` endpoint, and the HLS working directory is cleaned up. Hitting `/file/` while a recording is still in progress now redirects to the HLS playlist rather than 404, and hitting `/hls/index.m3u8` after the recording has finalized redirects to `/file/`, so URLs cached by clients in either form continue to work across the transition.
+- New HLS playback endpoint (`RecordingViewSet.hls`) serves `.m3u8` and `.ts` files out of the recording's working directory with path traversal protection (`os.path.realpath` containment check). Playlist files are rewritten on the fly so each segment line becomes an absolute URL routed back through this endpoint, preserving authentication and path isolation. Both this and the existing `/file/` endpoint are gated by the `STREAMS` network policy and a per-user authorization check (see Security).
+- Explicit `path('recordings/<int:pk>/hls/<path:seg_path>', ...)` route registered in `apps/channels/api_urls.py` _before_ `router.urls`. DRF's `DefaultRouter` appends a mandatory trailing slash to every URL it generates, but HLS players request segments by their natural filenames (`seg_00001.ts`) without a trailing slash, so the explicit route is required for the player to ever reach the view.
+- `DISPATCHARR_WEB_HOST` environment variable for modular deployments. The Celery container needs to reach the uWSGI / web container to fetch HLS segments while recording (FFmpeg pulls from the public stream URL, the same way any other client does). `get_dvr_stream_base_url()` resolves the base URL deterministically: AIO / dev / debug containers reach uWSGI on `127.0.0.1:$DISPATCHARR_PORT` since Celery and uWSGI share the container, while modular deployments use `http://$DISPATCHARR_WEB_HOST:$DISPATCHARR_PORT` and default `DISPATCHARR_WEB_HOST` to `web` (the compose service name). Documented as a commented-out override in `docker/docker-compose.yml`.
+- HLS viewer heartbeat. Every `.ts` request refreshes a Redis key `dvr:hls_viewer:{id}` with a 20 second TTL. After concat succeeds, the recording task waits for that key to expire naturally before deleting the HLS working directory, so an actively-watching client is never cut off mid-segment when the recording ends. Cleanup happens within 20 seconds of the last client stopping, with a 4 hour safety cap as a guard against a stuck Redis state.
+- **VOD start/stop notifications**: the frontend now shows a toast notification when a VOD stream starts or stops. `vod_started` and `vod_stopped` WebSocket events are fired from the backend when a new provider connection is opened or the last active stream on a session ends. The 1-second delayed-cleanup window is used as a settle period before firing `vod_stopped`, so seek reconnects that re-establish `active_streams` within that window suppress the notification. A `vod_stats` WebSocket push is sent alongside every event to keep the Stats page connection table in sync in real time. `vod_start` and `vod_stop` system events are also written to the system event log for each transition, and are now selectable as integration trigger events (webhook/script) in the Connect page.
+- **Channel Profiles column in Users table**: users can now see all channel profiles assigned to each user directly in the Users table. Added tooltips for profile names to handle overflow, adjusted column sizing to prevent overflow between columns, and improved the table layout for better readability. (Closes #819) — Thanks [@damien-alt-sudo](https://github.com/damien-alt-sudo)
+- **Plugin warning & disclaimer components**: extracted shared plugin warning UI into a new `PluginWarnings.jsx` component and normalized warning/disclaimer usage across all plugin action modals. New reusable components: `PluginSecurityWarning` (untrusted code), `PluginSupportDisclaimer` (community support scope), `PluginDowngradeWarning` (version downgrade), `PluginInfoNote` (informational), and `PluginRestartWarning` (backend restart on import). Updated `Plugins.jsx`, `AvailablePluginCard.jsx`, and `PluginCard.jsx` to use the shared components. — Thanks [@sethwv](https://github.com/sethwv)
+- **Plugin file sizes**: the plugin hub now displays the download size of a plugin directly on the Install / Update / Downgrade / Overwrite buttons (e.g. `Install  142 KB`) when the repository manifest includes size data. The size is also shown in the version detail panel. Falls back gracefully to a plain button when no size is provided. A `formatKB` utility was added to convert raw KB values to human-readable strings (KB/MB). A "Publish Your Plugin" button linking to the contributing guide was added to the plugin store toolbar. — Thanks [@sethwv](https://github.com/sethwv)
+- **Targeted stream-stats refresh in the channel table**: expanding a channel row now refreshes `stream_stats` for that channel's streams via a new lightweight delta endpoint (`GET /api/channels/channels/{channel_id}/streams/stats/`) instead of relying on a full channel-list re-fetch. The endpoint accepts a `since` (ISO 8601) cursor and an optional `ids` filter and returns only streams whose `stream_stats_updated_at` is strictly newer than the cursor, so the response is empty when nothing has changed. The frontend computes the cursor on demand from the streams already in the store, fires the request once on row expand, and fires it again scoped to a single stream ID when the in-app preview player closes. A new `patchChannelStreamStats` Zustand mutator merges the response into the store while preserving object identity for unchanged channels and streams, so memoized rows do not re-render. This restores the live-stats refresh behaviour that the channel-table performance work removed (`requeryChannels()`) without re-introducing the page-wide re-fetch.
+- **Editable default M3U profile patterns**: the default profile in the M3U profiles editor now exposes Search Pattern and Replace Pattern fields, allowing users to apply a URL transformation to every stream in the playlist (useful for replacing a local IP address, for example). A warning alert explains the fallback behaviour. A "Reset to Defaults" button restores the pass-through patterns (`^(.*)$` / `$1`). The live regex demonstration panel is also shown for the default profile. The backend serializer and `transform_url` were updated accordingly: `search_pattern` and `replace_pattern` are now permitted fields when updating a default profile, and `transform_url` uses `regex.subn()` to detect a genuine non-matches, logging a `WARNING` when the pattern does not match any part of the URL.
+
+### Performance
+
+- **TS proxy buffer writes pipelined**: `StreamBuffer.add_chunk` previously issued five separate Redis commands per buffered chunk (`incr`, `setex`, `zadd`, `zremrangebyscore`, `expire`), each a full round trip. The `incr` is still issued first because its return value is needed to build the chunk key, but the remaining four commands are now queued on a non-transactional pipeline and flushed in a single `execute()` call. Drops per-chunk Redis round trips from 5 to 2 on busy channels.
+- **TS proxy per-client stats writes throttled**: `ClientStreamer._process_chunks` was issuing a Redis `hset` of client stats (chunks sent, bytes sent, transfer rates, last_active) on every chunk delivered to every client. The `hset` is now gated to once per second per client via a new `stats_write_interval` throttle, matching the actual polling cadence of the frontend stats panel. The TTL refresh logic and in-memory rate calculations are unchanged. Dramatically reduces Redis traffic on channels with many concurrent viewers.
+- **`send_m3u_update` skips redundant `M3UAccount` lookup**: the helper used to re-fetch the `M3UAccount` row on every progress tick just to populate `status` and `last_message`. It now skips the query entirely when the caller has already supplied both fields in `kwargs`, and uses `.only("status", "last_message")` when the lookup is needed. Removes thousands of pointless `SELECT` queries from M3U download and processing progress streams.
+- **M3U auto-channel orphan cleanup**: replaced a redundant `orphaned_channels.count()` followed by `.delete()` with a single `qs.delete()` call that uses the count returned by Django's delete. Saves one COUNT query per auto-sync run.
+- **Channel table performance**:
+  - Removed unused Zustand store subscriptions (`channels`, `selectedProfileChannels`, `selectedProfileChannelIds`) and an unused `channelIds` array subscription from `ChannelsTable` to reduce unnecessary re-renders on unrelated store updates. Cleaned up associated dead code and unused imports.
+  - Optimized `ChannelTableStreams` (the expanded stream list inside each channel row) to reduce mount cost: moved pure helper functions and static values (`getCoreRowModel`, `defaultColumn`, stat categorization/formatting) outside the component so they're created once; stabilized the TanStack column definitions by removing `data` and `expandedAdvancedStats` from the `useMemo` dependency array (cell renderers receive the row at render time); switched advanced-stats toggle tracking from `useState` to a `useRef` + per-cell local state so toggling one stream's stats doesn't recreate the entire column array and table instance; memoized `dataIds`, `removeStream`, `handleDragEnd`, and `handleWatchStream` with `useMemo`/`useCallback`; extracted `StreamInfoCell` as a `React.memo` component with its own memoized stat categorization.
+  - Fixed `getChannelStreams` store selector to return a stable empty-array reference instead of creating a new `[]` on every call for channels without streams, preventing unnecessary re-renders via the `shallow` comparator.
+  - Memoized individual rows in `CustomTableBody` so that expanding/collapsing a channel only re-renders the 1-2 affected rows instead of all rows on the page. Callback functions (`renderBodyCell`, `expandedRowRenderer`) are stored in refs so memoized rows always use the latest version without the function references themselves defeating the memo comparator.
+  - Stream reorder in `ChannelTableStreams` now completes in a single PATCH request instead of three. Previously dragging a stream to a new position triggered a PATCH, then `requeryStreams()` (re-fetching all streams), then `requeryChannels()` (re-fetching the entire paginated channel list with all embedded stream objects). The reorder now uses a dedicated `API.reorderChannelStreams()` path that issues only the PATCH, then updates the store in-place by reordering the existing stream objects without any network round-trips. On failure, `requeryChannels()` is called to restore correct state.
+  - Fixed N+1 `UPDATE` queries in the stream-order write path. `ChannelSerializer.update()` and the bulk-edit view were calling `ChannelStream.save(update_fields=["order"])` once per stream whose position changed. Both now collect all modified `ChannelStream` objects and issue a single `ChannelStream.objects.bulk_update(…, ["order"])` call. Also removed an accidental `print(normalized_ids)` debug statement left in the serializer.
+  - Applied the same lightweight store-update approach from stream reorder to stream removal. `removeStream` previously called `API.updateChannel` (which internally triggered `requeryStreams`), then also explicitly called `requeryChannels()` and `requeryStreams()`. Removal now calls `API.reorderChannelStreams` with the remaining stream list (optimistic local `setData` first), matching the one-request pattern used by drag reorder.
+  - `removeStream` in `ChannelTableStreams` was capturing `data` and `channel` in its closure, causing the `columns` `useMemo` to recreate the entire column array (and new TanStack table instance) on every reorder or remove. Both values are now read through refs (`channelRef`, `dataRef`) so `removeStream` has no dependencies and is stable for the lifetime of the component. Removed `removeStream` and `playlists` from the `columns` dep array.
+  - `DraggableRow` (stream rows inside the expanded channel) is now wrapped in `React.memo` with a comparator on `row.original` identity and `index`, so rows whose stream data and position haven't changed are skipped entirely during re-renders caused by a sibling row moving.
+  - Removed dead code in the `name` column cell: `playlists[stream.m3u_account]?.name` was indexing an array by an integer ID, which always returns `undefined`, the value was immediately overridden by `m3uAccountsMap`. The dead access and its fallback variable are gone; `m3uAccountsMap` is now the sole lookup.
+  - Removed spurious `state: { data }` from the `useReactTable` call. `data` is a root-level TanStack Table option, not a controlled-state entry; passing it in `state` was a no-op but misleading.
+  - Adding streams to a channel (per-row "Add to Channel" button and bulk "Add selected to Channel") now completes in a single PATCH request instead of three. Previously each operation called `API.updateChannel` (which internally triggered `requeryStreams`), then `requeryChannels()`. Both paths now use a dedicated `API.addStreamsToChannel()` method that issues only the PATCH, merges the existing channel streams with the newly added stream objects locally, and updates the store in-place, no `requeryStreams` or `requeryChannels` round-trips.
+  - Removed an unnecessary `requeryStreams()` call from `API.createChannelFromStream()`. Stream data does not change when a channel is created from it; the caller already calls `requeryChannels()` to display the new channel.
+- Eliminated repeated DB queries in the `ts_proxy` hot path. `StreamManager`, `StreamGenerator`, and `ProxyServer` were each calling `Channel.objects.get(uuid=...)` on every retry, reconnect, failover, and buffering event solely to retrieve `channel.name` for log events. `StreamManager` and `StreamGenerator` now fetch the channel name once at construction via a lightweight `values_list` query and store it as `self.channel_name`. `ProxyServer` caches the name in a `_channel_names` dict keyed by channel ID at channel-start time and pops it at channel-stop time. (Fixes #1138)
+- Eliminated per-tick DB queries from the channel stats system. Previously `get_basic_channel_info()` in `channel_status.py` issued a `Stream.objects.filter()` and an `M3UAccountProfile.objects.filter()` on every stats tick for each active channel to resolve display names. Channel name and stream name are now written into the Redis metadata hash at channel-init time (via `initialize_channel`) and read back directly during stats collection, zero DB queries per tick. `m3u_profile_name` is now resolved on the frontend from the already-loaded playlists store rather than being pushed from the backend.
+- Eliminated a redundant `Channel` DB lookup inside `ChannelService.initialize_channel()`. `views.py` already fetches the `Channel` object via `get_stream_object()` before calling `initialize_channel()`; `channel.name` is now passed as an optional `channel_name` parameter, so the service uses the caller-supplied value and only falls back to a DB query when the name is not provided (e.g. stream-preview paths). A matching `stream_name` parameter was added for the same reason; the `stream_name` DB query is skipped entirely on normal channel start since a channel name is always available.
+- Eliminated a redundant `Stream` DB lookup on stream switches. `get_stream_info_for_switch()` already fetches the `Stream` object to build the URL; it now includes `stream_name` in its return dict. `change_stream_url()` captures that value and passes it through to `_update_channel_metadata()`, which skips its own `Stream.objects.filter()` when the name is already known.
+- **Dedicated thread-pool Celery worker for DVR recordings**. `run_recording` is long-running and almost entirely I/O-bound: it loops in short ticks polling FFmpeg, the DB, and Redis for the full duration of the recording. Running it on the default prefork worker pool (`--autoscale=6,1`) meant at most 6 concurrent recordings, and only if no other background work was running. M3U refreshes, EPG parsing, channel matching, comskip, etc. all competed for the same 6 slots, so if every worker was busy when a recording's start time arrived, the task would queue in Redis and FFmpeg would not start until a worker freed up, causing the user to miss the beginning of the show.
+  - A second Celery worker is now started alongside the default one, configured with `--pool=threads --concurrency=20` and bound to a dedicated `dvr` queue. Threads fit this workload because every blocking call in `run_recording` releases the GIL (sleep, subprocess wait, file / DB / Redis I/O) and FFmpeg itself runs in a separate OS process. A `task_routes` entry in `dispatcharr/celery.py` routes `apps.channels.tasks.run_recording` to the `dvr` queue regardless of how it is dispatched (Celery Beat `PeriodicTask`, `.delay()`, etc.). The default prefork worker now subscribes only to the `celery` queue (`-Q celery -n default@%h --autoscale=6,1`), so recordings can no longer starve background tasks and background tasks can no longer delay recordings.
+  - Net result: up to 20 concurrent recordings, zero startup delay regardless of EPG / M3U refresh activity, and a memory cost of roughly 80 to 120 MB for the second always-on worker process. Each additional concurrent recording costs nearly nothing on top because all 20 threads share that single process. Applied to AIO (`docker/uwsgi.ini`), dev (`docker/uwsgi.dev.ini`), debug (`docker/uwsgi.debug.ini`), and the modular celery container (`docker/entrypoint.celery.sh`).
+- **Added database index on `Stream.name`**. The stream list default sort is `ORDER BY name`, but the column had no index, causing full table scans that spilled to disk (observed at ~38 MB temp file / ~800 ms) on large stream libraries. `db_index=True` is now set on the field, letting PostgreSQL satisfy the sort via an index scan with no disk spill. (Fixes #1209)
+- **Streams table now only refetches what changed**. Loading the Channels page fired `/streams/`, `/streams/ids/`, and `/streams/filter-options/` together via `Promise.all`, and the trio refired on every pagination, sort, or filter change. The IDs list and filter options don't depend on page or sort order, so they were re-pulled needlessly (~440 KB per pagination round trip on a 70k-stream library). `fetchData` was split into a `fetchPageData` for the visible rows (depends on page + sort + filters) plus dedicated effects for the IDs and filter-options endpoints (filters only). Initial-load timing is unchanged (still parallelized), but every subsequent paginate or sort toggle now hits only `/streams/`.
+
+### Changed
+
+- **Plugin discovery startup gated to the main process**. `apps/plugins/apps.py` now consults `should_skip_initialization()` before its eager in-memory `discover_plugins()` pass in `AppConfig.ready()`. The pass previously ran in every uwsgi worker fork, every Celery worker, and every `manage.py` invocation. Plugin discovery now happens lazily on first Connect event in worker processes (cached thereafter); the existing `post_migrate` handler still keeps the database side in sync.
+- DVR recording pipeline rewritten around FFmpeg + HLS. The previous implementation wrote a single growing `.ts` file via the proxy and remuxed it to `.mkv` at the end; the new implementation runs FFmpeg with `-f hls`, regenerates monotonic PTS to handle erratic IPTV source timestamps, shifts output timestamps so they start at 0 (fixing negative-PTS streams that prevented HLS segment boundary detection), and concatenates the resulting segments into the final MKV at the end of the recording. Server-restart resume now continues segment numbering from the previous session rather than overwriting earlier segments.
+- Stall detection added to the recording loop. Once the first segment confirms the stream is flowing, the loop watches both segment count and segment file mtime. If neither advances for the configured stall window (e.g. when an upstream proxy ghost-kills the client), FFmpeg is signaled and the recording ends cleanly rather than hanging until `end_time`. Recording duration is honored via SIGINT so FFmpeg writes `#EXT-X-ENDLIST` cleanly into the final playlist.
+- `end_time` extension is now picked up by the running recording without restarting FFmpeg. The DB poll loop simply updates the in-memory deadline.
+- Recording cancellation cleanup updated for the new layout. `RecordingViewSet.destroy()` now removes the HLS working directory via a `_safe_rmtree` helper (with the same `allowed_roots` containment check used for the existing `_safe_remove`) instead of trying to delete the obsolete `_temp_file_path`.
+- HLS working directory lifecycle in `custom_properties` is now two-phase. After concat succeeds, only `file_url` and `output_file_url` are updated so new client requests are redirected to the final MKV via `/file/`; `_hls_dir` is intentionally preserved through the viewer-wait grace period so in-flight `.ts` requests keep resolving. `_hls_dir` is cleared from `custom_properties` only after `shutil.rmtree` actually removes the directory.
+- **Column resizing in `CustomTable`**: column widths are now propagated to body cells via CSS custom properties (`--header-{id}-size`) injected on the table wrapper, rather than reading `column.getSize()` directly in each cell's React style. This decouples body-cell widths from React renders so that memoized rows (which skip re-renders for performance) still reflect resize changes instantly via CSS cascade.
+- Decoupled row expansion from row selection in `CustomTable`, expanding a channel row no longer also selects it. Added an `onRowExpansionChange` callback to `useTable` so callers can react to expansion changes independently of selection state.
+- Fixed a stale-closure bug in memoized channel row checkboxes, `selectedTableIdsRef` now ensures the checkbox `onChange` handler and `handleShiftSelect` always read the current selection set rather than the stale set captured at render time. Without this, clicking any checkbox after the first would silently deselect previously checked rows.
+- Fixed the "Add to Channel" per-row and bulk buttons in the Streams table not activating when a channel row is expanded. `StreamRowActions` now subscribes to the Zustand store directly (bypassing `React.memo`) so button state updates when `expandedChannelId` or `selectedChannelIds` change without any parent row props changing. Added `targetChannelId` (expanded channel takes priority; falls back to a single selected channel) used by both the per-row and bulk add paths.
+- Removed dead props `getExpandedRowHeight` and `tableBodyProps` from `CustomTableBody` and their corresponding pass-throughs in `CustomTable`, both were accepted but never consumed.
+- **Improved channel start/client connect notifications**: when a channel starts streaming, the redundant separate "new channel" and "new client" toasts are now combined into a single **"Channel started streaming"** notification. All connect/disconnect notifications display both the channel name and the user identity (username + IP, or IP alone) on separate lines. A module-level `pageLoadTime` timestamp compared against each client's `connected_at` field from Redis filters out pre-existing connections on page load, while connections that genuinely start after the page loads (even if they arrive in the very first stats poll) correctly fire notifications.
+- **Client timing fields consolidated to `connected_at`**: `get_basic_channel_info` was sending only a pre-computed `connected_since` elapsed-seconds value (no raw timestamp), while `get_detailed_channel_info` was sending `connected_at` alongside a redundant `connection_duration`. Both paths now emit only `connected_at` (Unix timestamp). The frontend derives connection display time and duration from that single value at render time, which also fixes the "timestamp jumping" seen on the Stats page, the connected-at wall-clock time is now stable across polls instead of being recomputed each response.
+- **Duration tooltip on Stats page connection table**: the hover tooltip on the Duration column now shows a human-readable breakdown instead of a raw seconds count. Seconds only under a minute, minutes and seconds under an hour, hours and minutes under a day, and days and hours beyond that (e.g. `2 hours, 15 minutes`).
+- Dependency updates:
+  - `psycopg2-binary` 2.9.11 → 2.9.12
+  - `lxml` 6.0.3 → 6.1.0 (security patch; see Security section)
+  - `sentence-transformers` 5.4.0 → 5.4.1
+  - `@xmldom/xmldom` 0.8.12 → 0.8.13 (security patch; see Security section)
+
+### Removed
+
+- **Dead M3U helper methods**: deleted `M3UAccount.deactivate_streams`, `M3UAccount.reactivate_streams`, and `M3UFilter.filter_streams`. None had any callers anywhere in the codebase. New code that needs to flip `is_active` on every stream of an account should use `self.streams.update(is_active=...)` rather than reintroducing a per-row `.save()` loop.
+- **HDHomeRun SSDP advertiser**. The `apps/hdhr/ssdp.py` module and the `start_ssdp()` call in `apps.hdhr.apps.HdhrConfig.ready()` have been removed. The implementation advertised a `urn:schemas-upnp-org:device:MediaServer:1` UPnP MediaServer device on `udp/1900`, but Dispatcharr does not implement the UPnP MediaServer Content Directory Service that such an advertisement promises, and the `LOCATION`-targeted `/hdhr/device.xml` returns HDHomeRun-flavored XML rather than the UPnP descriptor a generic UPnP browser expects. None of the major HDHomeRun clients (Plex, Emby, Jellyfin, Channels DVR, Kodi) use SSDP for tuner discovery, they use SiliconDust's native UDP broadcast on `udp/65001`, which Dispatcharr does not currently implement. The advertiser ran a listener thread, a broadcaster thread, a bound multicast socket, and emitted a `NOTIFY` broadcast every 30 seconds for no consumer. Tuners can still be added in any HDHomeRun-aware client by entering the Dispatcharr URL manually (e.g. `http://<host>:9191/`).
+
+## [0.23.0] - 2026-04-17
+
+### Security
+
+- Set `DEFAULT_PERMISSION_CLASSES` to `IsAdmin` in the DRF configuration. All viewsets and function-based views that require non-admin or unauthenticated access were explicitly annotated: proxy streaming endpoints (`stream_ts`, `stream_xc`, `stream_vod`, `head_vod`, `stream_xc_movie`, `stream_xc_episode`) use `@permission_classes([AllowAny])` (access is controlled by the per-stream-type network allow-list inside the view body); the `UserAgentViewSet`, `StreamProfileViewSet`, `CoreSettingsViewSet`, and `ProxySettingsViewSet` gained `get_permissions()` methods mapping read actions to `IsStandardUser` and write actions to `IsAdmin`; and `AuthViewSet.logout` was updated to return `[Authenticated()]`.
+- Fixed missing `network_access_allowed` checks in the VOD proxy. `stream_vod`, `head_vod`, `stream_xc_movie`, and `stream_xc_episode` were not checking the `STREAMS` network policy, unlike the equivalent TS proxy endpoints.
+- Explicitly marked the HDHomeRun discovery endpoints (`DiscoverAPIView`, `LineupAPIView`, `LineupStatusAPIView`, `HDHRDeviceXMLAPIView`) and the version endpoint with `permission_classes = [AllowAny]` to document their intentionally public access now that the global default is `IsAdmin`.
+- Fixed path traversal vulnerability in file uploads. The M3U account upload (`apps/m3u/api_views.py`), logo upload (`apps/channels/api_views.py`), and backup upload (`apps/backups/api_views.py`) all used the uploaded filename directly without sanitization. `os.path.join()` discards all preceding components when it encounters an absolute path segment, and `pathlib`'s `/` operator behaves identically; a relative `../` sequence also escapes via OS path resolution at `open()` time. All three upload paths now strip directory components via `Path(name).name` and validate the resolved path remains within the intended upload directory. Exploiting any of these required admin credentials.
+- Prevented users from setting `xc_password` (and other admin-managed keys) on their own account via the `PATCH /api/accounts/users/me/` endpoint.
+- Hardened the HLS proxy `change_stream` endpoint by converting it from a plain Django view to a DRF `@api_view` with `@permission_classes([IsAdmin])`, ensuring the endpoint actually enforces admin-only access. The previous decorator arrangement (`@csrf_exempt` + `@permission_classes`) had no effect on a plain Django view.
+- Added rate limiting to the login endpoint (`POST /api/accounts/token/`) using DRF's built-in throttling. A `LoginRateThrottle` (3 requests/minute per IP, sliding window) is applied to the `TokenObtainPairView`. Repeated failed attempts from the same IP receive `429 Too Many Requests`.
+- Extended rate limiting to the session-auth login alias (`POST /api/accounts/auth/login/`). It now delegates entirely to `TokenObtainPairView`, inheriting its throttle, network access check, and audit logging, and returns JWT tokens instead of a session cookie (the session-based response was unusable since `SessionAuthentication` is not in `DEFAULT_AUTHENTICATION_CLASSES`). Both endpoints share the same `"login"` throttle scope, so attempts across either path count against the same per-IP limit.
+- Removed `CORS_ALLOW_CREDENTIALS = True` from CORS configuration. Dispatcharr authenticates via JWT `Authorization` headers and API keys — not cookies — so credentials are never sent cross-origin by browsers. The setting was also redundant: browsers reject `Access-Control-Allow-Credentials: true` when `Access-Control-Allow-Origin` is a wildcard (`*`), so it had no effect in practice.
+- Updated frontend npm dependencies to resolve 6 audit vulnerabilities (6 high):
+  - Updated `@xmldom/xmldom` 0.8.11 → 0.8.12, resolving **high** XML injection via unsafe CDATA serialization allowing attacker-controlled markup insertion ([GHSA-wh4c-j3r5-mjhp](https://github.com/advisories/GHSA-wh4c-j3r5-mjhp))
+  - Updated `lodash` 4.17.23 → 4.18.1, resolving **high** Code Injection via `_.template` imports key names ([GHSA-r5fr-rjxr-66jc](https://github.com/advisories/GHSA-r5fr-rjxr-66jc)) and **high** Prototype Pollution via array path bypass in `_.unset` and `_.omit` ([GHSA-f23m-r3pf-42rh](https://github.com/advisories/GHSA-f23m-r3pf-42rh))
+  - Updated `vite` 7.3.1 → 7.3.2, resolving **high** Path Traversal in optimized deps `.map` handling ([GHSA-4w7w-66w2-5vf9](https://github.com/advisories/GHSA-4w7w-66w2-5vf9)), **high** `server.fs.deny` bypass with queries ([GHSA-v2wj-q39q-566r](https://github.com/advisories/GHSA-v2wj-q39q-566r)), and **high** Arbitrary File Read via dev server WebSocket ([GHSA-p9ff-h696-f583](https://github.com/advisories/GHSA-p9ff-h696-f583))
+- Updated `Django` 6.0.3 → 6.0.4, resolving the following CVEs:
+  - **CVE-2026-33033**: Potential DoS via `MultiPartParser` through crafted multipart uploads.
+  - **CVE-2026-33034**: SGI requests with a missing or understated `Content-Length` header could bypass the `DATA_UPLOAD_MAX_MEMORY_SIZE` limit.
+  - **CVE-2026-4292**: Privilege abuse in `ModelAdmin.list_editable`.
+  - **CVE-2026-3902**: ASGI header spoofing via underscore/hyphen conflation.
+  - **CVE-2026-4277**: Privilege abuse in `GenericInlineModelAdmin`.
+
+### Added
+
+- **EPG historical data window**: the EPG XML output and XC EPG API now support a `prev_days` URL parameter (e.g. `&prev_days=3`) to include past programs in the EPG response. This allows third-party players that request historical program schedules to receive the data they need. The EPG URL builder in the Channels page exposes "Days forward" and "Days back" controls. Per-user defaults for both values (`epg_days` / `epg_prev_days`) can be configured in the User settings modal and are applied automatically when no URL parameter is present. (Closes #1154)
+- **Plugin Hub**: administrators can now browse, install, and update plugins directly from remote repositories via a new Plugin Hub page in Settings. (Closes #393) — Thanks [@sethwv](https://github.com/sethwv)
+  - Install plugins directly from the hub: the release zip is downloaded, SHA256 integrity is verified, and the plugin is installed atomically.
+  - Update managed plugins when a newer version is available from their source repo. Version compatibility constraints (`min_dispatcharr_version` / `max_dispatcharr_version`) are enforced at install time.
+  - Browse available plugins from all enabled repos with name, description, version, author, and icon.
+  - Plugins installed from a repo are tracked as "managed": source repo, slug, installed version, prerelease flag, and deprecated status are all persisted and surfaced in the UI.
+  - Add plugin repositories by manifest URL. The official Dispatcharr Plugins repository is pre-configured; third-party repos are supported by supplying an optional GPG public key.
+  - Manifest signatures are verified via GPG; the official repo uses a bundled public key. Signature status is displayed per-repo.
+  - Preview a repository URL before adding it - validates the manifest and reports plugin count and signature status without saving anything.
+  - Configurable automatic manifest refresh interval (in hours; 0 to disable) runs as a Celery background task.
+
+### Removed
+
+- Removed dead `VODConnectionManager` class (`apps/proxy/vod_proxy/connection_manager.py`) and its associated helpers, which had been superseded by `MultiWorkerVODConnectionManager`. All active code already used the multi-worker implementation. Removed the unused `VODConnectionManager` import from `vod_proxy/views.py`, the unscheduled `cleanup_vod_connections` task from `apps/proxy/tasks.py`, and the unscheduled `cleanup_vod_persistent_connections` task from `core/tasks.py`.
+- Removed dead VOD URL routes: `VODPlaylistView` (playlist generation), `VODPositionView` (position tracking), and the class-based `VODStatsView` (replaced by the existing function-based `vod_stats` view).
+- Removed dead `updateVODPosition()` API method from `frontend/src/api.js`, which called the now-removed position tracking endpoint.
+
+### Fixed
+
+- Fixed TV Guide "Record One" always scheduling the recording on the first channel that matched the program's `tvg_id`, rather than the channel the user actually selected. When multiple channels share the same EPG source, the intended channel was silently ignored. The selected channel object is now passed explicitly through the click handler chain to `recordOne`, bypassing the `findChannelByTvgId` fallback lookup entirely. (Fixes #1140) — Thanks [@fezster](https://github.com/fezster)
+- Graceful container shutdown: `docker stop` no longer results in exit 137 (SIGKILL). The entrypoint now explicitly stops all child processes — including uWSGI workers, Celery, Daphne, and Redis, which are spawned as uWSGI `attach-daemon` children and were previously invisible to the signal handler. A polling loop replaces the old fixed `sleep`, exiting as soon as all processes have stopped (up to an 8-second ceiling before force-stopping). PostgreSQL is stopped using `pg_ctl stop -m immediate` as a fallback rather than SIGKILL to avoid data corruption. Process names are now recorded at startup and displayed correctly in crash diagnostics. The unexpected-exit diagnostic block is now suppressed on normal `docker stop` shutdowns. — Thanks [@Shokkstokk](https://github.com/Shokkstokk) for the initial fix!
+- Fixed two race conditions in the VOD proxy that caused the `profile_connections` counter to go permanently negative, allowing connections beyond the configured profile limit. (1) `_decrement_profile_connections()` used a GET-before-DECR guard: two concurrent decrements could both read the same positive value, both pass the guard, and both fire, driving the counter below zero. Replaced with an unconditional `DECR` followed by a clamp-to-zero if the result is negative. (2) The `stream_generator` decremented `active_streams` and then checked `has_active_streams()` in two separate Redis round-trips without locking. A concurrent generator on another worker could read `active_streams=0` in the window between those two calls and also decrement the profile counter, producing a double-decrement. A new `decrement_active_streams_and_check()` method performs both operations under a single distributed lock, and a `profile_decremented` flag guards all four call sites in the generator so the profile counter is only ever decremented once per stream. (Closes #1125) — Thanks [@firestaerter3](https://github.com/firestaerter3)
+- Fixed a provider TCP connection leak in the VOD proxy `stream_generator`. When a stream ended via an unhandled exception path that reached the `finally` block without any of the three exception handlers having run (e.g. an error raised before the first `yield`), the `finally` block decremented counters but never called `redis_connection.cleanup()`. The upstream `requests.Response` and `requests.Session` were left open until garbage collection. The `finally` block now starts a `delayed_cleanup` daemon thread (matching the 1-second delay used by the normal-completion and `GeneratorExit` paths) so that seeking clients have time to reconnect and increment `active_streams` before `cleanup()` checks whether it is safe to close the connection.
+- Fixed manual stream selection from the Stats page not enforcing M3U profile connection limits in multi-worker deployments. When a non-owning worker handled the `change_stream` request it correctly packaged `stream_id` and `m3u_profile_id` into the Redis pubsub message, but the owning worker's pubsub handler only consumed `url` and `user_agent` silently dropping both IDs before calling `stream_manager.update_url()`. Because `update_url` only calls `update_stream_profile()` when a `stream_id` is provided, the `profile_connections` counter was never updated after the switch, causing subsequent capacity checks to see incorrect counts and bypass the full-profile guard. The handler now extracts `stream_id` and `m3u_profile_id` from the event and forwards them to `update_url()`. The bug did not affect single-worker / dev-mode deployments because the owning worker handles those requests directly without pubsub.
+- Fixed the `next_stream` rotation endpoint applying the same class of bug: `get_stream_info_for_switch()` was called and returned `m3u_profile_id`, but the result was dropped when forwarding to `ChannelService.change_stream_url()`, so `update_stream_profile()` was never called and `profile_connections` counters were not updated after an automatic stream rotation.
+- Fixed stream switch metadata (`url`, `user_agent`, `stream_id`, `m3u_profile`) being written to Redis before the switch was confirmed to succeed. If the switch failed, URL unchanged or exception during teardown, Redis described a URL not actually in use. Metadata is now written only after `update_url()` returns `True`; on failure the owner writes `stream_manager.url` back as the ground truth. The non-owner no longer pre-writes metadata at all, all needed info is carried in the pubsub payload and written by the owner after confirmation.
+- Fixed the Stats page "Active Stream" dropdown not updating when a stream switch occurs. The card was matching the active stream by comparing the URL stored in Redis against stream URLs from the database, which failed silently when the stored URL was a transformed/rewritten value that didn't substring-match the original. The dropdown now matches by `stream_id` (the authoritative value already present in the stats payload) and re-runs only when `stream_id` changes, so the normal polling interval drives updates with no extra renders.
+- Fixed the XC Password field in the User modal being editable by standard users despite the backend (`PATCH /api/accounts/users/me/`) stripping `xc_password` from `custom_properties` for non-admin users, causing the change to silently revert on save. The field and its generate button are now disabled with an explanatory description when the current user is not an administrator.
+- Fixed live stream hiccups caused by nginx buffering TS proxy data to disk. The `/proxy/` location block used `proxy_buffering off` and `proxy_read/send_timeout` directives, which are silently ignored when the upstream is `uwsgi_pass` (a different directive family). nginx was therefore defaulting to `uwsgi_buffering on`, spooling stream data through temp files on disk. Replaced with the correct `uwsgi_buffering off`, `uwsgi_read_timeout 300s`, and `uwsgi_send_timeout 300s` directives so stream data flows directly from uWSGI to the client socket without intermediate disk I/O.
+- Fixed the logo cache endpoint (`/api/channels/logos/{id}/cache/`) holding a uWSGI greenlet indefinitely when fetching from a slow or dripping remote server. The previous implementation used `StreamingHttpResponse(iter_content())` with only a per-chunk read timeout; a server that drips data just fast enough to reset the per-read timer could hold the greenlet open forever. Replaced with an eager read loop enforcing a hard total-download deadline (10 s) and a size cap (5 MB). Also fixed a race condition in the existing negative-cache logic: the failure entry for a URL was cleared immediately upon receiving HTTP 200, before the body was read. A concurrent greenlet seeing no failure entry during a slow download that ultimately timed out would also attempt the fetch, defeating the cache. The entry is now cleared only after the full body has been successfully received.
+- Fixed uploading a local M3U file with no expiration date set sending the string `"null"` as the `exp_date` field in the `FormData` request, causing a 400 validation error from the API. Null/undefined values are now skipped when building the `FormData` body, matching the behaviour already present in the update path.
+- Fixed `PATCH /api/channels/channels/edit/bulk/` returning a 500 error when the request body included a `streams` list. The bulk edit handler was iterating `validated_data` directly and calling `setattr(channel, "streams", value)`, which Django prohibits on ManyToMany fields. Also added an `@extend_schema` decorator so the Swagger UI correctly documents the endpoint as accepting a JSON array and shows the `streams` field. (Fixes #883)
+- Fixed several incorrect or incomplete OpenAPI (`@extend_schema`) schemas across the API:
+  - `POST /api/epg/import/` — request body was undocumented; now correctly shows the `id` field. Description updated from "import" to "refresh" to match frontend and backend terminology.
+  - `DELETE /api/channels/logos/bulk-delete/` — `delete_files` boolean was missing from the documented request body.
+  - `POST /api/channels/channels/batch-set-epg/` — `epg_data_id` inside each association object was not marked `allow_null`/`required=False`, even though passing `null` is the correct way to remove an EPG link.
+  - `PUT /api/connect/integrations/{id}/subscriptions/set/` — endpoint had no `@extend_schema` at all; now documents that the request body is a JSON array of subscription objects.
+
+### Changed
+
+- **Output bitrate DB persistence**: the `ffmpeg_output_bitrate` stat is no longer written to the database on every FFmpeg stats tick (~2/second). Instead, a local exponential moving average (EMA, α=0.1) accumulates readings continuously. The first 10 samples (~5 seconds) are discarded as warmup to avoid polluting the average with FFmpeg's unstable ramp-up values. After warmup, the smoothed value is flushed to the database at most once every 30 seconds, and a final flush occurs when the stream stops but only if the EMA has been seeded (i.e. the stream ran past warmup). Streams that stop during warmup leave the existing database value untouched, preserving previously accurate measurements when channel-hopping.
+- Performance: `generate_m3u`, `generate_epg`, and `xc_get_live_streams` now use `select_related('channel_group', 'logo')` (or `select_related('logo')` for EPG) on every Channel queryset in `apps/output/views.py`. Previously each channel in the loop triggered a separate database query for its `logo` and `channel_group` foreign keys; with the JOIN-based prefetch this is reduced to a single query per request. On deployments with ~2 000 channels, `xc_get_live_streams` response time drops from ~2.5–4 s to ~250–450 ms. (Closes #1127) — Thanks [@xBOBxSAGETx](https://github.com/xBOBxSAGETx)
+- Performance: `generate_epg` now uses `select_related('epg_data__epg_source')` on all EPG channel querysets, eliminating N+1 database queries for `EPGSource` traversal per channel (~15 s improvement on ~2000-channel deployments; total EPG generation time dropped from ~87 s to ~72 s in benchmarks).
+- Performance: `xc_get_epg` now uses `select_related('epg_data__epg_source')` on all three channel fetch paths. Previously each request triggered 2 additional queries to resolve `channel.epg_data` and `channel.epg_data.epg_source`.
+- Performance: `generate_m3u` now uses `prefetch_related` for streams when `?direct=true` is requested, eliminating N+1 stream queries (one per channel) on that code path.
+- Performance: `EPGGridAPIView` (`apps/epg/api_views.py`) now uses `select_related('epg_data__epg_source')` on the `channels_with_custom_dummy` queryset, eliminating 2 extra queries per channel (for `epg_data` and `epg_source`) in the dummy EPG generation loop.
+- Performance: `generate_epg` now issues a single cross-channel `ProgramData` bulk query. `.values()` returns plain dicts, bypassing per-row Django model instantiation. Results are consumed in independent 5000-row keyset-paginated chunks. Combined with the `select_related` improvements above, EPG generation time on large deployments is significantly reduced.
+- Performance: `xc_get_live_streams` no longer calls `ChannelGroup.objects.get_or_create(name="Default Group")` once per null-group channel; replaced with a lazy-initialised closure that executes at most one query regardless of how many ungrouped channels are present.
+- AIO containers now connect to the internal PostgreSQL instance via a Unix domain socket instead of TCP loopback. Users who have `POSTGRES_HOST` explicitly set to `localhost` or `127.0.0.1` in their compose file are automatically migrated to the socket path; any other explicit value (external host/IP) is left untouched. — Thanks [@JCBird1012](https://github.com/JCBird1012)
+- Improved the EPG response cache key. Previously it was based on the raw query string and username, meaning a user default of `epg_days=7` and an explicit `&days=7` URL parameter produced different cache entries for identical output. The key is now built from all resolved effective parameter values (`days`, `prev_days`, `cachedlogos`, `tvg_id_source`) so semantically equivalent requests always share the same cache entry.
+- Improved the HDHR, M3U, and EPG URL builder popovers in the Channels table: each popover now opens with a brief intro sentence describing its purpose. Toggle switches were refactored to use Mantine's native `label` and `description` props (replacing the previous manual `Group`/`Stack`/`Text` layout), giving each switch a properly styled description line beneath its label. Switch alignment was also corrected. Toggles now appear on the left with the label and description stacked to the right, consistent with standard Mantine form layout.
+- Redesigned the User settings modal with a tabbed layout: **Account** (username, email, name, password), **Permissions** (user level, stream limit, channel profiles, mature content filter - admin only), **EPG Defaults** (days forward/back), and **API & XC** (XC password, API key management). Fields are now logically grouped rather than split across two ad-hoc columns.
+- EPG channel scanning now automatically removes stale `EPGData` entries. tvg-ids that were present in a previous scan but are no longer found in the upstream source, provided they are not mapped to any channel. This prevents unbounded database bloat over time. Entries mapped to at least one channel are always preserved.
+- Rewrote the M3U line parser as an `iter_m3u_entries` generator that owns the full per-entry state machine. Intermediate directive lines between `#EXTINF` and the stream URL are now handled correctly rather than corrupting the pending entry or being silently misassigned. A `#EXTINF` with no following URL is discarded with a warning instead of carrying over a `url`-less entry into batch processing. Attribute keys are normalised to lowercase during parsing (provider attribute names remain case-insensitive end-to-end). The `#EXTINF` attribute regex is pre-compiled at module load, and attribute lookups use O(1) `dict.get()` instead of linear scans — approximately 10% faster parsing on large M3U files.
+- Added support for the `#EXTGRP` directive in M3U files. When a `group-title` attribute is absent from the `#EXTINF` line, the value from a following `#EXTGRP:` line is used as the group. An explicit `group-title` attribute always takes priority. (Closes #1088)
+- Added accumulation of `#EXTVLCOPT` directives per entry. Options are stored as a list under `vlc_opts` inside the stream's `custom_properties`, available for downstream use (e.g. passing VLC-specific options to the player). This is for a planned future enhancement and can also be utlized with the API.
+- M3U stream name parsing now uses the comma text (the canonical display title per the base `#EXTINF` spec) as the primary stream name, falling back to `tvc-guide-title`, then `tvg-name`, rather than preferring `tvg-name` first. Providers that use `tvg-name` as an EPG key and put the human-readable title after the comma will now display the correct name. Providers that duplicate the same value in both fields are unaffected. (Fixes #1081)
+- FloatingVideo player: the native video controls (timeline, play/pause, volume) are now hidden by default when a live stream starts and only appear when the user hovers over the player.
+- Enhanced Swagger UI authorization dialog: registered a custom `OpenApiAuthenticationExtension` for `ApiKeyAuthentication` so drf-spectacular now generates an `ApiKeyAuth (apiKey)` entry alongside `jwtAuth`. Both entries include descriptive text linking to the relevant endpoints (`/api/accounts/token/`, `/api/accounts/api-keys/generate/`, `/api/accounts/api-keys/revoke/`).
+- Refactored frontend form components (`AccountInfoModal`, `AssignChannelNumbers`, `Channel`, `ChannelBatch`, `ChannelGroup`, `Connection`, `CronBuilder`, `DummyEPG`, and `EPG`) to extract business logic into dedicated utility modules under `src/utils/forms/`. Each extracted module is covered by unit tests. Mantine compound component references (`Table.Tbody`, `Popover.Target`, `Accordion.Item`, etc.) have been updated to use flat named imports. — Thanks [@nick4810](https://github.com/nick4810)
+- Improved the EPG BOM fix from v0.22.1: replaced the `lstrip(b'\xef\xbb\xbf')` / `startswith` approach with `start.find(b'<?xml')`, which locates the XML declaration regardless of any leading bytes BOM, whitespace, or other encoding markers without needing to know what those bytes are.
+- Dependency updates:
+  - `Django` 6.0.3 → 6.0.4 (security patch; see Security section)
+  - `djangorestframework` 3.16.1 → 3.17.1
+  - `requests` 2.33.0 → 2.33.1
+  - `gevent` 25.9.1 → 26.4.0
+  - `rapidfuzz` 3.14.3 → 3.14.5
+  - `sentence-transformers` 5.3.0 → 5.4.0
+  - `lxml` 6.0.2 → 6.0.3
+  - Added `python-gnupg` for GPG signature verification of official and third-party plugin repository manifests.
+
+## [0.22.1] - 2026-04-05
+
+### Fixed
+
+- Fixed EPG sources that emit a UTF-8 BOM (e.g. ErsatzTV, EPGShare, WebGrab+Plus) parsing 0 channels and 0 programmes after the HTML entity fix introduced in v0.22.0. `bytes.lstrip()` only strips ASCII whitespace, leaving the three BOM bytes (`EF BB BF`) in place, so `stripped.startswith(b'<?xml')` returned `False`. The function fell through to the no-declaration branch and prepended the HTML entity DOCTYPE block _before_ the BOM and XML declaration, producing invalid XML that lxml silently discarded under `recover=True`. Fixed by stripping the BOM explicitly before the whitespace strip: `start.lstrip(b'\xef\xbb\xbf').lstrip()`. BOM-free files are unaffected. (Closes #1173) — Thanks [@dwot](https://github.com/dwot) for the fix!
+
+## [0.22.0] - 2026-04-01
+
+### Security
+
+- Updated `requests` 2.32.5 → 2.33.0, resolving the following CVE:
+  - **CVE-2026-25645** (moderate): Insecure temp file reuse in `extract_zipped_paths()` utility function.
+- Updated frontend npm dependencies to resolve 4 audit vulnerabilities (2 moderate, 2 high):
+  - Updated `brace-expansion` 5.0.2 → 5.0.5, resolving **moderate** zero-step sequence causing process hang and memory exhaustion ([GHSA-f886-m6hf-6m8v](https://github.com/advisories/GHSA-f886-m6hf-6m8v))
+  - Updated `flatted` 3.4.1 → 3.4.2, resolving **high** Prototype Pollution via `parse()` in NodeJS flatted ([GHSA-rf6f-7fwh-wjgh](https://github.com/advisories/GHSA-rf6f-7fwh-wjgh))
+  - Updated `picomatch` 4.0.3 → 4.0.4, resolving **high** method injection in POSIX character classes causing incorrect glob matching ([GHSA-3v7f-55p6-f55p](https://github.com/advisories/GHSA-3v7f-55p6-f55p)) and a ReDoS vulnerability via extglob quantifiers ([GHSA-c2c7-rcm5-vvqj](https://github.com/advisories/GHSA-c2c7-rcm5-vvqj))
+  - Updated `yaml` 1.10.2 → 1.10.3, resolving **moderate** stack overflow via deeply nested YAML collections ([GHSA-48c2-rrv3-qjmp](https://github.com/advisories/GHSA-48c2-rrv3-qjmp))
+
+### Added
+
+- Connection cards on the Stats page now show the **username** of the connected user. For live channel connections a new User column appears between IP Address and Connected; for VOD connections the username is shown inline next to the IP address in the Client summary row. The username is resolved from the user store using the `user_id` stored in Redis client metadata. (Closes #766, Closes #586)
+- `ip_address` and `user_id` were not included in the client info returned by `get_detailed_channel_info()` despite being available in the Redis hash. Both fields are now extracted and returned. `user_id` is now also included in the VOD stats response.
+- Web UI stream preview now sends an `Authorization: Bearer` header with each mpegts.js request, identifying the logged-in user. Live channel previews initiated from the web UI now appear on the Stats page with the correct username rather than as unknown user.
+- `client_connect` and `client_disconnect` system events now include the **username** of the connected user. The username is stored alongside the client metadata in Redis and included in the event payload for `log_system_event` calls (making it available to webhook and script integrations).
+- Donate button added to the sidebar footer. A heart icon links to the project's Open Collective page, visible in both expanded and collapsed states. Hovering shows a "Support Dispatcharr" tooltip. The version string is also now clickable to copy it to the clipboard.
+- User stream limits: administrators can now set a maximum number of concurrent streams per user account. When a user reaches their limit, the system can automatically terminate an existing stream to free a slot based on configurable rules. Limit enforcement applies to both live channels and VOD. (Closes #544)
+  - Each user account has a new **Stream Limit** field (0 = unlimited) configurable from the user edit form in Settings → Users.
+  - Global enforcement behaviour is configurable in Settings → User Limits:
+    - **Terminate on Limit Exceeded**: automatically stop an existing stream when the user's limit is reached (vs. rejecting the new connection).
+    - **Terminate Oldest**: prefer terminating the oldest stream when freeing a slot; disable to prefer the newest.
+    - **Prioritize Single-Client Channels**: prefer terminating streams on channels that only this user is watching.
+    - **Ignore Same-Channel Connections**: count multiple connections to the same live channel as one stream toward the limit. Same-channel reconnects are always allowed through. When this is enabled and a channel must be freed, all connections to the chosen channel are terminated together so that the unique-channel count actually decreases. VOD is explicitly excluded from this bypass since VOD connections are not shared upstream.
+- TLS and mutual TLS (mTLS) support for Redis and PostgreSQL connections in modular deployments. Supports encrypted connections, server certificate verification (Redis: on/off; PostgreSQL: verify-full, verify-ca, require), CA certificate configuration, and client certificate authentication. Configured via environment variables in the docker compose file. Includes startup validation for certificate paths and TLS/URL scheme conflicts, and a read-only Connection Security panel in System Settings. (Closes #950) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Status filter for M3U group and VOD category filter modals: A new **All / Enabled / Disabled** segmented control is now shown alongside the text search input in the Live, VOD - Movies, and VOD - Series tabs of the M3U Group Filter modal. The status filter works in combination with the text search and also scopes the "Select Visible" / "Deselect Visible" buttons so they only act on the currently visible subset. (Closes #312)
+
+### Changed
+
+- M3U Profile form (XC accounts): added a **Simple / Advanced** mode toggle for credential-based URL rewriting. In Simple mode users enter just a new username and password; the search and replace patterns are built automatically from the account's current credentials. In Advanced mode the full regex fields are shown as before. The selected mode is saved to `custom_properties.xcMode` and auto-detected on existing profiles (a profile whose search pattern matches the account's current `username/password` is recognised as Simple automatically). The Live Regex Demonstration panel is hidden in Simple mode.
+- XtreamCodes VOD endpoints (`/movie/` and `/series/`) no longer redirect clients to a UUID-based proxy URL. Requests are now handled directly in the proxy layer via `stream_xc_movie` and `stream_xc_episode`, which call `stream_vod()` internally. The original XC path is preserved for the client throughout the stream.
+- `CustomTable` column layout now supports flexible (`grow`) columns alongside fixed-width ones:
+  - Column definitions accept a `grow` property (boolean or number) to opt into flex layout. A numeric value sets the flex-grow weight, allowing relative sizing between grow columns (e.g. `grow: 2` gives a column twice the share of spare space as `grow: 1`).
+  - `maxSize` is now respected on grow columns, capping how wide they expand via `maxWidth`.
+  - The wrapper's `minWidth` calculation now uses `minSize` (not TanStack's 150px default) for grow columns, preventing the table from overflowing its container when columns would otherwise be sized larger than available space.
+- Dependency updates:
+  - `requests` 2.32.5 → 2.33.0 (security patch; see Security section)
+  - `celery` 5.6.2 → 5.6.3
+  - `torch` 2.10.0+cpu → 2.11.0+cpu
+  - `sentence-transformers` 5.2.3 → 5.3.0
+  - `yt-dlp` 2026.3.13 → 2026.3.17
+- Docker base image cleanup: removed `python-is-python3`, `python3-pip`, and `streamlink` from the apt package list in `DispatcharrBase`. `python3-pip` and `streamlink` were pulling outdated system Python packages (e.g. `requests 2.31.0`, `cryptography 41.0.7`, `lxml 5.2.1`) into the system Python's site-packages despite the app running entirely in the uv-managed venv at `/dispatcharrpy`. `streamlink` is already installed in the venv via `pyproject.toml`. `python-is-python3` is unnecessary as `PATH` resolves bare `python` to the venv binary.
+- M3U table **Max Streams** column now reflects the combined limit across all active profiles. When a playlist has multiple active profiles, the column displays their summed total (or ∞ if any profile is unlimited) and a hover tooltip lists each profile's individual limit by name. (Closes #816)
+- Toggling an M3U profile's active state now immediately updates the playlist store (including the `playlists` array), so the **Max Streams** total in the M3U table reflects the change without a page reload.
+- M3U account form: **Max Streams** field changed from a plain text input to a number input with increment/decrement controls, consistent with other integer fields.
+- M3U account form: removed unused `useMantineTheme` import and `theme` variable.
+- Moved `guideUtils.js` from `frontend/src/pages/` to `frontend/src/utils/` to be consistent with other utility modules (e.g. `networkUtils.js`). Updated all imports across `GuideRow.jsx`, `HourTimeline.jsx`, `ProgramDetailModal.jsx`, `RecordingCardUtils.js`, `Guide.jsx`, and related test files.
+- Frontend cleanup: removed unused imports from `M3UGroupFilter`, `LiveGroupFilter`, and `VODCategoryFilter` (`Yup`, `M3UProfiles`, several unused Mantine components, dead `OptionWithTooltip` component, duplicate lucide-react imports, and `Divider` in `VODCategoryFilter`). No behaviour changes.
+- Network Access settings: leaving a field blank no longer shows a validation error. The default CIDR range for that field is saved automatically and a "Defaults Restored" warning is displayed listing which fields were reset. (Closes #726)
+
+### Fixed
+
+- M3U profile URL rewriting now uses the `regex` module instead of `re` across all URL transform code paths (`url_utils.transform_url`, `core/views.py`, `vod_proxy/_transform_url`, `tasks.get_transformed_credentials`, and the WebSocket live-preview handler in `consumers.py`). The `regex` module natively accepts JavaScript/PCRE-style named capture groups (`(?<name>...)`) without any conversion, eliminating the root cause of patterns that matched in the frontend live preview but failed on the backend with a `re.error`. As a further improvement, `regex` also supports variable-length lookbehind assertions (e.g. `(?<=a+)`), which `re` rejects with an error; patterns using these will now work correctly on the backend as well. Replace-pattern JS tokens are still normalised before calling `regex.sub`: `$<name>` → `\g<name>` and `$1`/`$2`/… → `\1`/`\2`/… (Python replacement syntax). Also fixed a bug in the WebSocket preview handler where a pattern error was incorrectly returning the search pattern string as the preview output instead of the original URL. (Fixes #1005)
+- Web UI stream preview (`FloatingVideo`) was calling `mpegts.createPlayer()` with all `Config` options (e.g. `enableWorker`, `liveSync`, `headers`) merged into the first `MediaDataSource` argument. mpegts.js only reads `Config` from the optional second argument; unrecognised fields in the first are silently ignored. As a result all player configuration was effectively the library defaults — worker offloading was disabled, latency management had no effect, and the `Authorization: Bearer` header (required for user identification) was never sent. Fixed by splitting into the correct two-argument call. Both `liveBufferLatencyChasing` and `liveSync` have been disabled, eliminating playback-rate fluctuations that caused audible stuttering on live streams. SourceBuffer cleanup thresholds were also relaxed from 10s/5s to 120s/60s to prevent frequent SourceBuffer pauses.
+- HTML named entities in XMLTV EPG files are now correctly preserved during lxml parsing. Some EPG providers (particularly French and other European sources) use HTML named entities like `&eacute;`, `&icirc;`, `&uuml;` in channel names, program titles, and metadata. These are not valid XML entities — lxml 6.0.2 with `recover=True` silently drops them, causing characters to go missing (e.g., "Chaîne Télé" becomes "Chane Tl"). This is now fixed by injecting an XML `<!DOCTYPE tv [...]>` internal subset declaring all 252 HTML 4 named entities directly into the byte stream that lxml reads, using a lightweight in-memory wrapper (`_PrependStream`) with zero disk I/O. libxml2 resolves the entities during its normal C-level parse pass — no Python-level preprocessing or temporary files are involved. The DOCTYPE block (~8 KB) is built once at module load from Python's stdlib `html.entities.name2codepoint` and reused for every parse. Files that already declare their own `<!DOCTYPE>` are passed through unchanged. (Closes #1095) — Thanks [@CodeBormen](https://github.com/CodeBormen) for helping with this!
+- Duplicate recordings created when EPG sources refresh and re-evaluate series rules (Fixes #940) — Thanks [@CodeBormen](https://github.com/CodeBormen):
+  - **Program ID instability**: `parse_programs_for_source()` deletes and recreates all `ProgramData` rows with new auto-increment IDs on every EPG refresh. The dedup set used these IDs, so it never matched after a refresh. Deduplication now uses a stable `(tvg_id, start_time, end_time)` composite key sourced from `Recording.custom_properties.program`.
+  - **Secondary guard using wrong times**: The DB guard compared unadjusted program times against offset-adjusted `Recording.start_time`/`end_time`, so it never matched when any DVR pre/post offset was configured. It now queries `custom_properties__program__start_time/end_time` (the original, unadjusted program times stored at recording creation).
+  - **No concurrency guard**: Each EPG source refresh fired `evaluate_series_rules.delay()` independently. Concurrent tasks loaded the dedup set before others committed, allowing races. Evaluation is now serialized with `acquire_task_lock` (reusing the existing EPG task pattern). Gracefully degrades if Redis is unavailable — the primary and secondary dedup guards still protect.
+- EPG refresh tasks (`refresh_epg_data`) were being killed mid-transaction on large EPG sources. The `soft_time_limit=1700s` introduced in v0.21.0 raised `SoftTimeLimitExceeded`, a subclass of `Exception`, which was swallowed by the existing `except Exception` handler in `parse_programs_for_source`, leaving the database in a partial state with no logged error. `soft_time_limit` has been removed from `refresh_epg_data` and `time_limit` raised to 14400s (4 hours) as a true last-resort ceiling; the existing `TaskLockRenewer` daemon thread continues to renew the Redis lock every 120s for legitimately long-running tasks.
+
+## [0.21.1] - 2026-03-18
+
+### Fixed
+
+- Docker container initialization fixes for PUID/PGID handling — Thanks [@CodeBormen](https://github.com/CodeBormen):
+  - Backups failing on previous installations where `/data/backups` already existed: `/data/backups` was missing from the `DATA_DIRS` list in the init script, causing the PUID/PGID ownership migration to skip the directory and leave it with incorrect permissions.
+  - Container startup failure on upgrade when data directories reside on external mounts (NFS, SMB/CIFS, FUSE): `chown` failures under `set -e` were crashing the container, breaking setups that worked fine on the previous image. Failures are now collected per-directory and reported as a consolidated warning; the container continues to start and Django reports at runtime if it cannot write a specific directory.
+  - Upgrading users running as UID 102 (the internal PostgreSQL system user) instead of the expected UID 1000: the PUID/PGID auto-detect introduced in v0.21.0 read ownership from `/data/db`, which was UID 102 in pre-PUID images, causing Django, file creation, and comskip to all run as the wrong user. PUID/PGID now default to 1000 (matching the original Django UID) rather than auto-detecting from data directory ownership.
+
+## [0.21.0] - 2026-03-17
+
+### Security
+
+- Updated frontend npm dependencies to resolve 1 high-severity vulnerability:
+  - Updated `flatted` to 3.4.1, resolving **high** unbounded recursion DoS in the `parse()` revive phase ([GHSA-25h7-pfq9-p65f](https://github.com/advisories/GHSA-25h7-pfq9-p65f))
+- Updated `Django` to 6.0.3 and `django-celery-beat` to 2.9.0, resolving new security vulnerabilities:
+  - [CVE-2026-25673](https://www.cve.org/CVERecord?id=CVE-2026-25673): Potential denial-of-service vulnerability in URLField via Unicode normalization on Windows (March 3, 2026)
+  - [CVE-2026-25674](https://www.cve.org/CVERecord?id=CVE-2026-25674): Potential incorrect permissions on newly created file system objects (March 3, 2026)
+
+### Added
+
+- Configurable sidebar navigation ordering and visibility — Thanks [@jcasimir](https://github.com/jcasimir)
+  - Sidebar nav items can be reordered via drag-and-drop in Settings → UI Settings → Navigation.
+  - Individual nav items can be hidden from the sidebar using the eye toggle. Hiding an item preserves its position in the order.
+  - A "Reset to Default" button restores the role-appropriate default order and clears all hidden items.
+  - Order and visibility are saved per-user with optimistic updates and automatic rollback on failure. Changes appear in the sidebar immediately without a page reload.
+  - Admin users see a grouped navigation: flat items (`Channels`, `VODs`, `M3U & EPG Manager`, `TV Guide`, `DVR`, `Stats`, `Plugins`) plus collapsible `Integrations` (Connections, Logs) and `System` (Users, Logo Manager, Settings) groups. The `System` group cannot be hidden.
+  - Non-admin users see `Channels`, `TV Guide`, and `Settings`, with the `Settings` item not hideable.
+- Unit tests for `NotificationCenter`, `NotificationCenterUtils`, and `M3URefreshNotification` components, and for settings form components `DvrSettingsForm`, `NetworkAccessForm`, `ProxySettingsForm`, `StreamSettingsForm`, `SystemSettingsForm`, `UiSettingsForm`. — Thanks [@nick4810](https://github.com/nick4810)
+- Unit tests for DVR port resolution (`build_dvr_candidates`) and selective Redis flush behavior in modular mode. — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Floating video player improvements
+  - **Title display**: The channel, stream, or VOD title is now shown in the player header bar. Title is passed through from all preview entry points: channel table, stream table, stream connection card, guide, DVR, recording cards, recording details modal, VOD modal, and series modal.
+  - **Persistent state**: Size, position, volume level, and mute state are now saved across sessions using a single `dispatcharr-player-prefs` localStorage key. Size and position are restored on next open (clamped to the current viewport); volume and mute are restored when the player initialises.
+- New Client Buffer proxy setting: new clients joining an active channel are now positioned a configurable number of seconds behind live rather than a fixed chunk count. The start position is determined by wall-clock chunk receive time (stored as a Redis sorted set alongside the buffer), so the buffer depth is consistent in seconds regardless of stream bitrate. Setting the value to `0` starts clients at live with no buffer. Defaults to 5 seconds. Existing chunk-count gating for the first client connecting to a channel is unchanged. The setting is exposed in Settings → Proxy as "New Client Buffer (seconds)".
+- Channel table filter for channels that have stale streams: A new "Has Stale Streams" filter option in the channel table header menu highlights and filters channels containing at least one stale stream. Channels with stale streams are visually distinguished with an orange tint. The filter is mutually exclusive with "Only Empty Channels". - Thanks [@JCBird1012](https://github.com/JCBird1012)
+- "Next Highest Channel" numbering mode when creating channels from streams: A new `Next Highest` option is available alongside `Provider`, `Auto`, and `Custom` when creating channels from the Streams table. Selecting it assigns channel numbers starting one above the current highest channel number; the next available number is fetched from the backend at selection time. (Closes #1000) — Thanks [@JCBird1012](https://github.com/JCBird1012)
+- TV Guide program cards now display richer metadata — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Season/episode badges** (e.g. `S12E06`) extracted from EPG `<episode-num>` elements, `onscreen` episode strings (e.g. `S12 E6`, `S3E21`, `S8 E8 P2/2`), and as a last-resort fallback from description text patterns at parse time (3-tier pipeline). (Closes #1065)
+  - **Episode subtitle** shown below the program title on guide cards; falls back to the short description when no subtitle is available.
+  - **Status badges**: `LIVE`, `NEW`, `PREMIERE`, and `FINALE` surfaced from EPG flags on both compact cards and the detail modal.
+  - **Program detail modal**: Clicking any guide program opens a modal with full program details — poster/icon image, season/episode, subtitle, duration, categories, cast/director/writer credits, content rating, star ratings, production date, original air date, video quality, and external links to IMDb and TMDB where available. Detail data is fetched from a new `GET /api/epg/programs/{id}/` endpoint backed by the new `ProgramDetailSerializer`. Dummy/placeholder programs skip the fetch.
+  - **Real-time progress bars**: Currently-airing programs show a green progress bar on their guide card that updates every second via direct DOM manipulation (no React re-renders).
+  - **Channel name tooltip**: Hovering the channel logo column shows the channel name.
+- Sort icons added to the Group and EPG column headers in the Channels table, and to the Group column header in the Streams table. Clicking a sort icon cycles through ascending/descending/unsorted states. EPG sorting required a backend change (`epg_data__name` added to `ChannelViewSet.ordering_fields`); Group sorting was already supported by the API in both tables. (Closes #854) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- DVR enhancements — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Stop Recording**: A new Stop button (distinct from Cancel) cleanly ends an in-progress recording early and keeps the partial file available for playback. The API returns immediately; stream teardown and task revocation happen in a background thread to prevent 504 timeouts. When multiple recordings run simultaneously, stopping one only terminates that recording's proxy client by ID, leaving all others unaffected. (Closes #454)
+  - **Extend Recording**: In-progress recordings can be extended by 15, 30, or 60 minutes without interrupting the stream.
+  - **Inline metadata editing**: Title and description can now be edited directly in the recording details modal.
+  - **Refresh artwork button**: Manually re-run poster resolution on demand from the recording card.
+  - **Multi-source poster resolution**: Added pipeline querying EPG, VOD, TMDB, OMDb, TVMaze, and iTunes for richer recording artwork.
+  - **Series rules for currently-airing episodes**: Series rules now capture currently-airing episodes in addition to future scheduled ones. (Closes #473)
+  - **Search and filter controls**: Added search and filter controls to the recordings list.
+  - **Stream generator throttling**: Cached the `ProxyServer` singleton reference per client and throttled Redis resource checks (1 s) and non-owner health checks (2 s), eliminating 3+ Redis round-trips per stream loop iteration.
+  - **Automatic crash recovery on worker restart**: A `worker_ready` Celery signal now fires `recover_recordings_on_startup` automatically when the worker starts, so recordings stuck in "recording" status are recovered without manual intervention.
+- Account expiration tracking and notifications for M3U profiles
+  - A new `exp_date` field on `M3UAccountProfile` stores the account expiration date as a proper `DateTimeField`. For Xtream Codes accounts the field is auto-synced from `custom_properties.user_info.exp_date` on every save (supports both Unix timestamps and ISO date strings). For non-XC M3U accounts the date can be entered manually via the account or profile form.
+  - The M3U accounts table now shows an **Expiration** column displaying the earliest expiration date across all profiles for that account (color-coded: red = expired, orange = expiring soon, green = OK). Hovering the cell shows a tooltip with per-profile expiration details including inactive-profile labels.
+  - A daily Celery Beat task (`check_xc_account_expirations`) checks all active profiles with an expiration date and manages system notifications: a normal-priority warning is raised for profiles expiring within 7 days; a high-priority alert is raised once the profile has already expired. Warning and expired notifications use separate keys so dismissing the 7-day warning does not suppress the expiration alert.
+  - Notifications are also updated immediately when a profile is saved: if the expiration date is cleared or pushed beyond the 7-day window, any existing warning/expired notifications are deleted; if the date falls within the window or is already past, the matching notification is updated in place.
+  - Non-XC accounts expose a `DateTimePicker` on both the M3U account form and the profile form.
+
+### Changed
+
+- Dependency updates:
+  - `Django` 5.2.11 → 6.0.3 (security patch + major version upgrade; see Security section)
+  - `django-celery-beat` ≥2.8.1 → ≥2.9.0 (adds explicit Django 6.0 support)
+- When selecting an EPG source for a channel, the EPG source dropdown now only lists enabled (active) EPGs, sorted alphabetically.
+- Channels page default splitter ratio changed from 50/50 to 60/40 (channels/streams) so all channel action buttons are visible without scrolling on 1080p displays.
+- Frontend component refactoring and cleanup — Thanks [@nick4810](https://github.com/nick4810)
+  - `FloatingVideo`, `SeriesModal`, `VODModal`, `SystemEvents`, `M3URefreshNotification`, and `NotificationCenter` significantly reduced in size by separating business logic into dedicated utility modules under `utils/components/` (`FloatingVideoUtils.js`, `SeriesModalUtils.js`, `VODModalUtils.js`, `NotificationCenterUtils.js`).
+  - `FloatingVideo` resize handle elements extracted into a standalone `ResizeHandles` sub-component.
+  - `YouTubeTrailerModal` extracted into a standalone component (`components/modals/YouTubeTrailerModal.jsx`).
+  - `NotificationCenter` and `Sidebar` updated from Mantine dot-notation sub-components (`Popover.Target`, `Popover.Dropdown`, `ScrollArea.Autosize`, `AppShell.Navbar`) to Mantine v7 named imports (`PopoverTarget`, `PopoverDropdown`, `ScrollAreaAutosize`, `AppShellNavbar`).
+  - `M3URefreshNotification` now uses the centralized `showNotification()` utility (from `notificationUtils.js`) instead of calling `notifications.show()` directly, bringing it in line with the rest of the app. State updates also converted to functional updater form (`prev => ...`) to eliminate potential stale-closure bugs.
+  - `SystemEvents` now imports `format` from `dateTimeUtils` for consistent date/time formatting.
+  - Removed a dead `onLogout` handler in `Sidebar` that called `logout()` and `window.location.reload()` but was never wired to any UI element.
+- EPG output when no `days` parameter is specified now excludes already-ended programs instead of returning all historical data.
+
+### Fixed
+
+- Single-stream channel creation modal not opening correctly when clicking the channel-creation button on an individual stream row in the Streams table. — Thanks [@JCBird1012](https://github.com/JCBird1012)
+- DVR series rule creation failing with a 500 error when the stored `series_rules` data contained corrupted (non-dict) entries. Added type guards on the getter, setter, and generic settings serializer to filter invalid entries on read and write. Hardened the EPG ignore list getters (`prefixes`, `suffixes`, `custom`) with the same pattern. Frontend settings parse and save now validate `series_rules` with `Array.isArray()`, matching the existing EPG field pattern, preventing corrupted data from being round-tripped back to the database. (Fixes #1059) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+- TS proxy clients stuck indefinitely in keepalive mode when a stream fails and never recovers (Fixes #1102, #1103) — Thanks [@cmcpherson274](https://github.com/cmcpherson274) & [@CodeBormen](https://github.com/CodeBormen)
+  - **Keepalive duration cap**: Non-owner worker clients sending keepalive packets to hold a connection open during failover can now be held at most `MAX_KEEPALIVE_DURATION` seconds (default 300 s). If no real stream data has been received within that window, the client is disconnected with a warning log. The timer resets each time real data resumes, so independent stalls do not accumulate.
+  - **`last_active` tracking**: `last_active` is now updated on every keepalive packet and on every real data chunk, so clients actively waiting during a failover are not incorrectly evicted as ghost clients by the heartbeat thread. The heartbeat thread now only refreshes the Redis TTL rather than updating `last_active`, ensuring the ghost-detection check reflects true client activity rather than heartbeat activity.
+  - **Buffer reset on stream transition**: A new `reset_buffer_position()` method on `StreamBuffer` clears the in-memory write buffer and partial-packet accumulator when switching between FFmpeg processes. Without this, a partial 188-byte TS packet from the dying FFmpeg process was being prepended to the first bytes from the new FFmpeg process, producing a corrupted TS packet boundary that broke audio decoder sync on the client side. Redis-stored chunks already consumed by clients are unaffected.
+  - **`add_chunk()` locking hardened**: The lock scope in `add_chunk()` was expanded to cover the entire partial-packet merge and write-buffer accumulation phase, preventing a race condition between `add_chunk()` and the new `reset_buffer_position()` call.
+- uWSGI segfaults caused by mixing threading and gevent concurrency models. The dev and debug uWSGI configs had `threads` and `enable-threads = true` set alongside gevent, which triggers segmentation faults particularly on ARM64/Python 3.13. Removed those options to match the already-correct production config. — Thanks [@jcasimir](https://github.com/jcasimir)
+- `Stream.last_seen` and `ChannelGroupM3UAccount.last_seen` model defaults now use `django.utils.timezone.now` instead of `datetime.datetime.now`, eliminating spurious `RuntimeWarning: DateTimeField received a naive datetime` warnings emitted during test database creation and on new record creation when `USE_TZ=True`.
+- EPG programme parsing crash when an XMLTV source contains programme titles exceeding 255 characters. Previously, a single oversized title would cause the entire `bulk_create` batch to fail with a database truncation error, silently dropping all programmes in that batch. Titles are now truncated to 255 characters before being saved. (Fixes #1039)
+- Container startup failure when `PUID`/`PGID` is set, caused by `/data/db` ownership conflicts between the `postgres` system user (UID 102) and the configured PUID/PGID. PostgreSQL now runs as the PUID/PGID user in AIO mode, eliminating all `chown`-to-UID-102 operations and unifying `/data` ownership. (Fixes #1078) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - Existing installations where PUID/PGID differs from the current `/data/db` owner are migrated automatically on first startup; a sentinel file prevents redundant recursive `chown` on subsequent boots.
+  - PUID/PGID auto-detected from existing data ownership when not explicitly set, avoiding cross-UID `chown` failures on restricted filesystems (NFS `root_squash`, CIFS).
+  - PUID/PGID validated as positive non-zero integers before any user/group operations.
+  - UID collisions with the `postgres` system user (e.g. PUID=102) are now handled gracefully.
+  - Ensured proper variable quoting in the /docker/ directory to guard from inappropriate input
+- Floating video player bug fixes
+  - **Resize stuck after releasing mouse outside window**: The `mouseup` event is not delivered when the pointer leaves the viewport, leaving the `mousemove` listener active indefinitely. Fixed by checking `event.buttons === 0` at the top of `handleResizeMove`; when no button is held the resize session is torn down immediately.
+  - **Drag stuck after releasing mouse outside window**: Same root cause as the resize bug. Fixed by detecting `event.buttons === 0` in the `onDrag` handler and dispatching a synthetic `mouseup` event so react-draggable cleanly ends the drag session.
+  - **Player draggable off screen**: The player could be dragged off any edge, making the header (and drag handle) unreachable. The player is now fully bounded: left and top edges are clamped to `x ≥ 0` / `y ≥ 0` so the header is always reachable, and right/bottom edges are clamped to the viewport. Size and position are also re-clamped automatically when the browser window is resized, with proportional scale-down if the saved size exceeds the new viewport.
+- Double error notification when saving user preferences: `API.updateMe` was catching errors internally and displaying a notification before re-throwing, causing callers to display a second notification for the same failure.
+- Navigation preference saves from concurrent sessions could overwrite each other due to a double-merge race: the frontend was pre-merging `custom_properties` before sending, then the backend merged again against the DB value, causing the second session's write to silently drop keys set by the first. The frontend now sends only the delta; the backend merges authoritatively against the stored value.
+- Stale nav item IDs (e.g. from a previous nav structure) are now scrubbed from `navOrder` and `hiddenNav` on the next preference save, preventing unbounded growth of the `custom_properties` JSON field.
+- Version update notification persisting after upgrading to the notified version (e.g. "v0.20.2 available" shown while already running v0.20.2). Root cause: `check_for_version_update.delay()` was called from `AppConfig.ready()`, which fires inside Celery prefork pool subprocesses before the broker connection is established, causing the dispatch to fail silently with no log output. Fixed by moving the startup dispatch to the `worker_ready` signal in `celery.py` (consistent with the existing `recover_recordings_on_startup` pattern), and deleting the stale `version-{current_version}` notification at the top of the production check path so it is cleared even when GitHub is unreachable. A WebSocket update is sent immediately on deletion so the frontend badge clears without waiting for the API response.
+- VOD orphan cleanup crashing with a `ForeignKeyViolation` (`IntegrityError`) when a concurrent refresh task created a new `M3UMovieRelation` or `M3USeriesRelation` for a movie/series between the orphan-detection query and the `DELETE` SQL. Both `orphaned_movies.delete()` and `orphaned_series.delete()` are now wrapped in `try/except IntegrityError`; affected records are skipped with a warning and will be cleaned up on the next scheduled run.
+- XC stream refresh crashing with a `null value in column "name"` database error when a provider returns streams with a null or empty name. Affected streams are now assigned a generated fallback name in the format `<account name> - <stream_id>` so the refresh completes successfully and the stream remains accessible. A warning is logged for each affected stream.
+- 504 Gateway Timeout when saving M3U group settings on slower hardware (e.g. Synology NAS). Replaced per-row `update_or_create()` loops with `bulk_create(update_conflicts=True)` wrapped in `transaction.atomic()` for both `ChannelGroupM3UAccount` and `M3UVODCategoryRelation`, reducing hundreds of individual DB round-trips to a single query per model. (Fixes #745) — Thanks [@nickgerrer](https://github.com/nickgerrer)
+- Improved frontend table stability during M3U imports: Fixed incorrect default `state` initialization (`[]` → `{}`) in `CustomTable` to match TanStack Table v8's expected state object shape. Added `autoResetPageIndex: false` and `autoResetExpanded: false` to prevent TanStack Table from issuing internal state resets on data updates. Memoized `processedData` in `M3UsTable` to avoid redundant sort/filter recomputation on re-renders. - Thanks [@marcinolek](https://github.com/marcinolek)
+- `debian_install.sh` hardened for non-UTF8 environments (common in minimal LXC containers) - Thanks [@marcinolek](https://github.com/marcinolek)
+  - Added `setup_locales` step that installs the `locales` package, enables `en_US.UTF-8`, regenerates locales, and exports `LANG`/`LC_ALL` before any other work runs, preventing PostgreSQL from defaulting to `SQL_ASCII` encoding.
+  - PostgreSQL database creation now explicitly passes `-E UTF8` to `createdb`.
+  - `PATH` in the Celery worker, Celery Beat, and Daphne systemd service files extended to include `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`, fixing failures where background tasks could not locate `ffmpeg` or `ffprobe`.
+- `is_adult` field parsing now guards against invalid values (e.g. the string `"None"`) that providers may send instead of a valid integer, preventing a `ValueError` crash during M3U/XC stream refresh. A new `parse_is_adult()` helper wraps the cast in a `try/except`, returning `False` for anything that cannot be interpreted as `1`. (Fixes #1061) — Thanks [@JCBird1012](https://github.com/JCBird1012)
+- M3U EXTINF attribute parsing for values containing `=` or `==` (e.g. base64-padded `tvg-logo` URLs, catchup tokens with query strings). The previous regex used `[^\s]+` for the key pattern, allowing `=` signs inside a quoted value to be greedily absorbed into the next attribute's key name, causing that attribute and all subsequent ones on the line to be silently dropped. Changed to `[^\s=]+` so the key match always stops at the first `=`. (Fixes #1055) - Thanks [@JCBird1012](https://github.com/JCBird1012)
+- Celery worker memory leak during M3U/XC refresh causing 20–80 MB growth per cycle with no reclamation (Fixes #1012, #1053) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - Restructured `refresh_single_m3u_account()` with a `try/finally` that guarantees `del` of large data structures runs before Celery's `gc.collect()`, and lock release on all exit paths (success, exception, early return)
+  - Re-enabled batch data cleanup in `process_m3u_batch_direct()` (was commented out)
+  - Added `CELERY_WORKER_MAX_MEMORY_PER_CHILD = 512 MB` as a safety net against pymalloc arena fragmentation
+- EPG output was filtering programs using `start_time__gte=now` when the `days` parameter was specified, which caused currently-airing programs (started before the request time but not yet ended) to be omitted from the XML output. This produced a gap in clients' guides immediately after an EPG refresh, lasting until the next program started. Fixed by changing the filter to `end_time__gte=now` so any program that has not yet finished is included.
+- TS proxy connection slot leaks and TOCTOU races in stream initialization (Fixes #947) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **TOCTOU race in slot reservation**: `get_stream()` previously used a `GET`→check→`INCR` sequence, allowing concurrent requests to both read the same count below the limit and both reserve a slot, silently exceeding `max_streams`. Replaced with an atomic `INCR`-first pattern: increment unconditionally, check the result, roll back with `DECR` if over capacity. — Thanks [@patchy8736](https://github.com/patchy8736)
+  - **Leak on URL generation failure**: `generate_stream_url()` called `get_stream()` (which `INCR`s the counter) but had no cleanup path if subsequent DB lookups or URL construction failed. The post-`get_stream()` block is now wrapped in a `try/except` that calls `release_stream()` on any error.
+  - **Leak on retry-loop timeout**: the retry loop in `stream_ts()` called a bare `get_stream()` on the first failure to classify the error reason. If a slot was available, this `INCR`'d the counter and set Redis keys that were never released when the loop timed out. A `release_stream()` call is now issued before returning 503.
+  - **Leak on `initialize_channel()` failure**: when `initialize_channel()` returned `False`, the connection slot allocated by the preceding `get_stream()` was never released. A `connection_allocated` flag now tracks whether this request performed the `INCR` (fresh initialization vs. joining an existing channel), and `release_stream()` is called guarded by that flag to prevent incorrect decrements when attaching to an already-running channel.
+  - **Safety net for unexpected exceptions**: the outer `except` in `stream_ts()` now checks `connection_allocated` and calls `release_stream()` as a last-resort cleanup for any unhandled exception that escapes before the channel is handed off to the stream lifecycle.
+  - **`release_stream()` now returns `bool`** and adds a metadata-hash fallback: if the primary `channel_stream` / `stream_profile` Redis keys have already been cleaned up by the proxy, it recovers `stream_id` and `profile_id` from the channel's metadata hash and clears those fields atomically to prevent duplicate `DECR`s on repeated calls. — Thanks [@patchy8736](https://github.com/patchy8736)
+  - **`update_stream_profile()` uses a Redis pipeline** for the old-profile DECR + key update + new-profile INCR sequence, preventing counter drift if the process crashes between operations.
+  - **`stream_generator._cleanup()`** now falls back to `Stream.objects.get()` when the channel UUID resolves to a preview flow rather than a normal channel, rather than silently skipping the slot release.
+  - **VOD `cleanup_persistent_connection()`** fallback DECR is now conditional: it only decrements the profile counter when the connection tracking key had already expired by TTL (i.e., `remove_connection()` would have skipped the DECR), preventing double-decrements when the key is still present.
+- Ghost clients and channels stuck in `INITIALIZING` state in the TS proxy (Fixes #695, #669) — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **`INITIALIZING` added to cleanup grace period monitoring**: channels stuck in `INITIALIZING` are now surfaced by the cleanup task and torn down, preventing indefinite hangs when stream startup fails.
+  - **Orphaned channel cleanup validates client SET entries**: the cleanup task now cross-checks client SET members against actual metadata hashes; ghost SET entries are removed and the channel is torn down cleanly when no real clients remain.
+  - **Stats page self-heals**: ghost client SET entries are detected and removed when reading channel stats, preventing stale entries from inflating the active-client count.
+  - **`remove_ghost_clients()` extracted to `ClientManager`**: ghost-detection logic is now a single authoritative helper, callable with an optional pre-fetched `client_ids` set to eliminate a redundant Redis `SMEMBERS` round-trip when the caller already holds the set.
+  - **Ownership TTL fallback**: the error-state writer now triggers via ownership check _or_ state guard fallback, so a channel stuck in a pre-active state is correctly marked `ERROR` even when the ownership TTL expired during retries.
+  - **Missing `SOURCE_BITRATE` / `FFMPEG_BITRATE` metadata constants** added to `ChannelMetadataField`, preventing `AttributeError` on detailed channel stats reads.
+- TS proxy client stream lag recovery now only bumps clients forward when their next required chunk has genuinely expired from Redis (TTL), rather than unconditionally jumping if they fell more than 50 chunks behind. Clients are repositioned to the oldest available chunk (minimum data loss) using an atomic server-side Lua binary search, falling back to near the buffer head if nothing is available.
+- TS proxy streams dying after 30–200 seconds in multi-worker uWSGI/Celery deployments, caused by three interrelated bugs. (Fixes #992, #980) - Thanks [@PFalko](https://github.com/PFalko)
+  - **Double ProxyServer instantiation**: `ProxyConfig.ready()` called `TSProxyServer()` directly while `TSProxyConfig.ready()` also called `TSProxyServer.get_instance()`, creating two instances per worker — each with its own cleanup thread. The orphaned thread could not extend ownership because it had no entries in `stream_managers`. Fixed by using `TSProxyServer.get_instance()` in `ProxyConfig.ready()`.
+  - **`flushdb()` on every Redis client init**: `RedisClient.get_client()` called `client.flushdb()` whenever `_client` was `None`. Celery autoscale (`--autoscale=6,1`) spawning new workers mid-stream triggered this path, nuking all Redis keys including active ownership keys, client records, and channel metadata. Removed the `flushdb()` call entirely.
+  - **No recovery from expired ownership**: `get_channel_owner()` called `redis.get()` twice inside a lambda (TOCTOU race — key could expire between calls); `extend_ownership()` silently returned `False` on expiry with no re-acquisition; and the non-owner cleanup path unconditionally killed streams even when the worker held the `stream_manager`. Fixed with a single `GET` in `get_channel_owner()`, re-acquisition via atomic `SET NX EX` in `extend_ownership()`, and a re-acquisition attempt with client-aware cleanup deferral in the cleanup thread.
+- `get_instance()` deadlock: if `ProxyServer()` raised an exception during singleton construction, `_instance` was left permanently as the `_INITIALIZING` sentinel, causing all subsequent `get_instance()` callers to spin in an infinite `gevent.sleep()` loop. Construction is now wrapped in `try/except`; on failure `_instance` resets to `None` so the next call can retry.
+- Non-atomic ownership acquisition in `try_acquire_ownership()`: replaced the separate `setnx()` + `expire()` calls with a single atomic `SET NX EX`, eliminating the race window where a process crash between the two calls could leave an ownership key with no TTL (permanent ownership lock).
+- DVR bug fixes — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Duplicate recording execution**: `run_recording.apply_async(countdown=...)` exceeded Redis' default `visibility_timeout` (3600 s) for recordings scheduled more than one hour out, causing Redis to redeliver the task to multiple workers simultaneously and producing corrupted output files. Replaced `apply_async` with `ClockedSchedule` + `PeriodicTask` for database-backed one-shot scheduling that survives restarts and upgrades without the redelivery race. `run_recording` also now exits immediately if the recording is already in progress, completed, or stopped. `revoke_task()` cleans up both the `PeriodicTask` and its orphaned `ClockedSchedule` on execution. (Fixes #940, #641)
+  - **Stream reconnection resilience**: Recordings now survive transient network drops with automatic reconnection retrying up to 5 times and appending to the existing file. DB operations use exponential-backoff retry for transient database errors throughout the recording lifecycle.
+  - **Crash recovery pipeline**: On worker restart, recordings stuck in "recording" status have their segments concatenated and remuxed. Remux sanity checks reject MKV output that is less than 50% the size of a previous MKV (duplicate-task overwrite) or less than 10% of the source TS (corrupt first attempt); the source `.ts` is preserved for manual recovery on all failure paths. (Fixes #619, #624)
+  - **Output file collision**: Fixed collision when multiple tasks targeted the same filename.
+  - **WebSocket deadlock**: `send_websocket_update()` was deadlocking the gevent event loop, causing one recording's WebSocket events to block all other simultaneous recordings.
+  - **DVR client isolation**: Stop and Cancel operations now identify the target client by recording ID (via `User-Agent: Dispatcharr-DVR/recording-{id}`), ensuring only the correct proxy client is torn down and never affecting other recordings on the same channel.
+  - **Accidental stream termination on delete**: `destroy()` now only calls `_stop_dvr_clients()` for in-progress recordings, preventing stream termination when deleting a completed recording.
+  - **Recording card logos**: Logos were not displaying due to a channel summary API shape mismatch.
+  - **Logo fetch negative cache**: Added negative cache for failed remote logo fetches so dead CDNs no longer block Daphne workers on repeated requests.
+  - **Artwork fuzzy-match sanitisation**: Poster artwork fuzzy-matching against external APIs (TMDB, OMDb, etc.) was producing incorrect results for channels with names like "USA A&E SD\*"; channel-name strings are now sanitised before querying external sources.
+  - **Series modal "No upcoming episodes"**: Fixed due to a missing `_group_count` merge and an incorrect time filter.
+  - **Series rule cleanup**: Deleting a series rule left orphaned recordings and stale Guide indicators; rule deletion now cleans up all associated recordings. Orphaned recordings with no parent rule are also cleaned up automatically. (Fixes #1041)
+  - **Series rule timezone calculation**: Recurring rules silently dropped scheduled recordings for users in UTC-negative timezones after 4 pm local time. (Fixes #1042)
+  - **Recording modal TDZ crash**: Modal crashed on load in production bundles due to a Temporal Dead Zone error — editing state was referenced before its declaration in the minified bundle.
+  - **Description textarea focus loss**: The description textarea lost focus immediately when opened because the inline editing component was remounting on every render.
+  - **WebSocket-driven refresh**: Replaced all manual `fetchRecordings()` polling calls with debounced WebSocket-driven refresh so the recordings list stays up to date without redundant API requests.
+  - **comskip exit code handling**: comskip treated exit code 1 ("no commercials found") as a fatal error, causing post-processing to fail on clean recordings. Exit code 1 is now recognised as a successful no-op.
+  - **Differentiated WebSocket notification events**: `recording_stopped`, `recording_cancelled` (in-progress cancel), and `recording_deleted` with a `was_in_progress` flag now allow the frontend to display distinct "Recording stopped", "Recording cancelled", and "Recording deleted" toasts.
+  - **Duplicate series rule evaluation race**: Creating a series rule fired `evaluate_series_rules.delay()` in the API view while the frontend immediately called the synchronous evaluate endpoint, racing to create duplicate recordings for the same program. Removed the redundant async call from the API; the frontend's explicit evaluate call is now the sole evaluation path.
+  - **Recording card S/E badge overlap**: Season/episode badges were overlapping and metadata was hidden on the recording card.
+  - **Orphaned recording fallback in series modal**: When a series rule no longer exists, the recurring rule modal now shows a "Delete Recording" button for the orphaned recording instead of failing silently.
+- Modular mode deployment hardening — Thanks [@CodeBormen](https://github.com/CodeBormen)
+  - **Postgres version check with restricted DB users**: The version check was connecting to the hardcoded `postgres` database, which fails when the configured user lacks access to it. Changed to use `$POSTGRES_DB` so the check works with least-privilege database users. (Fixes #1045)
+  - **DVR recording broken in modular mode**: Internal TS stream URL candidates hardcoded port `9191`, so recordings failed when `DISPATCHARR_PORT` was set to any other value. URL construction now reads `DISPATCHARR_PORT` from the environment via the new `build_dvr_candidates()` helper. `DISPATCHARR_PORT` is also now explicitly passed to the Celery container in `docker-compose.yml`.
+  - **Selective Redis flush in modular mode**: `wait_for_redis.py` now performs a targeted flush in modular mode — clearing stale stream locks, proxy metadata, and server-state keys — while preserving Celery broker and result-backend keys. Previously either a full `flushdb()` (which wiped Celery queues) or no flush at all was performed.
+  - **Redis wait stripping environment variables**: The modular-mode Redis readiness check ran as a uWSGI `exec-pre` hook, which executes under `su -` and strips Docker environment variables, making `DISPATCHARR_ENV` and `REDIS_HOST` unavailable. Moved to the container entrypoint so all env vars are present.
+  - **Stale environment variables after container restart**: `/etc/profile.d/dispatcharr.sh` was only written on the first container run; restarts with changed env vars (e.g. a rotated `POSTGRES_PASSWORD`) retained stale values. The file is now truncated and rewritten on every startup. `/etc/environment` entries are likewise updated rather than skipped when a key already exists. All exported values are now quoted to prevent breakage from special characters.
+  - **Celery entrypoint startup timeouts**: The JWT key wait and migration wait loops had no timeout, leaving the Celery worker hanging indefinitely if the web container was stuck. Each loop now times out (120 s for JWT, 300 s for migrations) and exits with a clear diagnostic message. The migration readiness check is also replaced from a fragile `showmigrations | grep` pattern to `migrate --check`, which exits cleanly on both unapplied migrations and connection errors.
+  - **Service startup ordering**: `depends_on` entries for `db` and `redis` in `docker-compose.yml` upgraded from plain name-link ordering to `condition: service_healthy`, ensuring containers wait for actual readiness signals before starting.
+  - **`host.docker.internal` resolution on Linux**: Added `extra_hosts: host.docker.internal:host-gateway` to the web service in `docker-compose.yml` so Linux hosts resolve `host.docker.internal` the same way Docker Desktop does on macOS/Windows.
+
+## [0.20.2] - 2026-03-03
+
+### Security
+
+- Updated frontend npm dependencies to resolve 2 high-severity vulnerabilities:
+  - Updated `minimatch` to ≥10.2.3, resolving **high** ReDoS via matchOne() combinatorial backtracking with multiple non-adjacent GLOBSTAR segments ([GHSA-7r86-cg39-jmmj](https://github.com/advisories/GHSA-7r86-cg39-jmmj))
+  - Updated `rollup` to ≥4.58.1, resolving **high** Arbitrary File Write via Path Traversal ([GHSA-mw96-cpmx-2vgc](https://github.com/advisories/GHSA-mw96-cpmx-2vgc))
+
+### Fixed
+
+- EPG filter regression in channel table (introduced in 0.20.0 channel store refactor): The EPG filter dropdown was showing all EPG sources regardless of whether they had any channels assigned, and the "No EPG" option was never displayed. Fixed by annotating EPGSource records with a `has_channels` flag (via a lightweight `EXISTS` subquery) so only active EPG sources with at least one channel assigned appear as filter options. "No EPG" now appears only when at least one channel globally has no EPG assigned; this is determined by a second `EXISTS` query embedded directly in the paginated channel response (`has_unassigned_epg_channels`), avoiding any additional network requests.
+- Stale stream rows missing hover effect: Stale streams in the streams table had no hover color change, unlike channels with no streams assigned. Converted the inline `backgroundColor` style to a CSS class (`stale-stream-row`) so the `:hover` rule can apply correctly. Applied the same fix to the channel-streams sub-table, where the teal expanded-row background caused the semi-transparent red tint to visually mismatch; the sub-table now uses a pre-blended solid color via `color-mix()` to match the appearance of stale rows in the main streams table.
+- Channel table onboarding shown when filter returns zero results: The channel store refactor changed to loading only channel IDs instead of full channel objects, leaving `Object.keys(channels).length` always `0` and incorrectly triggering the onboarding state on any empty filter. Fixed by checking `channelIds.length` instead.
+- TV Guide scrolls to position 0 when a filter yields no results: Applying any filter that temporarily empties the channel list (e.g. switching directly between two channel groups, or typing a search query that matches nothing) caused the guide to show a blank/empty view with no programs visible. The `VariableSizeList` unmounts when `filteredChannels` becomes empty, destroying its DOM node and resetting `scrollLeft` to 0. On remount the scroll position was never restored because `initialScrollComplete` was still `true`. Fixed by saving the user's current scroll position when the channel list empties mid-transition, then restoring it once new channels have loaded. On first load the guide still scrolls to the current time as before.
+- `debian_install.sh` regressions after `uv` migration on clean/minimal Debian installs: fixed pip-less venv (`ensurepip`), missing `gunicorn` for the systemd unit, and inconsistent `DJANGO_SECRET_KEY` availability (now persisted to `.env` via `EnvironmentFile`). Docker unaffected. - Thanks [@marcinolek](https://github.com/marcinolek)
+
+## [0.20.1] - 2026-02-26
+
+### Fixed
+
+- Login form disabled after token expiry: The login button was permanently rendered as disabled ("Logging you in...") on page load after a session expired, preventing users from logging back in. A regression in v0.20.0 caused `LoginForm` to check `if (user)` to detect an already-authenticated reload, but the Zustand auth store initializes `user` as a truthy empty object `{ username: '', email: '', user_level: '' }`, so the loading state was set immediately on every mount. Reverted to pre-regression behavior. (Fixes #1029)
+
+## [0.20.0] - 2026-02-26
+
+### Security
+
+- Updated Django 5.2.9 → 5.2.11, resolving the following CVEs:
+  - **CVE-2025-13473** (low): Username enumeration via timing difference in mod_wsgi authentication handler.
+  - **CVE-2025-14550** (moderate): Potential denial-of-service via repeated headers on ASGI requests.
+  - **CVE-2026-1207** (high): Potential SQL injection via raster lookups on PostGIS.
+  - **CVE-2026-1285** (moderate): Potential denial-of-service in `django.utils.text.Truncator` HTML methods via inputs with large numbers of unmatched HTML end tags.
+  - **CVE-2026-1287** (high): Potential SQL injection in column aliases via control characters in `FilteredRelation`.
+  - **CVE-2026-1312** (high): Potential SQL injection via `QuerySet.order_by()` and `FilteredRelation` when using column aliases containing periods.
+- Updated frontend npm dependencies to resolve 5 audit vulnerabilities (1 moderate, 4 high):
+  - Updated `ajv` 6.12.6 → 6.14.0, resolving a **moderate** ReDoS vulnerability when using the `$data` option ([GHSA-2g4f-4pwh-qvx6](https://github.com/advisories/GHSA-2g4f-4pwh-qvx6))
+  - Enforced `minimatch` ≥10.2.2 via npm overrides, resolving **high** ReDoS via repeated wildcards with non-matching literal patterns ([GHSA-3ppc-4f35-3m26](https://github.com/advisories/GHSA-3ppc-4f35-3m26)) affecting `minimatch`, `@eslint/config-array`, `@eslint/eslintrc`, and `eslint`
+
+### Added
+
+- API key authentication: Added support for API key-based authentication as an alternative to JWT tokens. Users can generate and revoke their own personal API key from their profile page, enabling programmatic access for scripts, automations, and third-party integrations without exposing account credentials. Keys authenticate via the `Authorization: ApiKey <key>` header or the `X-API-Key: <key>` header. Admin users can additionally generate and revoke keys on behalf of any user.
+- Lightweight channel summary API endpoint: Added a new `/api/channels/summary/` endpoint that returns only the minimal channel data needed for TV Guide and DVR scheduling (id, name, logo), avoiding the overhead of serializing full channel objects for high-frequency UI operations.
+- Custom Dummy EPG subtitle template support: Added optional subtitle template field to custom dummy EPG configuration. Users can now define subtitle patterns using extracted regex groups and time/date placeholders (e.g., `{starttime} - {endtime}`). (Closes #942)
+- Event-driven webhooks and script execution (Integrations): Added new Integrations feature that enables event-driven execution of custom scripts and webhooks in response to system events. (Closes #203)
+  - **Supported event types**: channel lifecycle (start, stop, reconnect, error, failover), stream operations (switch), recording events (start, end), data refreshes (EPG, M3U), and client activity (connect, disconnect)
+  - **Event data delivery**: available as environment variables in scripts (prefixed with `DISPATCHARR_`), POST payloads for webhooks, and plugin execution payloads
+  - **Plugin support**: plugins can subscribe to events by specifying an `events` array in their action definitions
+  - **Connection testing**: test endpoint with dummy payloads for validation before going live
+  - **Custom HTTP headers**: webhook connections support configurable key/value header pairs
+  - **Per-event Jinja2 payload templates**: each enabled event can have its own template rendered with the full event payload as context; rendered output is sent as JSON (with `Content-Type: application/json` set automatically) if valid, or as a raw string body otherwise
+  - **Tabbed connection form**: Settings, Event Triggers, and Payload Templates organized into separate tabs for clarity
+- Cron scheduling support for M3U and EPG refreshes: Added interactive cron expression builder with preset buttons and custom field editors, plus info popover with common cron examples. Refactored backup scheduling to use shared ScheduleInput component for consistency across all scheduling interfaces. (Closes #165)
+- Channel numbering modes for auto channel sync: Added three channel numbering modes when auto-syncing channels from M3U groups:
+  - **Fixed Start Number** (default): Start at a specified number and increment sequentially
+  - **Use Provider Number**: Use channel numbers from the M3U source (tvg-chno), with configurable fallback if provider number is missing
+  - **Next Available**: Auto-assign starting from 1, skipping all used channel numbers
+    Each mode includes its own configuration options accessible via the "Channel Numbering Mode" dropdown in auto sync settings. (Closes #956, #433)
+- Legacy NumPy for modular Docker: Added entrypoint detection and automatic installation for the Celery container (use `USE_LEGACY_NUMPY`) to support older CPUs. - Thanks [@patrickjmcd](https://github.com/patrickjmcd)
+- `series_relation` foreign key on `M3UEpisodeRelation`: episode relations now carry a direct FK to their parent `M3USeriesRelation`. This enables correct CASCADE deletion (removing a series relation automatically removes its episode relations), precise per-provider scoping during stale-stream cleanup.
+- Streamer accounts attempting to log into the web UI now receive a clear notification explaining they cannot access the UI but their stream URLs still work. Previously the login button would silently stop with no feedback.
+
+### Changed
+
+- Dependency updates:
+  - `Django` 5.2.9 → 5.2.11 (security patch; see Security section)
+  - `celery` 5.6.0 → 5.6.2
+  - `psutil` 7.1.3 → 7.2.2
+  - `torch` 2.9.1+cpu → 2.10.0+cpu
+  - `sentence-transformers` 5.2.0 → 5.2.3
+  - `ajv` 6.12.6 → 6.14.0 (security patch; see Security section)
+  - `minimatch` enforced ≥10.2.2 via npm overrides (security patch; see Security section)
+  - `react` / `react-dom` 19.2.3 → 19.2.4
+  - `react-router-dom` / `react-router` 7.12.0 → 7.13.0
+  - `react-hook-form` 7.70.0 → 7.71.2
+  - `react-draggable` 4.4.6 → 4.5.0
+  - `@tanstack/react-table` 8.21.2 → 8.21.3
+  - `video.js` 8.23.4 → 8.23.7
+  - `vite` 7.3.0 → 7.3.1
+  - `zustand` 5.0.9 → 5.0.11
+  - `allotment` 1.20.4 → 1.20.5
+  - `prettier` 3.7.4 → 3.8.1
+  - `@swc/wasm` 1.15.7 → 1.15.11
+  - `@testing-library/react` 16.3.1 → 16.3.2
+  - `@types/react` 19.2.7 → 19.2.14
+  - `@vitejs/plugin-react-swc` 4.2.2 → 4.2.3
+- Channel store optimization: Refactored frontend channel loading to only fetch channel IDs on initial login (matching the streams store pattern), instead of loading full channel objects upfront. Full channel data is fetched lazily as needed. This dramatically reduces login time and initial page load when large channel libraries are present.
+- DVR scheduling: Channel selector now displays the channel number alongside the channel name when scheduling a recording.
+- TV Guide performance improvements: Optimized the TV Guide with horizontal culling for off-screen program rows (only rendering visible programs), throttled now-line position updates, and improved scroll performance. Reduces unnecessary DOM work and improves responsiveness with large EPG datasets.
+- Stream Profile form rework: Replaced the plain command text field with a dropdown listing built-in tools (FFmpeg, Streamlink, VLC, yt-dlp) plus a Custom option that reveals a free-text input. Each built-in now shows its default parameter string as a live example in the Parameters field description, updating as the command selection changes. Added descriptive help text to all fields to improve clarity.
+- Custom Dummy EPG form UI improvements: Reorganized the form into collapsible accordion sections (Pattern Configuration, Output Templates, Upcoming/Ended Templates, Fallback Templates, EPG Settings) for better organization. Field descriptions now appear in info icon popovers instead of taking up vertical space, making the form more compact and easier to navigate while keeping help text accessible.
+- XC API M3U stream URLs: M3U generation for Xtream Codes API endpoints now use proper XC-style stream URLs (`/live/username/password/channel_id`) instead of UUID-based stream endpoints, ensuring full compatibility with XC clients. (Fixes #839)
+- XC API `get_series` now includes `tmdb_id` and `imdb_id` fields, matching `get_vod_streams`. Clients that use TMDB enrichment (e.g. Chillio) can now resolve clean series titles and poster images. - Thanks [@firestaerter3](https://github.com/firestaerter3)
+- Stats page "Now Playing" EPG lookup updated to use `channel_uuids` directly (the proxy stats already key active channels by UUID), removing the need for a UUID→integer ID conversion step introduced alongside the lazy channel-fetch refactor. Stream preview sessions (which use a content hash rather than a UUID as their channel ID) are now filtered out before any API call is made, preventing a backend `ValidationError` on both the `current-programs` and `by-uuids` endpoints when a stream preview is active on the Stats page.
+
+### Fixed
+
+- Fixed admin permission checks inconsistently using `is_superuser`/`is_staff` instead of `user_level>=10`, causing API-created admin accounts to intermittently see the setup page, lose access to backup endpoints, and miss admin-only notifications. `manage.py createsuperuser` now also correctly sets `user_level=10`. (Fixes #954) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Channel table group filter sort order: The group dropdown in the channel table is now sorted alphabetically.
+- DVR one-time recording scheduling: Fixed a bug where scheduling a one-time recording for a future program caused the recording to start immediately instead of at the scheduled time.
+- XC API `added` field type inconsistencies: `get_live_streams` and `get_vod_info` now return the `added` field as a string (e.g., `"1708300800"`) instead of an integer, fixing compatibility with XC clients that have strict JSON serializers (such as Jellyfin's Xtream Library plugin). (Closes #978)
+- Stream Profile form User-Agent not populating when editing: The User-Agent field was not correctly loaded from the existing profile when opening the edit modal. (Fixes #650)
+- VOD proxy connection counter leak on client disconnect: Fixed a connection leak in the VOD proxy where connection counters were not properly decremented when clients disconnected, causing the connection pool to lose track of available connections. The multi-worker connection manager now correctly handles client disconnection events across all proxy configurations. Includes three key fixes: (1) Replaced GET-check-INCR race condition with atomic INCR-first-then-check pattern in both connection managers to prevent concurrent requests exceeding max_streams; (2) Decrement profile counter directly in stream generator exit paths instead of deferring to daemon thread cleanup; (3) Decrement profile counter on create_connection() failure to release reserved slots. (Fixes #962, #971, #451, #533) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- XC profile refresh credential extraction with sub-paths: Fixed credential extraction in `get_transformed_credentials()` to use negative indices anchored to the known tail structure instead of hardcoded indices that broke when server URLs contained sub-paths (e.g., `http://server.com/portal/a/`). This ensures XC accounts with sub-paths in their server URLs work correctly for profile refreshes. (Fixes #945) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- XC EPG URL construction for accounts with sub-paths or trailing slashes: Fixed EPG URL construction in M3U forms to normalize server URL to origin before appending `xmltv.php` endpoint, preventing double slashes and incorrect path placement when server URLs include sub-paths or trailing slashes. (Fixes #800) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Auto channel sync duplicate channel numbers across groups: Fixed issue where multiple auto-sync groups starting at the same number would create duplicate channel numbers. The used channel number tracking now persists across all groups in a single sync operation, ensuring each assigned channel number is globally unique.
+- Modular mode PostgreSQL/Redis connection checks: Replaced raw Python socket checks with native tools (`pg_isready` for PostgreSQL and `socket.create_connection` for Redis) in modular deployment mode to prevent indefinite hangs in Docker environments with non-standard networking or DNS configurations. Now properly supports IPv4 and IPv6 configurations. (Fixes #952) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- VOD episode UUID regeneration on every refresh: a pre-emptive `Episode.objects.delete()` in `refresh_series_episodes` ran before `batch_process_episodes`, defeating its update-in-place logic and forcing all episodes to be recreated with new UUIDs on every refresh. Clients (Jellyfin, Emby, Plex, etc.) with cached episode paths received 500 errors until a full library rescan. Removing the delete allows episodes to be updated in place with stable UUIDs. (Fixes #785, #985, #820) - Thanks [@znake-oil](https://github.com/znake-oil)
+- VOD stale episode stream cleanup scoped incorrectly per provider: when a provider removed a stream from a series, `batch_process_episodes` could delete episode relations belonging to a different provider version of the same series (e.g. EN vs ES) that had deduped to the same `Series` object via TMDB/IMDB ID. Cleanup is now scoped to the specific `M3USeriesRelation` that was queried.
+
+## [0.19.0] - 2026-02-10
+
+### Added
+
+- Add system notifications and update checks
+  -Real-time notifications for system events and alerts
+  -Per-user notification management and dismissal
+  -Update check on startup and every 24 hours to notify users of available versions
+  -Notification center UI component
+  -Automatic cleanup of expired notifications
+- Network Access "Reset to Defaults" button: Added a "Reset to Defaults" button to the Network Access settings form, matching the functionality in Proxy Settings. Users can now quickly restore recommended network access settings with one click.
+- Streams table column visibility toggle: Added column menu to Streams table header allowing users to show/hide optional columns (TVG-ID, Stats) based on preference, with optional columns hidden by default for cleaner default view.
+- Streams table TVG-ID column with search filter and sort: Added TVG-ID column to streams table with search filtering and sort capability for better stream organization. (Closes #866) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Frontend now automatically refreshes streams and channels after a stream rehash completes, ensuring the UI is always up-to-date following backend merge operations.
+- Frontend Unit Tests: Added comprehensive unit tests for React hooks and Zustand stores, including:
+  - `useLocalStorage` hook tests with localStorage mocking and error handling
+  - `useSmartLogos` hook tests for logo loading and management
+  - `useTablePreferences` hook tests for table settings persistence
+  - `useAuthStore` tests for authentication flow and token management
+  - `useChannelsStore` tests for channel data management
+  - `useUserAgentsStore` tests for user agent CRUD operations
+  - `useUsersStore` tests for user management functionality
+  - `useVODLogosStore` tests for VOD logo operations
+  - `useVideoStore` tests for video player state management
+  - `useWarningsStore` tests for warning suppression functionality
+  - Code refactoring for improved readability and maintainability - Thanks [@nick4810](https://github.com/nick4810)
+- EPG auto-matching: Added advanced options to strip prefixes, suffixes, and custom text from channel names to assist matching; default matching behavior and settings remain unchanged (Closes #771) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Redis authentication support for modular deployments: Added support for authentication when connecting to external Redis instances using either password-only authentication (Redis <6) or username + password authentication (Redis 6+ ACL). REDIS_PASSWORD and REDIS_USER environment variables with URL encoding for special characters. (Closes #937) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Plugin logos: if a plugin ZIP includes `logo.png`, it is surfaced in the Plugins UI and shown next to the plugin name.
+- Plugin manifests (`plugin.json`) for safe metadata discovery, plus legacy warnings and folder-name fallbacks when a manifest is missing.
+- Plugin stop hooks: Dispatcharr now calls a plugin's optional `stop()` method (or `run("stop")` action) when disabling, deleting, or reloading plugins to allow graceful shutdown.
+- Plugin action buttons can define `button_label`, `button_variant`, and `button_color` (e.g., Stop in red), falling back to “Run” for older plugins.
+- Plugin card metadata: plugins can specify `author` and `help_url` in `plugin.json` to show author and docs link in the UI.
+- Plugin cards can now be expanded/collapsed by clicking the header or chevron to hide settings and actions.
+
+### Changed
+
+- XtreamCodes Authentication Optimization: Reduced API calls during XC refresh by 50% by eliminating redundant authentication step. This should help reduce rate-limiting errors.
+- App initialization efficiency: Refactored app initialization to prevent redundant execution across multiple worker processes. Created `dispatcharr.app_initialization` utility module with `should_skip_initialization()` function that prevents custom initialization tasks (backup scheduler sync, developer notifications sync) from running during management commands, in worker processes, or in development servers. This significantly reduces startup overhead in multi-worker deployments (e.g., uWSGI with 10 workers now syncs the scheduler once instead of 10 times). Applied to both `CoreConfig` and `BackupsConfig` apps.
+- M3U/EPG Network Access Defaults: Updated default network access settings for M3U and EPG endpoints to only allow local/private networks by default (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, ::1/128, fc00::/7, fe80::/10). This improves security by preventing public internet access to these endpoints unless explicitly configured. Other endpoints (Streams, XC API, UI) remain open by default.
+- Modular deployments: Bumped modular Postgres image to 17 and added compatibility checks (PostgreSQL version and UTF-8 database encoding) when using external databases to prevent migration/encoding issues.
+- Stream Identity Stability: Added `stream_id` (provider stream identifier) and `stream_chno` (provider channel number) fields to Stream model. For XC accounts, the stream hash now uses the stable `stream_id` instead of the URL when hashing, ensuring XC streams maintain their identity and channel associations even when account credentials or server URLs change. Supports both XC `num` and M3U `tvg-chno`/`channel-number` attributes.
+- Swagger/OpenAPI Migration: Migrated from `drf-yasg` (OpenAPI 2.0) to `drf-spectacular` (OpenAPI 3.0) for API documentation. This provides:
+  - Native Bearer token authentication support in Swagger UI - users can now enter just the JWT token and the "Bearer " prefix is automatically added
+  - Modern OpenAPI 3.0 specification compliance
+  - Better auto-generation of request/response schemas
+  - Improved documentation accuracy with serializer introspection
+- Switched to uv for package management: Migrated from pip to uv (Astral's fast Python package installer) for improved dependency resolution speed and reliability. This includes updates to Docker build processes, installation scripts (debian_install.sh), and project configuration (pyproject.toml) to leverage uv's features like virtual environment management and lockfile generation. - Thanks [@tobimichael96](https://github.com/tobimichael96) for getting it started!
+- Copy to Clipboard: Refactored `copyToClipboard` utility function to include notification handling internally, eliminating duplicate notification code across the frontend. The function now accepts optional parameters for customizing success/failure messages while providing consistent behavior across all copy operations.
+
+### Fixed
+
+- XC EPG Logic: Fixed EPG filtering issues where short EPG requests had no time-based filtering (returning expired programs) and regular EPG requests used `start_time__gte` (missing the currently playing program). Both now correctly use `end_time__gt` to show programs that haven't ended yet, with short EPG additionally limiting results. (Fixes #915)
+- Automatic backups not enabled by default on new installations: Added backups app to `INSTALLED_APPS` and implemented automatic scheduler initialization in `BackupsConfig.ready()`. The backup scheduler now properly syncs the periodic task on startup, ensuring automatic daily backups are enabled and scheduled immediately on fresh database creation without requiring manual user intervention.
+- Fixed modular Docker Compose deployment and entrypoint/init scripts to properly support `DISPATCHARR_ENV=modular`, use external PostgreSQL/Redis services, and handle port, version, and encoding validation (Closes #324, Fixes #61, #445, #731) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Stream rehash/merge logic now guarantees unique stream_hash and always preserves the stream with the best channel ordering and relationships. This prevents duplicate key errors and ensures the correct stream is retained when merging. (Fixes #892)
+- Admin URL Conflict with XC Streams: Updated nginx configuration to only redirect exact `/admin` and `/admin/` paths to login in production, preventing interference with stream URLs that use "admin" as a username (e.g., `/admin/password/stream_id` now properly routes to stream handling instead of being redirected).
+- EPG Channel ID XML Escaping: Fixed XML parsing errors in EPG output when channel IDs contain special characters (&, <, >, \") by properly escaping them in XML attributes. (Fixes #765) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+- Fixed NumPy baseline detection in Docker entrypoint. Now properly detects when NumPy crashes on import due to CPU baseline incompatibility and installs legacy NumPy version. Previously, if NumPy failed to import, the script would skip legacy installation assuming it was already compatible.
+- Backup Scheduler Test: Fixed test to correctly validate that automatic backups are enabled by default with a retention count of 3, matching the actual scheduler defaults. - Thanks [@jcasimir](https://github.com/jcasimir)
+- Hardened plugin loading to avoid executing plugin code unless the plugin is enabled.
+- Prevented plugin package names from shadowing standard library or installed modules by namespacing plugin imports with safe aliases.
+- Added safety limits to plugin ZIP imports (file count and size caps) and sanitized plugin keys derived from uploads.
+- Enforced strict boolean parsing for plugin enable/disable requests to avoid accidental enables from truthy strings.
+- Applied plugin field defaults server-side when running actions so plugins receive expected settings even before a user saves.
+- Plugin settings UI improvements: render `info`/`text` fields, support `input_type: password`, show descriptions/placeholders, surface save failures, and keep settings in sync after refresh.
+- Disabled plugins now collapse settings/actions to match the closed state before first enable.
+- Plugin card header controls (delete/version/toggle) now stay right-aligned even with long descriptions.
+- Improved plugin logo resolution (case-insensitive paths + absolute URLs), fixing dev UI logo loading without a Vite proxy.
+- Plugin reload now hits the backend, clears module caches across workers, and refreshes the UI so code changes apply without a full backend restart.
+- Plugin loader now supports `plugin.py` without `__init__.py`, including folders with non-identifier names, by loading modules directly from file paths.
+- Plugin action handling stabilized: avoids registry race conditions and only shows loading on the active action.
+- Plugin enable/disable toggles now update immediately without requiring a full page refresh.
+- M3U/EPG tasks downloading endlessly for large files: Fixed the root cause where the Redis task lock (300s TTL) expired during long downloads, allowing Celery Beat to start competing duplicate tasks that never completed. Added a `TaskLockRenewer` daemon thread that periodically extends the lock TTL while a task is actively working, applied to all long-running task paths (M3U refresh, M3U group refresh, EPG refresh, EPG program parsing). Also adds an HTTP timeout to M3U download requests, streams M3U downloads directly to a temp file on disk instead of accumulating the entire file in memory, and adds Celery task time limits as a safety net against runaway tasks. (Fixes #861) - Thanks [@CodeBormen](https://github.com/CodeBormen)
+
+## [0.18.1] - 2026-01-27
+
+### Fixed
+
+- Series Rules API Swagger Documentation: Fixed drf_yasg validation error where TYPE_ARRAY schemas were missing required items parameter, causing module import failure
+
+## [0.18.0] - 2026-01-27
+
+### Security
+
+- Updated react-router from 7.11.0 to 7.12.0 to address two security vulnerabilities:
+  - **High**: Open Redirect XSS vulnerability in Action/Server Action Request Processing ([GHSA-h5cw-625j-3rxh](https://github.com/advisories/GHSA-h5cw-625j-3rxh), [GHSA-2w69-qvjg-hvjx](https://github.com/advisories/GHSA-2w69-qvjg-hvjx))
+  - **Moderate**: SSR XSS vulnerability in ScrollRestoration component ([GHSA-8v8x-cx79-35w7](https://github.com/advisories/GHSA-8v8x-cx79-35w7))
+- Updated react-router-dom from 7.11.0 to 7.12.0 (dependency of react-router)
+- Fixed moderate severity Prototype Pollution vulnerability in Lodash (`_.unset` and `_.omit` functions) See [GHSA-xxjr-mmjv-4gpg](https://github.com/advisories/GHSA-xxjr-mmjv-4gpg) for details.
+
+### Added
+
+- Series Rules API Swagger Documentation: Added comprehensive Swagger/OpenAPI documentation for all series-rules endpoints (`GET /series-rules/`, `POST /series-rules/`, `DELETE /series-rules/{tvg_id}/`, `POST /series-rules/evaluate/`, `POST /series-rules/bulk-remove/`), including detailed descriptions, request/response schemas, and error handling information for improved API discoverability
+- Editable Channel Table Mode:
+  - Added a robust inline editing mode for the channels table, allowing users to quickly edit channel fields (name, number, group, EPG, logo) directly in the table without opening a modal.
+  - EPG and logo columns support searchable dropdowns with instant filtering and keyboard navigation for fast assignment.
+  - Drag-and-drop reordering of channels enabled when unlocked, with persistent order updates. (Closes #333)
+  - Group column uses a searchable dropdown for quick group assignment, matching the UX of EPG and logo selectors.
+  - All changes are saved via API with optimistic UI updates and error handling.
+- Stats page enhancements: Added "Now Playing" program information for active streams with smart polling that only fetches EPG data when programs are about to change (not on every stats refresh). Features include:
+  - Currently playing program title displayed with live broadcast indicator (green Radio icon)
+  - Expandable program descriptions via chevron button
+  - Progress bar showing elapsed and remaining time for currently playing programs
+  - Efficient POST-based API endpoint (`/api/epg/current-programs/`) supporting batch channel queries or fetching all channels
+  - Smart scheduling that fetches new program data 5 seconds after current program ends
+  - Only polls when active channel list changes, not on stats refresh
+- Channel preview button: Added preview functionality to active stream cards on stats page
+- Unassociated streams filter: Added "Only Unassociated" filter option to streams table for quickly finding streams not assigned to any channels - Thanks [@JeffreyBytes](https://github.com/JeffreyBytes) (Closes #667)
+- Streams table: Added "Hide Stale" filter to quickly hide streams marked as stale.
+- Client-side logo caching: Added `Cache-Control` and `Last-Modified` headers to logo responses, enabling browsers to cache logos locally for 4 hours (local files) and respecting upstream cache headers (remote logos). This reduces network traffic and nginx load while providing faster page loads through browser-level caching that complements the existing nginx server-side cache - Thanks [@DawtCom](https://github.com/DawtCom)
+- DVR recording remux fallback strategy: Implemented two-stage TS→MP4→MKV fallback when direct TS→MKV conversion fails due to timestamp issues. On remux failure, system now attempts TS→MP4 conversion (MP4 container handles broken timestamps better) followed by MP4→MKV conversion, automatically recovering from provider timestamp corruption. Failed conversions now properly clean up partial files and preserve source TS for manual recovery.
+- Mature content filtering support:
+  - Added `is_adult` boolean field to both Stream and Channel models with database indexing for efficient filtering and sorting
+  - Automatically populated during M3U/XC refresh operations by extracting `is_adult` value from provider data
+  - Type-safe conversion supporting both integer (0/1) and string ("0"/"1") formats from different providers
+  - UI controls in channel edit form (Switch with tooltip) and bulk edit form (Select dropdown) for easy management
+  - XtreamCodes API support with proper integer formatting (0/1) in live stream responses
+  - Automatic propagation from streams to channels during both single and bulk channel creation operations
+  - Included in serializers for full API support
+  - User-level content filtering: Non-admin users can opt to hide mature content channels across all interfaces (web UI, M3U playlists, EPG data, XtreamCodes API) via "Hide Mature Content" toggle in user settings (stored in custom_properties, admin users always see all content)
+- Table header pin toggle: Pin/unpin table headers to keep them visible while scrolling. Toggle available in channel table menu and UI Settings page. Setting persists across sessions and applies to all tables. (Closes #663)
+- Cascading filters for streams table: Improved filter usability with hierarchical M3U and Group dropdowns. M3U acts as the parent filter showing only active/enabled accounts, while Group options dynamically update to display only groups available in the selected M3U(s). Only enabled M3U's are displayed. (Closes #647)
+- Streams table UI: Added descriptive tooltips to top-toolbar buttons (Add to Channel, Create Channels, Filters, Create Stream, Delete) and to row action icons (Add to Channel, Create New Channel). Tooltips now use a 500ms open delay for consistent behavior with existing table header tooltips.
+
+### Changed
+
+- Data loading and initialization refactor: Major performance improvement reducing initial page load time by eliminating duplicate API requests caused by race conditions between authentication flow and route rendering:
+  - Fixed authentication race condition where `isAuthenticated` was set before data loading completed, causing routes to render and tables to mount prematurely
+  - Added `isInitialized` flag to delay route rendering until after all initialization data is loaded via `initData()`
+  - Consolidated version and environment settings fetching into centralized settings store with caching to prevent redundant calls
+  - Implemented stale fetch prevention in ChannelsTable and StreamsTable using fetch version tracking to ignore outdated responses
+  - Fixed filter handling in tables to use `debouncedFilters` consistently, preventing unnecessary refetches
+  - Added initialization guards using refs to prevent double-execution of auth and superuser checks during React StrictMode's intentional double-rendering in development
+  - Removed duplicate version/environment fetch calls from Sidebar, LoginForm, and SuperuserForm by using centralized store
+- Table preferences (header pin and table size) now managed together with centralized state management and localStorage persistence.
+- Streams table button labels: Renamed "Remove" to "Delete" and "Add Stream to Channel" to "Add to Channel" for clarity and consistency with other UI terminology.
+- Frontend tests GitHub workflow now uses Node.js 24 (matching Dockerfile) and runs on both `main` and `dev` branch pushes and pull requests for comprehensive CI coverage.
+- Table preferences architecture refactored: Migrated `table-size` preference from individual `useLocalStorage` calls to centralized `useTablePreferences` hook. All table components now read preferences from the table instance (`table.tableSize`, `.g maintainability and providing consistent API across all tables.
+- Optimized unassociated streams filter performance: Replaced inefficient reverse foreign key NULL check (`channels__isnull=True`) with Count annotation approach, reducing query time from 4-5 seconds to under 500ms for large datasets (75k+ streams)
+
+### Fixed
+
+- Channels table pagination error handling: Fixed "Invalid page" error notifications that appeared when filters reduced the result set while on a page beyond the new total. The API layer now automatically detects invalid page errors, resets pagination to page 1, and retries the request transparently. (Fixes #864)
+- Fixed long IP addresses overlapping adjacent columns in stream connection card by adding truncation with tooltips displaying the full address. (Fixes #712)
+- Fixed nginx startup failure due to group name mismatch in non-container deployments - Thanks [@s0len](https://github.com/s0len) (Fixes #877)
+- Updated streamlink from 8.1.0 to 8.1.2 to fix YouTube live stream playback issues and improve Pluto TV ad detection (Fixes #869)
+- Fixed date/time formatting across all tables to respect user's UI preferences (time format and date format) set in Settings page:
+  - Stream connection card "Connected" column
+  - VOD connection card "Connection Start Time" column
+  - M3U table "Updated" column
+  - EPG table "Updated" column
+  - Users table "Last Login" and "Date Joined" columns
+  - All components now use centralized `format()` helper from dateTimeUtils for consistency
+- Removed unused imports from table components for cleaner code
+- Fixed build-dev.sh script stability: Resolved Dockerfile and build context paths to be relative to script location for reliable execution from any working directory, added proper --platform argument handling with array-safe quoting, and corrected push behavior to honor -p flag with accurate messaging. Improved formatting and quoting throughout to prevent word-splitting issues - Thanks [@JeffreyBytes](https://github.com/JeffreyBytes)
+- Fixed TypeError on streams table load after container restart: Added robust data validation and type coercion to handle malformed filter options during container startup. The streams table MultiSelect components now safely convert group names to strings and filter out null/undefined values, preventing "right-hand side of 'in' should be an object, got number" errors when the backend hasn't fully initialized. API error handling returns safe defaults.
+- Fixed XtreamCodes API crash when channels have NULL channel_group: The `player_api.php` endpoint (`xc_get_live_streams`) now gracefully handles channels without an assigned channel_group by dynamically looking up and assigning them to "Default Group" instead of crashing with AttributeError. Additionally, the Channel serializer now auto-assigns new channels to "Default Group" when `channel_group_id` is omitted during creation, preventing future NULL channel_group issues.
+- Fixed streams table column header overflow: Implemented fixed-height column headers (30px max-height) with pill-style filter display showing first selection plus count (e.g., "Sport +3"). Prevents header expansion when multiple filters are selected, maintaining compact table layout. (Fixes #613)
+- Fixed VOD logo cleanup button count: The "Cleanup Unused" button now displays the total count of all unused logos across all pages instead of only counting unused logos on the current page.
+- Fixed VOD refresh failures when logos are deleted: Changed logo comparisons to use `logo_id` (raw FK integer) instead of `logo` (related object) to avoid Django's lazy loading, which triggers a database fetch that fails if the referenced logo no longer exists. Also improved orphaned logo detection to properly clear stale references when logo URLs exist but logos are missing from the database.
+- Fixed channel profile filtering to properly restrict content based on assigned channel profiles for all non-admin users (user_level < 10) instead of only streamers (user_level == 0). This corrects the XtreamCodes API endpoints (`get_live_categories` and `get_live_streams`) along with M3U and EPG generation, ensuring standard users (level 1) are properly restricted by their assigned channel profiles. Previously, "Standard" users with channel profiles assigned would see all channels instead of only those in their assigned profiles.
+- Fixed NumPy baseline detection in Docker entrypoint. Now calls `numpy.show_config()` directly with case-insensitive grep instead of incorrectly wrapping the output.
+- Fixed SettingsUtils frontend tests for new grouped settings architecture. Updated test suite to properly verify grouped JSON settings (stream_settings, dvr_settings, etc.) instead of individual CharField settings, including tests for type conversions, array-to-CSV transformations, and special handling of proxy_settings and network_access.
+
+## [0.17.0] - 2026-01-13
+
+### Added
+
+- Added tooltip on filter pills showing all selected items in a vertical list (up to 10 items, with "+N more" indicator)
+- Loading feedback for all confirmation dialogs: Extended visual loading indicators across all confirmation dialogs throughout the application. Delete, cleanup, and bulk operation dialogs now show an animated dots loader and disabled state during async operations, providing consistent user feedback for backups (restore/delete), channels, EPGs, logos, VOD logos, M3U accounts, streams, users, groups, filters, profiles, batch operations, and network access changes.
+- Channel profile edit and duplicate functionality: Users can now rename existing channel profiles and create duplicates with automatic channel membership cloning. Each profile action (edit, duplicate, delete) in the profile dropdown for quick access.
+- ProfileModal component extracted for improved code organization and maintainability of channel profile management operations.
+- Frontend unit tests for pages and utilities: Added comprehensive unit test coverage for frontend components within pages/ and JS files within utils/, along with a GitHub Actions workflow (`frontend-tests.yml`) to automatically run tests on commits and pull requests - Thanks [@nick4810](https://github.com/nick4810)
+- Channel Profile membership control for manual channel creation and bulk operations: Extended the existing `channel_profile_ids` parameter from `POST /api/channels/from-stream/` to also support `POST /api/channels/` (manual creation) and bulk creation tasks with the same flexible semantics:
+  - Omitted parameter (default): Channels are added to ALL profiles (preserves backward compatibility)
+  - Empty array `[]`: Channels are added to NO profiles
+  - Sentinel value `[0]`: Channels are added to ALL profiles (explicit)
+  - Specific IDs `[1, 2, ...]`: Channels are added only to the specified profiles
+    This allows API consumers to control profile membership across all channel creation methods without requiring all channels to be added to every profile by default.
+- Channel profile selection in creation modal: Users can now choose which profiles to add channels to when creating channels from streams (both single and bulk operations). Options include adding to all profiles, no profiles, or specific profiles with mutual exclusivity between special options ("All Profiles", "None") and specific profile selections. Profile selection defaults to the current table filter for intuitive workflow.
+- Group retention policy for M3U accounts: Groups now follow the same stale retention logic as streams, using the account's `stale_stream_days` setting. Groups that temporarily disappear from an M3U source are retained for the configured retention period instead of being immediately deleted, preserving user settings and preventing data loss when providers temporarily remove/re-add groups. (Closes #809)
+- Visual stale indicators for streams and groups: Added `is_stale` field to Stream and both `is_stale` and `last_seen` fields to ChannelGroupM3UAccount models to track items in their retention grace period. Stale groups display with orange buttons and a warning tooltip, while stale streams show with a red background color matching the visual treatment of empty channels.
+
+### Changed
+
+- Settings architecture refactored to use grouped JSON storage: Migrated from individual CharField settings to grouped JSONField settings for improved performance, maintainability, and type safety. Settings are now organized into logical groups (stream_settings, dvr_settings, backup_settings, system_settings, proxy_settings, network_access) with automatic migration handling. Backend provides helper methods (`get_stream_settings()`, `get_default_user_agent_id()`, etc.) for easy access. Frontend simplified by removing complex key mapping logic and standardizing on underscore-based field names throughout.
+- Docker setup enhanced for legacy CPU support: Added `USE_LEGACY_NUMPY` environment variable to enable custom-built NumPy with no CPU baseline, allowing Dispatcharr to run on older CPUs (circa 2009) that lack support for newer baseline CPU features. When set to `true`, the entrypoint script will install the legacy NumPy build instead of the standard distribution. (Fixes #805)
+- VOD upstream read timeout reduced from 30 seconds to 10 seconds to minimize lock hold time when clients disconnect during connection phase
+- Form management refactored across application: Migrated Channel, Stream, M3U Profile, Stream Profile, Logo, and User Agent forms from Formik to React Hook Form (RHF) with Yup validation for improved form handling, better validation feedback, and enhanced code maintainability
+- Stats and VOD pages refactored for clearer separation of concerns: extracted Stream/VOD connection cards (StreamConnectionCard, VodConnectionCard, VODCard, SeriesCard), moved page logic into dedicated utils, and lazy-loaded heavy components with ErrorBoundary fallbacks to improve readability and maintainability - Thanks [@nick4810](https://github.com/nick4810)
+- Channel creation modal refactored: Extracted and unified channel numbering dialogs from StreamsTable into a dedicated CreateChannelModal component that handles both single and bulk channel creation with cleaner, more maintainable implementation and integrated profile selection controls.
+
+### Fixed
+
+- Fixed bulk channel profile membership update endpoint silently ignoring channels without existing membership records. The endpoint now creates missing memberships automatically (matching single-channel endpoint behavior), validates that all channel IDs exist before processing, and provides detailed response feedback including counts of updated vs. created memberships. Added comprehensive Swagger documentation with request/response schemas.
+- Fixed bulk channel edit endpoint crashing with `ValueError: Field names must be given to bulk_update()` when the first channel in the update list had no actual field changes. The endpoint now collects all unique field names from all channels being updated instead of only looking at the first channel, properly handling cases where different channels update different fields or when some channels have no changes - Thanks [@mdellavo](https://github.com/mdellavo) (Fixes #804)
+- Fixed PostgreSQL backup restore not completely cleaning database before restoration. The restore process now drops and recreates the entire `public` schema before running `pg_restore`, ensuring a truly clean restore that removes all tables, functions, and other objects not present in the backup file. This prevents leftover database objects from persisting when restoring backups from older branches or versions. Added `--no-owner` flag to `pg_restore` to avoid role permission errors when the backup was created by a different PostgreSQL user.
+- Fixed TV Guide loading overlay not disappearing after navigating from DVR page. The `fetchRecordings()` function in the channels store was setting `isLoading: true` on start but never resetting it to `false` on successful completion, causing the Guide page's loading overlay to remain visible indefinitely when accessed after the DVR page.
+- Fixed stream profile parameters not properly handling quoted arguments. Switched from basic `.split()` to `shlex.split()` for parsing command-line parameters, allowing proper handling of multi-word arguments in quotes (e.g., OAuth tokens in HTTP headers like `"--twitch-api-header=Authorization=OAuth token123"`). This ensures external streaming tools like Streamlink and FFmpeg receive correctly formatted arguments when using stream profiles with complex parameters - Thanks [@justinforlenza](https://github.com/justinforlenza) (Fixes #833)
+- Fixed bulk and manual channel creation not refreshing channel profile memberships in the UI for all connected clients. WebSocket `channels_created` event now calls `fetchChannelProfiles()` to ensure profile membership updates are reflected in real-time for all users without requiring a page refresh.
+- Fixed Channel Profile filter incorrectly applying profile membership filtering even when "Show Disabled" was enabled, preventing all channels from being displayed. Profile filter now only applies when hiding disabled channels. (Fixes #825)
+- Fixed manual channel creation not adding channels to channel profiles. Manually created channels are now added to the selected profile if one is active, or to all profiles if "All" is selected, matching the behavior of channels created from streams.
+- Fixed VOD streams disappearing from stats page during playback by adding `socket-timeout = 600` to production uWSGI config. The missing directive caused uWSGI to use its default 4-second timeout, triggering premature cleanup when clients buffered content. Now matches the existing `http-timeout = 600` value and prevents timeout errors during normal client buffering - Thanks [@patchy8736](https://github.com/patchy8736)
+- Fixed Channels table EPG column showing "Not Assigned" on initial load for users with large EPG datasets. Added `tvgsLoaded` flag to EPG store to track when EPG data has finished loading, ensuring the table waits for EPG data before displaying. EPG cells now show animated skeleton placeholders while loading instead of incorrectly showing "Not Assigned". (Fixes #810)
+- Fixed VOD profile connection count not being decremented when stream connection fails (timeout, 404, etc.), preventing profiles from reaching capacity limits and rejecting valid stream requests
+- Fixed React warning in Channel form by removing invalid `removeTrailingZeros` prop from NumberInput component
+- Release workflow Docker tagging: Fixed issue where `latest` and version tags (e.g., `0.16.0`) were creating separate manifests instead of pointing to the same image digest, which caused old `latest` tags to become orphaned/untagged after new releases. Now creates a single multi-arch manifest with both tags, maintaining proper tag relationships and download statistics visibility on GitHub.
+- Fixed onboarding message appearing in the Channels Table when filtered results are empty. The onboarding message now only displays when there are no channels created at all, not when channels exist but are filtered out by current filters.
+- Fixed `M3UMovieRelation.get_stream_url()` and `M3UEpisodeRelation.get_stream_url()` to use XC client's `_normalize_url()` method instead of simple `rstrip('/')`. This properly handles malformed M3U account URLs (e.g., containing `/player_api.php` or query parameters) before constructing VOD stream endpoints, matching behavior of live channel URL building. (Closes #722)
+- Fixed bulk_create and bulk_update errors during VOD content refresh by pre-checking object existence with optimized bulk queries (3 queries total instead of N per batch) before creating new objects. This ensures all movie/series objects have primary keys before relation operations, preventing "prohibited to prevent data loss due to unsaved related object" errors. Additionally fixed duplicate key constraint violations by treating TMDB/IMDB ID values of `0` or `'0'` as invalid (some providers use this to indicate "no ID"), converting them to NULL to prevent multiple items from incorrectly sharing the same ID. (Fixes #813)
+
+## [0.16.0] - 2026-01-04
+
+### Added
+
+- Advanced filtering for Channels table: Filter menu now allows toggling disabled channels visibility (when a profile is selected) and filtering to show only empty channels without streams (Closes #182)
+- Network Access warning modal now displays the client's IP address for better transparency when network restrictions are being enforced - Thanks [@damien-alt-sudo](https://github.com/damien-alt-sudo) (Closes #778)
+- VLC streaming support - Thanks [@sethwv](https://github.com/sethwv)
+  - Added `cvlc` as an alternative streaming backend alongside FFmpeg and Streamlink
+  - Log parser refactoring: Introduced `LogParserFactory` and stream-specific parsers (`FFmpegLogParser`, `VLCLogParser`, `StreamlinkLogParser`) to enable codec and resolution detection from multiple streaming tools
+  - VLC log parsing for stream information: Detects video/audio codecs from TS demux output, supports both stream-copy and transcode modes with resolution/FPS extraction from transcode output
+  - Locked, read-only VLC stream profile configured for headless operation with intelligent audio/video codec detection
+  - VLC and required plugins installed in Docker environment with headless configuration
+- ErrorBoundary component for handling frontend errors gracefully with generic error message - Thanks [@nick4810](https://github.com/nick4810)
+
+### Changed
+
+- Fixed event viewer arrow direction (previously inverted) — UI behavior corrected. - Thanks [@drnikcuk](https://github.com/drnikcuk) (Closes #772)
+- Region code options now intentionally include both `GB` (ISO 3166-1 standard) and `UK` (commonly used by EPG/XMLTV providers) to accommodate real-world EPG data variations. Many providers use `UK` in channel identifiers (e.g., `BBCOne.uk`) despite `GB` being the official ISO country code. Users should select the region code that matches their specific EPG provider's convention for optimal region-based EPG matching bonuses - Thanks [@bigpandaaaa](https://github.com/bigpandaaaa)
+- Channel number inputs in stream-to-channel creation modals no longer have a maximum value restriction, allowing users to enter any valid channel number supported by the database
+- Stream log parsing refactored to use factory pattern: Simplified `ChannelService.parse_and_store_stream_info()` to route parsing through specialized log parsers instead of inline program-specific logic (~150 lines of code removed)
+- Stream profile names in fixtures updated to use proper capitalization (ffmpeg → FFmpeg, streamlink → Streamlink)
+- Frontend component refactoring for improved code organization and maintainability - Thanks [@nick4810](https://github.com/nick4810)
+  - Extracted large nested components into separate files (RecordingCard, RecordingDetailsModal, RecurringRuleModal, RecordingSynopsis, GuideRow, HourTimeline, PluginCard, ProgramRecordingModal, SeriesRecordingModal, Field)
+  - Moved business logic from components into dedicated utility files (dateTimeUtils, RecordingCardUtils, RecordingDetailsModalUtils, RecurringRuleModalUtils, DVRUtils, guideUtils, PluginsUtils, PluginCardUtils, notificationUtils)
+  - Lazy loaded heavy components (SuperuserForm, RecordingDetailsModal, ProgramRecordingModal, SeriesRecordingModal, PluginCard) with loading fallbacks
+  - Removed unused Dashboard and Home pages
+  - Guide page refactoring: Extracted GuideRow and HourTimeline components, moved grid calculations and utility functions to guideUtils.js, added loading states for initial data fetching, improved performance through better memoization
+  - Plugins page refactoring: Extracted PluginCard and Field components, added Zustand store for plugin state management, improved plugin action confirmation handling, better separation of concerns between UI and business logic
+- Logo loading optimization: Logos now load only after both Channels and Streams tables complete loading to prevent blocking initial page render, with rendering gated by table readiness to ensure data loads before visual elements
+- M3U stream URLs now use `build_absolute_uri_with_port()` for consistency with EPG and logo URLs, ensuring uniform port handling across all M3U file URLs
+- Settings and Logos page refactoring for improved readability and separation of concerns - Thanks [@nick4810](https://github.com/nick4810)
+  - Extracted individual settings forms (DVR, Network Access, Proxy, Stream, System, UI) into separate components with dedicated utility files
+  - Moved larger nested components into their own files
+  - Moved business logic into corresponding utils/ files
+  - Extracted larger in-line component logic into its own function
+  - Each panel in Settings now uses its own form state with the parent component handling active state management
+
+### Fixed
+
+- Auto Channel Sync Force EPG Source feature not properly forcing "No EPG" assignment - When selecting "Force EPG Source" > "No EPG (Disabled)", channels were still being auto-matched to EPG data instead of forcing dummy/no EPG. Now correctly sets `force_dummy_epg` flag to prevent unwanted EPG assignment. (Fixes #788)
+- VOD episode processing now properly handles season and episode numbers from APIs that return string values instead of integers, with comprehensive error logging to track data quality issues - Thanks [@patchy8736](https://github.com/patchy8736) (Fixes #770)
+- VOD episode-to-stream relations are now validated to ensure episodes have been saved to the database before creating relations, preventing integrity errors when bulk_create operations encounter conflicts - Thanks [@patchy8736](https://github.com/patchy8736)
+- VOD category filtering now correctly handles category names containing pipe "|" characters (e.g., "PL | BAJKI", "EN | MOVIES") by using `rsplit()` to split from the right instead of the left, ensuring the category type is correctly extracted as the last segment - Thanks [@Vitekant](https://github.com/Vitekant)
+- M3U and EPG URLs now correctly preserve non-standard HTTPS ports (e.g., `:8443`) when accessed behind reverse proxies that forward the port in headers — `get_host_and_port()` now properly checks `X-Forwarded-Port` header before falling back to other detection methods (Fixes #704)
+- M3U and EPG manager page no longer crashes when a playlist references a deleted channel group (Fixes screen blank on navigation)
+- Stream validation now returns original URL instead of redirected URL to prevent issues with temporary redirect URLs that expire before clients can connect
+- XtreamCodes EPG limit parameter now properly converted to integer to prevent type errors when accessing EPG listings (Fixes #781)
+- Docker container file permissions: Django management commands (`migrate`, `collectstatic`) now run as the non-root user to prevent root-owned `__pycache__` and static files from causing permission issues - Thanks [@sethwv](https://github.com/sethwv)
+- Stream validation now continues with GET request if HEAD request fails due to connection issues - Thanks [@kvnnap](https://github.com/kvnnap) (Fixes #782)
+- XtreamCodes M3U files now correctly set `x-tvg-url` and `url-tvg` headers to reference XC EPG URL (`xmltv.php`) instead of standard EPG endpoint when downloaded via XC API (Fixes #629)
+
+## [0.15.1] - 2025-12-22
+
+### Fixed
+
+- XtreamCodes EPG `has_archive` field now returns integer `0` instead of string `"0"` for proper JSON type consistency
+- nginx now gracefully handles hosts without IPv6 support by automatically disabling IPv6 binding at startup (Fixes #744)
+
+## [0.15.0] - 2025-12-20
+
+### Added
+
+- VOD client stop button in Stats page: Users can now disconnect individual VOD clients from the Stats view, similar to the existing channel client disconnect functionality.
+- Automated configuration backup/restore system with scheduled backups, retention policies, and async task processing - Thanks [@stlalpha](https://github.com/stlalpha) (Closes #153)
+- Stream group as available hash option: Users can now select 'Group' as a hash key option in Settings → Stream Settings → M3U Hash Key, allowing streams to be differentiated by their group membership in addition to name, URL, TVG-ID, and M3U ID
+
+### Changed
+
+- Initial super user creation page now matches the login page design with logo, welcome message, divider, and version display for a more consistent and polished first-time setup experience
+- Removed unreachable code path in m3u output - Thanks [@DawtCom](https://github.com/DawtCom)
+- GitHub Actions workflows now use `docker/metadata-action` for cleaner and more maintainable OCI-compliant image label generation across all build pipelines (ci.yml, base-image.yml, release.yml). Labels are applied to both platform-specific images and multi-arch manifests with proper annotation formatting. - Thanks [@mrdynamo]https://github.com/mrdynamo) (Closes #724)
+- Update docker/dev-build.sh to support private registries, multiple architectures and pushing. Now you can do things like `dev-build.sh  -p -r my.private.registry -a linux/arm64,linux/amd64` - Thanks [@jdblack](https://github.com/jblack)
+- Updated dependencies: Django (5.2.4 → 5.2.9) includes CVE security patch, psycopg2-binary (2.9.10 → 2.9.11), celery (5.5.3 → 5.6.0), djangorestframework (3.16.0 → 3.16.1), requests (2.32.4 → 2.32.5), psutil (7.0.0 → 7.1.3), gevent (25.5.1 → 25.9.1), rapidfuzz (3.13.0 → 3.14.3), torch (2.7.1 → 2.9.1), sentence-transformers (5.1.0 → 5.2.0), lxml (6.0.0 → 6.0.2) (Closes #662)
+- Frontend dependencies updated: Vite (6.2.0 → 7.1.7), ESLint (9.21.0 → 9.27.0), and related packages; added npm `overrides` to enforce js-yaml@^4.1.1 for transitive security fix. All 6 reported vulnerabilities resolved with `npm audit fix`.
+- Floating video player now supports resizing via a drag handles, with minimum size enforcement and viewport/page boundary constraints to keep it visible.
+- Redis connection settings now fully configurable via environment variables (`REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_URL`), replacing hardcoded `localhost:6379` values throughout the codebase. This enables use of external Redis services in production deployments. (Closes #762)
+- Celery broker and result backend URLs now respect `REDIS_HOST`/`REDIS_PORT`/`REDIS_DB` settings as defaults, with `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` environment variables available for override.
+
+### Fixed
+
+- Docker init script now validates DISPATCHARR_PORT is an integer before using it, preventing sed errors when Kubernetes sets it to a service URL like `tcp://10.98.37.10:80`. Falls back to default port 9191 when invalid (Fixes #737)
+- M3U Profile form now properly resets local state for search and replace patterns after saving, preventing validation errors when adding multiple profiles in a row
+- DVR series rule deletion now properly handles TVG IDs that contain slashes by encoding them in the URL path (Fixes #697)
+- VOD episode processing now correctly handles duplicate episodes (same episode in multiple languages/qualities) by reusing Episode records across multiple M3UEpisodeRelation entries instead of attempting to create duplicates (Fixes #556)
+- XtreamCodes series streaming endpoint now correctly handles episodes with multiple streams (different languages/qualities) by selecting the best available stream based on account priority (Fixes #569)
+- XtreamCodes series info API now returns unique episodes instead of duplicate entries when multiple streams exist for the same episode (different languages/qualities)
+- nginx now gracefully handles hosts without IPv6 support by automatically disabling IPv6 binding at startup (Fixes #744)
+- XtreamCodes EPG API now returns correct date/time format for start/end fields and proper string types for timestamps and channel_id
+- XtreamCodes EPG API now handles None values for title and description fields to prevent AttributeError
+- XtreamCodes EPG `id` field now provides unique identifiers per program listing instead of always returning "0" for better client EPG handling
+- XtreamCodes EPG `epg_id` field now correctly returns the EPGData record ID (representing the EPG source/channel mapping) instead of a dummy value
+
+## [0.14.0] - 2025-12-09
+
+### Added
+
+- Sort buttons for 'Group' and 'M3U' columns in Streams table for improved stream organization and filtering - Thanks [@bobey6](https://github.com/bobey6)
+- EPG source priority field for controlling which EPG source is preferred when multiple sources have matching entries for a channel (higher numbers = higher priority) (Closes #603)
+
+### Changed
+
+- EPG program parsing optimized for sources with many channels but only a fraction mapped. Now parses XML file once per source instead of once per channel, dramatically reducing I/O and CPU overhead. For sources with 10,000 channels and 100 mapped, this results in ~99x fewer file opens and ~100x fewer full file scans. Orphaned programs for unmapped channels are also cleaned up during refresh to prevent database bloat. Database updates are now atomic to prevent clients from seeing empty/partial EPG data during refresh.
+- EPG table now displays detailed status messages including refresh progress, success messages, and last message for idle sources (matching M3U table behavior) (Closes #214)
+- IPv6 access now allowed by default with all IPv6 CIDRs accepted - Thanks [@adrianmace](https://github.com/adrianmace)
+- nginx.conf updated to bind to both IPv4 and IPv6 ports - Thanks [@jordandalley](https://github.com/jordandalley)
+- EPG matching now respects source priority and only uses active (enabled) EPG sources (Closes #672)
+- EPG form API Key field now only visible when Schedules Direct source type is selected
+
+### Fixed
+
+- EPG table "Updated" column now updates in real-time via WebSocket using the actual backend timestamp instead of requiring a page refresh
+- Bulk channel editor confirmation dialog now displays the correct stream profile name that will be applied to the selected channels.
+- uWSGI not found and 502 bad gateway on first startup
+
+## [0.13.1] - 2025-12-06
+
+### Fixed
+
+- JWT token generated so is unique for each deployment
+
+## [0.13.0] - 2025-12-02
+
+### Added
+
+- `CHANGELOG.md` file following Keep a Changelog format to document all notable changes and project history
+- System event logging and viewer: Comprehensive logging system that tracks internal application events (M3U refreshes, EPG updates, stream switches, errors) with a dedicated UI viewer for filtering and reviewing historical events. Improves monitoring, troubleshooting, and understanding system behavior
+- M3U/EPG endpoint caching: Implements intelligent caching for frequently requested M3U playlists and EPG data to reduce database load and improve response times for clients.
+- Search icon to name headers for the channels and streams tables (#686)
+- Comprehensive logging for user authentication events and network access restrictions
+- Validation for EPG objects and payloads in updateEPG functions to prevent errors from invalid data
+- Referrerpolicy to YouTube iframes in series and VOD modals for better compatibility
+
+### Changed
+
+- XC player API now returns server_info for unknown actions to align with provider behavior
+- XC player API refactored to streamline action handling and ensure consistent responses
+- Date parsing logic in generate_custom_dummy_programs improved to handle empty or invalid inputs
+- DVR cards now reflect date and time formats chosen by user - Thanks [@Biologisten](https://github.com/Biologisten)
+- "Uncategorized" categories and relations now automatically created for VOD accounts to improve content management (#627)
+- Improved minimum horizontal size in the stats page for better usability on smaller displays
+- M3U and EPG generation now handles missing channel profiles with appropriate error logging
+
+### Fixed
+
+- Episode URLs in series modal now use UUID instead of ID, fixing broken links (#684, #694)
+- Stream preview now respects selected M3U profile instead of always using default profile (#690)
+- Channel groups filter in M3UGroupFilter component now filters out non-existent groups (prevents blank webui when editing M3U after a group was removed)
+- Stream order now preserved in PATCH/PUT responses from ChannelSerializer, ensuring consistent ordering across all API operations - Thanks [@FiveBoroughs](https://github.com/FiveBoroughs) (#643)
+- XC client compatibility: float channel numbers now converted to integers
+- M3U account and profile modals now scrollable on mobile devices for improved usability
+
+## [0.12.0] - 2025-11-19
+
+### Added
+
+- RTSP stream support with automatic protocol detection when a proxy profile requires it. The proxy now forces FFmpeg for RTSP sources and properly handles RTSP URLs - Thanks [@ragchuck](https://github.com/ragchuck) (#184)
+- UDP stream support, including correct handling when a proxy profile specifies a UDP source. The proxy now skips HTTP-specific headers (like `user_agent`) for non-HTTP protocols and performs manual redirect handling to improve reliability (#617)
+- Separate VOD logos system with a new `VODLogo` model, database migration, dedicated API/viewset, and server-paginated UI. This separates movie/series logos from channel logos, making cleanup safer and enabling independent bulk operations
+
+### Changed
+
+- Background profile refresh now uses a rate-limiting/backoff strategy to avoid provider bans
+- Bulk channel editing now validates all requested changes up front and applies updates in a single database transaction
+- ProxyServer shutdown & ghost-client handling improved to avoid initializing channels for transient clients and prevent duplicate reinitialization during rapid reconnects
+- URL / Stream validation expanded to support credentials on non-FQDN hosts, skips HTTP-only checks for RTSP/RTP/UDP streams, and improved host/port normalization
+- TV guide scrolling & timeline synchronization improved with mouse-wheel scrolling, synchronized timeline position with guide navigation, and improved mobile momentum scrolling (#252)
+- EPG Source dropdown now sorts alphabetically - Thanks [@0x53c65c0a8bd30fff](https://github.com/0x53c65c0a8bd30fff)
+- M3U POST handling restored and improved for clients (e.g., Smarters) that request playlists using HTTP POST - Thanks [@maluueu](https://github.com/maluueu)
+- Login form revamped with branding, cleaner layout, loading state, "Remember Me" option, and focused sign-in flow
+- Series & VOD now have copy-link buttons in modals for easier URL sharing
+- `get_host_and_port` now prioritizes verified port sources and handles reverse-proxy edge cases more accurately (#618)
+
+### Fixed
+
+- EXTINF parsing overhauled to correctly extract attributes such as `tvg-id`, `tvg-name`, and `group-title`, even when values include quotes or commas (#637)
+- Websocket payload size reduced during EPG processing to avoid UI freezes, blank screens, or memory spikes in the browser (#327)
+- Logo management UI fixes including confirmation dialogs, header checkbox reset, delete button reliability, and full client refetch after cleanup
+
+## [0.11.2] - 2025-11-04
+
+### Added
+
+- Custom Dummy EPG improvements:
+  - Support for using an existing Custom Dummy EPG as a template for creating new EPGs
+  - Custom fallback templates for unmatched patterns
+  - `{endtime}` as an available output placeholder and renamed `{time}` → `{starttime}` (#590)
+  - Support for date placeholders that respect both source and output timezones (#597)
+  - Ability to bulk assign Custom Dummy EPGs to multiple channels
+  - "Include New Tag" option to mark programs as new in Dummy EPG output
+  - Support for month strings in date parsing
+  - Ability to set custom posters and channel logos via regex patterns for Custom Dummy EPGs
+  - Improved DST handling by calculating offsets based on the actual program date, not today's date
+
+### Changed
+
+- Stream model maximum URL length increased from 2000 to 4096 characters (#585)
+- Groups now sorted during `xc_get_live_categories` based on the order they first appear (by lowest channel number)
+- Client TTL settings updated and periodic refresh implemented during active streaming to maintain accurate connection tracking
+- `ProgramData.sub_title` field changed from `CharField` to `TextField` to allow subtitles longer than 255 characters (#579)
+- Startup improved by verifying `/data` directory ownership and automatically fixing permissions if needed. Pre-creates `/data/models` during initialization (#614)
+- Port detection enhanced to check `request.META.get("SERVER_PORT")` before falling back to defaults, ensuring correct port when generating M3U, EPG, and logo URLs - Thanks [@lasharor](https://github.com/lasharor)
+
+### Fixed
+
+- Custom Dummy EPG frontend DST calculation now uses program date instead of current date
+- Channel titles no longer truncated early after an apostrophe - Thanks [@0x53c65c0a8bd30fff](https://github.com/0x53c65c0a8bd30fff)
+
+## [0.11.1] - 2025-10-22
+
+### Fixed
+
+- uWSGI not receiving environmental variables
+- LXC unable to access daemons launched by uWSGI ([#575](https://github.com/Dispatcharr/Dispatcharr/issues/575), [#576](https://github.com/Dispatcharr/Dispatcharr/issues/576), [#577](https://github.com/Dispatcharr/Dispatcharr/issues/577))
+
+## [0.11.0] - 2025-10-22
+
+### Added
+
+- Custom Dummy EPG system:
+  - Regex pattern matching and name source selection
+  - Support for custom upcoming and ended programs
+  - Timezone-aware with source and local timezone selection
+  - Option to include categories and date/live tags in Dummy EPG output
+  - (#293)
+- Auto-Enable & Category Improvements:
+  - Auto-enable settings for new groups and categories in M3U and VOD components (#208)
+- IPv6 CIDR validation in Settings - Thanks [@jordandalley](https://github.com/jordandalley) (#236)
+- Custom logo support for channel groups in Auto Sync Channels (#555)
+- Tooltips added to the Stream Table
+
+### Changed
+
+- Celery and uWSGI now have configurable `nice` levels (defaults: `uWSGI=0`, `Celery=5`) to prioritize streaming when needed. (#571)
+- Directory creation and ownership management refactored in init scripts to avoid unnecessary recursive `chown` operations and improve boot speed
+- HTTP streamer switched to threaded model with piped output for improved robustness
+- Chunk timeout configuration improved and StreamManager timeout handling enhanced
+- Proxy timeout values reduced to avoid unnecessary waiting
+- Resource cleanup improved to prevent "Too many open files" errors
+- Proxy settings caching implemented and database connections properly closed after use
+- EPG program fetching optimized with chunked retrieval and explicit ordering to reduce memory usage during output
+- EPG output now sorted by channel number for consistent presentation
+- Stream Table buttons reordered for better usability
+- Database connection handling improved throughout the codebase to reduce overall connection count
+
+### Fixed
+
+- Crash when resizing columns in the Channel Table (#516)
+- Errors when saving stream settings (#535)
+- Preview and edit bugs for custom streams where profile and group selections did not display correctly
+- `channel_id` and `channel.uuid` now converted to strings before processing to fix manual switching when the uWSGI worker was not the stream owner (#269)
+- Stream locking and connection search issues when switching channels; increased search timeout to reduce premature failures (#503)
+- Stream Table buttons no longer shift into multiple rows when selecting many streams
+- Custom stream previews
+- Custom Stream settings not loading properly (#186)
+- Orphaned categories now automatically removed for VOD and Series during M3U refresh (#540)
+
+## [0.10.4] - 2025-10-08
+
+### Added
+
+- "Assign TVG-ID from EPG" functionality with frontend actions for single-channel and batch operations
+- Confirmation dialogs in `ChannelBatchForm` for setting names, logos, TVG-IDs, and clearing EPG assignments
+- "Clear EPG" button to `ChannelBatchForm` for easy reset of assignments
+- Batch editing of channel logos - Thanks [@EmeraldPi](https://github.com/EmeraldPi)
+- Ability to set logo name from URL - Thanks [@EmeraldPi](https://github.com/EmeraldPi)
+- Proper timestamp tracking for channel creation and updates; `XC Get Live Streams` now uses this information
+- Time Zone Settings added to the application ([#482](https://github.com/Dispatcharr/Dispatcharr/issues/482), [#347](https://github.com/Dispatcharr/Dispatcharr/issues/347))
+- Comskip settings support including comskip.ini upload and custom directory selection (#418)
+- Manual recording scheduling for channels without EPG data (#162)
+
+### Changed
+
+- Default M3U account type is now set to XC for new accounts
+- Performance optimization: Only fetch playlists and channel profiles after a successful M3U refresh (rather than every status update)
+- Playlist retrieval now includes current connection counts and improved session handling during VOD session start
+- Improved stream selection logic when all profiles have reached max connections (retries faster)
+
+### Fixed
+
+- Large EPGs now fully parse all channels
+- Duplicate channel outputs for streamer profiles set to "All"
+- Streamer profiles with "All" assigned now receive all eligible channels
+- PostgreSQL btree index errors from logo URL validation during channel creation (#519)
+- M3U processing lock not releasing when no streams found during XC refresh, which also skipped VOD scanning (#449)
+- Float conversion errors by normalizing decimal format during VOD scanning (#526)
+- Direct URL ordering in M3U output to use correct stream sequence (#528)
+- Adding multiple M3U accounts without refreshing modified only the first entry (#397)
+- UI state bug where new playlist creation was not notified to frontend ("Fetching Groups" stuck)
+- Minor FFmpeg task and stream termination bugs in DVR module
+- Input escaping issue where single quotes were interpreted as code delimiters (#406)
+
+## [0.10.3] - 2025-10-04
+
+### Added
+
+- Logo management UI improvements where Channel editor now uses the Logo Manager modal, allowing users to add logos by URL directly from the edit form - Thanks [@EmeraldPi](https://github.com/EmeraldPi)
+
+### Changed
+
+- FFmpeg base container rebuilt with improved native build support - Thanks [@EmeraldPi](https://github.com/EmeraldPi)
+- GitHub Actions workflow updated to use native runners instead of QEMU emulation for more reliable multi-architecture builds
+
+### Fixed
+
+- EPG parsing stability when large EPG files would not fully parse all channels. Parser now uses `iterparse` with `recover=True` for both channel and program-level parsing, ensuring complete and resilient XML processing even when Cloudflare injects additional root elements
+
+## [0.10.2] - 2025-10-03
+
+### Added
+
+- `m3u_id` parameter to `generate_hash_key` and updated related calls
+- Support for `x-tvg-url` and `url-tvg` generation with preserved query parameters (#345)
+- Exact Gracenote ID matching for EPG channel mapping (#291)
+- Recovery handling for XMLTV parser errors
+- `nice -n 5` added to Celery commands for better process priority management
+
+### Changed
+
+- Default M3U hash key changed to URL only for new installs
+- M3U profile retrieval now includes current connection counts and improved session handling during VOD session start
+- Improved stream selection logic when all profiles have reached max connections (retries faster)
+- XMLTV parsing refactored to use `iterparse` for `<tv>` element
+- Release workflow refactored to run on native architecture
+- Docker build system improvements:
+  - Split install/build steps
+  - Switch from Yarn → NPM
+  - Updated to Node.js 24 (frontend build)
+  - Improved ARM build reliability
+  - Pushes to DockerHub with combined manifest
+  - Removed redundant tags and improved build organization
+
+### Fixed
+
+- Cloudflare-hosted EPG feeds breaking parsing (#497)
+- Bulk channel creation now preserves the order channels were selected in (no longer reversed)
+- M3U hash settings not saving properly
+- VOD selecting the wrong M3U profile at session start (#461)
+- Redundant `h` removed from 12-hour time format in settings page
+
+## [0.10.1] - 2025-09-24
+
+### Added
+
+- Virtualized rendering for TV Guide for smoother performance when displaying large guides - Thanks [@stlalpha](https://github.com/stlalpha) (#438)
+- Enhanced channel/program mapping to reuse EPG data across multiple channels that share the same TVG-ID
+
+### Changed
+
+- `URL` field length in EPGSource model increased from 200 → 1000 characters to support long URLs with tokens
+- Improved URL transformation logic with more advanced regex during profile refreshes
+- During EPG scanning, the first display name for a channel is now used instead of the last
+- `whiteSpace` style changed from `nowrap` → `pre` in StreamsTable for better text formatting
+
+### Fixed
+
+- EPG channel parsing failure when channel `URL` exceeded 500 characters by adding validation during scanning (#452)
+- Frontend incorrectly saving case-sensitive setting as a JSON string for stream filters
+
+## [0.10.0] - 2025-09-18
+
+### Added
+
+- Channel Creation Improvements:
+  - Ability to specify channel number during channel creation ([#377](https://github.com/Dispatcharr/Dispatcharr/issues/377), [#169](https://github.com/Dispatcharr/Dispatcharr/issues/169))
+  - Asynchronous bulk channel creation from stream IDs with WebSocket progress updates
+  - WebSocket notifications when channels are created
+- EPG Auto-Matching (Rewritten & Enhanced):
+  - Completely refactored for improved accuracy and efficiency
+  - Can now be applied to selected channels or triggered directly from the channel edit form
+  - Uses stricter matching logic with support from sentence transformers
+  - Added progress notifications during the matching process
+  - Implemented memory cleanup for ML models after matching operations
+  - Removed deprecated matching scripts
+- Logo & EPG Management:
+  - Ability in channel edit form and bulk channel editor to set logos and names from assigned EPG (#157)
+  - Improved logo update flow: frontend refreshes on changes, store updates after bulk changes, progress shown via notifications
+- Table Enhancements:
+  - All tables now support adjustable column resizing (#295)
+  - Channels and Streams tables persist column widths and center divider position to local storage
+  - Improved sizing and layout for user-agents, stream profiles, logos, M3U, and EPG tables
+
+### Changed
+
+- Simplified VOD and series access: removed user-level restrictions on M3U accounts
+- Skip disabled M3U accounts when choosing streams during playback (#402)
+- Enhanced `UserViewSet` queryset to prefetch related channel profiles for better performance
+- Auto-focus added to EPG filter input
+- Category API retrieval now sorts by name
+- Increased default column size for EPG fields and removed max size on group/EPG columns
+- Standardized EPG column header to display `(EPG ID - TVG-ID)`
+
+### Fixed
+
+- Bug during VOD cleanup where all VODs not from the current M3U scan could be deleted
+- Logos not being set correctly in some cases
+- Bug where not setting a channel number caused an error when creating a channel (#422)
+- Bug where clicking "Add Channel" with a channel selected opened the edit form instead
+- Bug where a newly created channel could reuse streams from another channel due to form not clearing properly
+- VOD page not displaying correct order while changing pages
+- `ReferenceError: setIsInitialized is not defined` when logging into web UI
+- `cannot access local variable 'total_chunks' where it is not associated with a value` during VOD refresh
+
+## [0.9.1] - 2025-09-13
+
+### Fixed
+
+- Broken migrations affecting the plugins system
+- DVR and plugin paths to ensure proper functionality (#381)
+
+## [0.9.0] - 2025-09-12
+
+### Added
+
+- **Video on Demand (VOD) System:**
+  - Complete VOD infrastructure with support for movies and TV series
+  - Advanced VOD metadata including IMDB/TMDB integration, trailers, cast information
+  - Smart VOD categorization with filtering by type (movies vs series)
+  - Multi-provider VOD support with priority-based selection
+  - VOD streaming proxy with connection tracking and statistics
+  - Season/episode organization for TV series with expandable episode details
+  - VOD statistics and monitoring integrated with existing stats dashboard
+  - Optimized VOD parsing and category filtering
+  - Dedicated VOD page with movies and series tabs
+  - Rich VOD modals with backdrop images, trailers, and metadata
+  - Episode management with season-based organization
+  - Play button integration with external player support
+  - VOD statistics cards similar to channel cards
+- **Plugin System:**
+  - Extensible Plugin Framework - Developers can build custom functionality without modifying Dispatcharr core
+  - Plugin Discovery & Management - Automatic detection of installed plugins, with enable/disable controls in the UI
+  - Backend API Support - New APIs for listing, loading, and managing plugins programmatically
+  - Plugin Registry - Structured models for plugin metadata (name, version, author, description)
+  - UI Enhancements - Dedicated Plugins page in the admin panel for centralized plugin management
+  - Documentation & Scaffolding - Initial documentation and scaffolding to accelerate plugin development
+- **DVR System:**
+  - Refreshed DVR page for managing scheduled and completed recordings
+  - Global pre/post padding controls surfaced in Settings
+  - Playback support for completed recordings directly in the UI
+  - DVR table view includes title, channel, time, and padding adjustments for clear scheduling
+  - Improved population of DVR listings, fixing intermittent blank screen issues
+  - Comskip integration for automated commercial detection and skipping in recordings
+  - User-configurable comskip toggle in Settings
+- **Enhanced Channel Management:**
+  - EPG column added to channels table for better organization
+  - EPG filtering by channel assignment and source name
+  - Channel batch renaming for efficient bulk channel name updates
+  - Auto channel sync improvements with custom stream profile override
+  - Channel logo management overhaul with background loading
+- Date and time format customization in settings - Thanks [@Biologisten](https://github.com/Biologisten)
+- Auto-refresh intervals for statistics with better UI controls
+- M3U profile notes field for better organization
+- XC account information retrieval and display with account refresh functionality and notifications
+
+### Changed
+
+- JSONB field conversion for custom properties (replacing text fields) for better performance
+- Database encoding converted from ASCII to UTF8 for better character support
+- Batch processing for M3U updates and channel operations
+- Query optimization with prefetch_related to eliminate N+1 queries
+- Reduced API calls by fetching all data at once instead of per-category
+- Buffering speed setting now affects UI indicators
+- Swagger endpoint accessible with or without trailing slash
+- EPG source names displayed before channel names in edit forms
+- Logo loading improvements with background processing
+- Channel card enhancements with better status indicators
+- Group column width optimization
+- Better content-type detection for streams
+- Improved headers with content-range and total length
+- Enhanced user-agent handling for M3U accounts
+- HEAD request support with connection keep-alive
+- Progress tracking improvements for clients with new sessions
+- Server URL length increased to 1000 characters for token support
+- Prettier formatting applied to all frontend code
+- String quote standardization and code formatting improvements
+
+### Fixed
+
+- Logo loading issues in channel edit forms resolved
+- M3U download error handling and user feedback improved
+- Unique constraint violations fixed during stream rehashing
+- Channel stats fetching moved from Celery beat task to configurable API calls
+- Speed badge colors now use configurable buffering speed setting
+- Channel cards properly close when streams stop
+- Active streams labeling updated from "Active Channels"
+- WebSocket updates for client connect/disconnect events
+- Null value handling before database saves
+- Empty string scrubbing for cleaner data
+- Group relationship cleanup for removed M3U groups
+- Logo cleanup for unused files with proper batch processing
+- Recordings start 5 mins after show starts (#102)
+
+### Closed
+
+- [#350](https://github.com/Dispatcharr/Dispatcharr/issues/350): Allow DVR recordings to be played via the UI
+- [#349](https://github.com/Dispatcharr/Dispatcharr/issues/349): DVR screen doesn't populate consistently
+- [#340](https://github.com/Dispatcharr/Dispatcharr/issues/340): Global find and replace
+- [#311](https://github.com/Dispatcharr/Dispatcharr/issues/311): Stat's "Current Speed" does not reflect "Buffering Speed" setting
+- [#304](https://github.com/Dispatcharr/Dispatcharr/issues/304): Name ignored when uploading logo
+- [#300](https://github.com/Dispatcharr/Dispatcharr/issues/300): Updating Logo throws error
+- [#286](https://github.com/Dispatcharr/Dispatcharr/issues/286): 2 Value/Column EPG in Channel Edit
+- [#280](https://github.com/Dispatcharr/Dispatcharr/issues/280): Add general text field in M3U/XS profiles
+- [#190](https://github.com/Dispatcharr/Dispatcharr/issues/190): Show which stream is being used and allow it to be altered in channel properties
+- [#155](https://github.com/Dispatcharr/Dispatcharr/issues/155): Additional column with EPG assignment information / Allow filtering by EPG assignment
+- [#138](https://github.com/Dispatcharr/Dispatcharr/issues/138): Bulk Channel Edit Functions
+
+## [0.8.0] - 2025-08-19
+
+### Added
+
+- Channel & Stream Enhancements:
+  - Preview streams under a channel, with stream logo and name displayed in the channel card
+  - Advanced stats for channel streams
+  - Stream qualities displayed in the channel table
+  - Stream stats now saved to the database
+  - URL badges can now be clicked to copy stream links to the clipboard
+- M3U Filtering for Streams:
+  - Streams for an M3U account can now be filtered using flexible parameters
+  - Apply filters based on stream name, group title, or stream URL (via regex)
+  - Filters support both inclusion and exclusion logic for precise control
+  - Multiple filters can be layered with a priority order for complex rules
+- Ability to reverse the sort order for auto channel sync
+- Custom validator for URL fields now allows non-FQDN hostnames (#63)
+- Membership creation added in `UpdateChannelMembershipAPIView` if not found (#275)
+
+### Changed
+
+- Bumped Postgres to version 17
+- Updated dependencies in `requirements.txt` for compatibility and improvements
+- Improved chunked extraction to prevent memory issues - Thanks [@pantherale0](https://github.com/pantherale0)
+
+### Fixed
+
+- XML escaping for channel ID in `generate_dummy_epg` function
+- Bug where creating a channel from a stream not displayed in the table used an invalid stream name
+- Debian install script - Thanks [@deku-m](https://github.com/deku-m)
+
+## [0.7.1] - 2025-07-29
+
+### Added
+
+- Natural sorting for channel names during auto channel sync
+- Ability to sort auto sync order by provider order (default), channel name, TVG ID, or last updated time
+- Auto-created channels can now be assigned to specific channel profiles (#255)
+- Channel profiles are now fetched automatically after a successful M3U refresh
+- Uses only whole numbers when assigning the next available channel number
+
+### Changed
+
+- Logo upload behavior changed to wait for the Create button before saving
+- Uses the channel name as the display name in EPG output for improved readability
+- Ensures channels are only added to a selected profile if one is explicitly chosen
+
+### Fixed
+
+- Logo Manager prevents redundant messages from the file scanner by properly tracking uploaded logos in Redis
+- Fixed an issue preventing logo uploads via URL
+- Adds internal support for assigning multiple profiles via API
+
+## [0.7.0] - 2025-07-19
+
+### Added
+
+- **Logo Manager:**
+  - Complete logo management system with filtering, search, and usage tracking
+  - Upload logos directly through the UI
+  - Automatically scan `/data/logos` for existing files (#69)
+  - View which channels use each logo
+  - Bulk delete unused logos with cleanup
+  - Enhanced display with hover effects and improved sizing
+  - Improved logo fetching with timeouts and user-agent headers to prevent hanging
+- **Group Manager:**
+  - Comprehensive group management interface (#128)
+  - Search and filter groups with ease
+  - Bulk operations for cleanup
+  - Filter channels by group membership
+  - Automatically clean up unused groups
+- **Auto Channel Sync:**
+  - Automatic channel synchronization from M3U sources (#147)
+  - Configure auto-sync settings per M3U account group
+  - Set starting channel numbers by group
+  - Override group names during sync
+  - Apply regex match and replace for channel names
+  - Filter channels by regex match on stream name
+  - Track auto-created vs manually added channels
+  - Smart updates preserve UUIDs and existing links
+- Stream rehashing with WebSocket notifications
+- Better error handling for blocked rehash attempts
+- Lock acquisition to prevent conflicts
+- Real-time progress tracking
+
+### Changed
+
+- Persist table page sizes in local storage (streams & channels)
+- Smoother pagination and improved UX
+- Fixed z-index issues during table refreshes
+- Improved XC client with connection pooling
+- Better error handling for API and JSON decode failures
+- Smarter handling of empty content and blocking responses
+- Improved EPG XML generation with richer metadata
+- Better support for keywords, languages, ratings, and credits
+- Better form layouts and responsive buttons
+- Enhanced confirmation dialogs and feedback
+
+### Fixed
+
+- Channel table now correctly restores page size from local storage
+- Resolved WebSocket message formatting issues
+- Fixed logo uploads and edits
+- Corrected ESLint issues across the codebase
+- Fixed HTML validation errors in menus
+- Optimized logo fetching with proper timeouts and headers ([#101](https://github.com/Dispatcharr/Dispatcharr/issues/101), [#217](https://github.com/Dispatcharr/Dispatcharr/issues/217))
+
+## [0.6.2] - 2025-07-10
+
+### Fixed
+
+- **Streaming & Connection Stability:**
+  - Provider timeout issues - Slow but responsive providers no longer cause channel lockups
+  - Added chunk and process timeouts - Prevents hanging during stream processing and transcoding
+  - Improved connection handling - Enhanced process management and socket closure detection for safer streaming
+  - Enhanced health monitoring - Health monitor now properly notifies main thread without attempting reconnections
+- **User Interface & Experience:**
+  - Touch screen compatibility - Web player can now be properly closed on touch devices
+  - Improved user management - Added support for first/last names, login tracking, and standardized table formatting
+- Improved logging - Enhanced log messages with channel IDs for better debugging
+- Code cleanup - Removed unused imports, variables, and dead links
+
+## [0.6.1] - 2025-06-27
+
+### Added
+
+- Dynamic parameter options for M3U and EPG URLs (#207)
+- Support for 'num' property in channel number extraction (fixes channel creation from XC streams not having channel numbers)
+
+### Changed
+
+- EPG generation now uses streaming responses to prevent client timeouts during large EPG file generation (#179)
+- Improved reliability when downloading EPG data from external sources
+- Better program positioning - Programs that start before the current view now have proper text positioning (#223)
+- Better mobile support - Improved sizing and layout for mobile devices across multiple tables
+- Responsive stats cards - Better calculation for card layout and improved filling on different screen sizes (#218)
+- Enhanced table rendering - M3U and EPG tables now render better on small screens
+- Optimized spacing - Removed unnecessary padding and blank space throughout the interface
+- Better settings layout - Improved minimum widths and mobile support for settings pages
+- Always show 2 decimal places for FFmpeg speed values
+
+### Fixed
+
+- TV Guide now properly filters channels based on selected channel group
+- Resolved loading issues - Fixed channels and groups not loading correctly in the TV Guide
+- Stream profile fixes - Resolved issue with setting stream profile to 'use default'
+- Single channel editing - When only one channel is selected, the correct channel editor now opens
+- Bulk edit improvements - Added "no change" options for bulk editing operations
+- Bulk channel editor now properly saves changes (#222)
+- Link form improvements - Better sizing and rendering of link forms with proper layering
+- Confirmation dialogs added with warning suppression for user deletion, channel profile deletion, and M3U profile deletion
+
+## [0.6.0] - 2025-06-19
+
+### Added
+
+- **User Management & Access Control:**
+  - Complete user management system with user levels and channel access controls
+  - Network access control with CIDR validation and IP-based restrictions
+  - Logout functionality and improved loading states for authenticated users
+- **Xtream Codes Output:**
+  - Xtream Codes support enables easy output to IPTV clients (#195)
+- **Stream Management & Monitoring:**
+  - FFmpeg statistics integration - Real-time display of video/audio codec info, resolution, speed, and stream type
+  - Automatic stream switching when buffering is detected
+  - Enhanced stream profile management with better connection tracking
+  - Improved stream state detection, including buffering as an active state
+- **Channel Management:**
+  - Bulk channel editing for channel group, stream profile, and user access level
+- **Enhanced M3U & EPG Features:**
+  - Dynamic `tvg-id` source selection for M3U and EPG (`tvg_id`, `gracenote`, or `channel_number`)
+  - Direct URL support in M3U output via `direct=true` parameter
+  - Flexible EPG output with a configurable day limit via `days=#` parameter
+  - Support for LIVE tags and `dd_progrid` numbering in EPG processing
+- Proxy settings configuration with UI integration and improved validation
+- Stream retention controls - Set stale stream days to `0` to disable retention completely (#123)
+- Tuner flexibility - Minimum of 1 tuner now allowed for HDHomeRun output
+- Fallback IP geolocation provider (#127) - Thanks [@maluueu](https://github.com/maluueu)
+- POST method now allowed for M3U output, enabling support for Smarters IPTV - Thanks [@maluueu](https://github.com/maluueu)
+
+### Changed
+
+- Improved channel cards with better status indicators and tooltips
+- Clearer error messaging for unsupported codecs in the web player
+- Network access warnings to prevent accidental lockouts
+- Case-insensitive M3U parsing for improved compatibility
+- Better EPG processing with improved channel matching
+- Replaced Mantine React Table with custom implementations
+- Improved tooltips and parameter wrapping for cleaner interfaces
+- Better badge colors and status indicators
+- Stronger form validation and user feedback
+- Streamlined settings management using JSON configs
+- Default value population for clean installs
+- Environment-specific configuration support for multiple deployment scenarios
+
+### Fixed
+
+- FFmpeg process cleanup - Ensures FFmpeg fully exits before marking connection closed
+- Resolved stream profile update issues in statistics display
+- Fixed M3U profile ID behavior when switching streams
+- Corrected stream switching logic - Redis is only updated on successful switches
+- Fixed connection counting - Excludes the current profile from available connection counts
+- Fixed custom stream channel creation when no group is assigned (#122)
+- Resolved EPG auto-matching deadlock when many channels match simultaneously - Thanks [@xham3](https://github.com/xham3)
+
+## [0.5.2] - 2025-06-03
+
+### Added
+
+- Direct Logo Support: Added ability to bypass logo caching by adding `?cachedlogos=false` to the end of M3U and EPG URLs (#109)
+
+### Changed
+
+- Dynamic Resource Management: Auto-scales Celery workers based on demand, reducing overall memory and CPU usage while still allowing high-demand tasks to complete quickly (#111)
+- Enhanced Logging:
+  - Improved logging for M3U processing
+  - Better error output from XML parser for easier troubleshooting
+
+### Fixed
+
+- XMLTV Parsing: Added `remove_blank_text=True` to lxml parser to prevent crashes with poorly formatted XMLTV files (#115)
+- Stats Display: Refactored channel info retrieval for safer decoding and improved error logging, fixing intermittent issues with statistics not displaying properly
+
+## [0.5.1] - 2025-05-28
+
+### Added
+
+- Support for ZIP-compressed EPG files
+- Automatic extraction of compressed files after downloading
+- Intelligent file type detection for EPG sources:
+  - Reads the first bits of files to determine file type
+  - If a compressed file is detected, it peeks inside to find XML files
+- Random descriptions for dummy channels in the TV guide
+- Support for decimal channel numbers (converted from integer to float) - Thanks [@MooseyOnTheLoosey](https://github.com/MooseyOnTheLoosey)
+- Show channels without EPG data in TV Guide
+- Profile name added to HDHR-friendly name and device ID (allows adding multiple HDHR profiles to Plex)
+
+### Changed
+
+- About 30% faster EPG processing
+- Significantly improved memory usage for large EPG files
+- Improved timezone handling
+- Cleaned up cached files when deleting EPG sources
+- Performance improvements when processing extremely large M3U files
+- Improved batch processing with better cleanup
+- Enhanced WebSocket update handling for large operations
+- Redis configured for better performance (no longer saves to disk)
+- Improved memory management for Celery tasks
+- Separated beat schedules with a file scanning interval set to 20 seconds
+- Improved authentication error handling with user redirection to the login page
+- Improved channel card formatting for different screen resolutions (can now actually read the channel stats card on mobile)
+- Decreased line height for status messages in the EPG and M3U tables for better appearance on smaller screens
+- Updated the EPG form to match the M3U form for consistency
+
+### Fixed
+
+- Profile selection issues that previously caused WebUI crashes
+- Issue with `tvc-guide-id` (Gracenote ID) in bulk channel creation
+- Bug when uploading an M3U with the default user-agent set
+- Bug where multiple channel initializations could occur, causing zombie streams and performance issues (choppy streams)
+- Better error handling for buffer overflow issues
+- Fixed various memory leaks
+- Bug in the TV Guide that would crash the web UI when selecting a profile to filter by
+- Multiple minor bug fixes and code cleanup
+
+## [0.5.0] - 2025-05-15
+
+### Added
+
+- **XtreamCodes Support:**
+  - Initial XtreamCodes client support
+  - Option to add EPG source with XC account
+  - Improved XC login and authentication
+  - Improved error handling for XC connections
+- **Hardware Acceleration:**
+  - Detection of hardware acceleration capabilities with recommendations (available in logs after startup)
+  - Improved support for NVIDIA, Intel (QSV), and VAAPI acceleration methods
+  - Added necessary drivers and libraries for hardware acceleration
+  - Automatically assigns required permissions for hardware acceleration
+  - Thanks to [@BXWeb](https://github.com/BXWeb), @chris.r3x, [@rykr](https://github.com/rykr), @j3111, [@jesmannstl](https://github.com/jesmannstl), @jimmycarbone, [@gordlaben](https://github.com/gordlaben), [@roofussummers](https://github.com/roofussummers), [@slamanna212](https://github.com/slamanna212)
+- **M3U and EPG Management:**
+  - Enhanced M3U profile creation with live regex results
+  - Added stale stream detection with configurable thresholds
+  - Improved status messaging for M3U and EPG operations:
+    - Shows download speed with estimated time remaining
+    - Shows parsing time remaining
+  - Added "Pending Setup" status for M3U's requiring group selection
+  - Improved handling of M3U group filtering
+- **UI Improvements:**
+  - Added configurable table sizes
+  - Enhanced video player with loading and error states
+  - Improved WebSocket connection handling with authentication
+  - Added confirmation dialogs for critical operations
+  - Auto-assign numbers now configurable by selection
+  - Added bulk editing of channel profile membership (select multiple channels, then click the profile toggle on any selected channel to apply the change to all)
+- **Infrastructure & Performance:**
+  - Standardized and improved the logging system
+  - New environment variable to set logging level: `DISPATCHARR_LOG_LEVEL` (default: `INFO`, available: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`)
+  - Introduced a new base image build process: updates are now significantly smaller (typically under 15MB unless the base image changes)
+  - Improved environment variable handling in container
+- Support for Gracenote ID (`tvc-guide-stationid`) - Thanks [@rykr](https://github.com/rykr)
+- Improved file upload handling with size limits removed
+
+### Fixed
+
+- Issues with profiles not loading correctly
+- Problems with stream previews in tables
+- Channel creation and editing workflows
+- Logo display issues
+- WebSocket connection problems
+- Multiple React-related errors and warnings
+- Pagination and filtering issues in tables
+
+## [0.4.1] - 2025-05-01
+
+### Changed
+
+- Optimized uWSGI configuration settings for better server performance
+- Improved asynchronous processing by converting additional timers to gevent
+- Enhanced EPG (Electronic Program Guide) downloading with proper user agent headers
+
+### Fixed
+
+- Issue with "add streams to channel" functionality to correctly follow disabled state logic
+
+## [0.4.0] - 2025-05-01
+
+### Added
+
+- URL copy buttons for stream and channel URLs
+- Manual stream switching ability
+- EPG auto-match notifications - Users now receive feedback about how many matches were found
+- Informative tooltips throughout the interface, including stream profiles and user-agent details
+- Display of connected time for each client
+- Current M3U profile information to stats
+- Better logging for which channel clients are getting chunks from
+
+### Changed
+
+- Table System Rewrite: Completely refactored channel and stream tables for dramatically improved performance with large datasets
+- Improved Concurrency: Replaced time.sleep with gevent.sleep for better performance when handling multiple streams
+- Improved table interactions:
+  - Restored alternating row colors and hover effects
+  - Added shift-click support for multiple row selection
+  - Preserved drag-and-drop functionality
+- Adjusted logo display to prevent layout shifts with different sized logos
+- Improved sticky headers in tables
+- Fixed spacing and padding in EPG and M3U tables for better readability on smaller displays
+- Stream URL handling improved for search/replace patterns
+- Enhanced stream lock management for better reliability
+- Added stream name to channel status for better visibility
+- Properly track current stream ID during stream switches
+- Improved EPG cache handling and cleanup of old cache files
+- Corrected content type for M3U file (using m3u instead of m3u8)
+- Fixed logo URL handling in M3U generation
+- Enhanced tuner count calculation to include only active M3U accounts
+- Increased thread stack size in uwsgi configuration
+- Changed proxy to use uwsgi socket
+- Added build timestamp to version information
+- Reduced excessive logging during M3U/EPG file importing
+- Improved store variable handling to increase application efficiency
+- Frontend now being built by Yarn instead of NPM
+
+### Fixed
+
+- Issues with channel statistics randomly not working
+- Stream ordering in channel selection
+- M3U profile name added to stream names for better identification
+- Channel form not updating some properties after saving
+- Issue with setting logos to default
+- Channel creation from streams
+- Channel group saving
+- Improved error handling throughout the application
+- Bugs in deleting stream profiles
+- Resolved mimetype detection issues
+- Fixed form display issues
+- Added proper requerying after form submissions and item deletions
+- Bug overwriting tvg-id when loading TV Guide
+- Bug that prevented large m3u's and epg's from uploading
+- Typo in Stream Profile header column for Description - Thanks [@LoudSoftware](https://github.com/LoudSoftware)
+- Typo in m3u input processing (tv-chno instead of tvg-chno) - Thanks @www2a
+
+## [0.3.3] - 2025-04-18
+
+### Fixed
+
+- Issue with dummy EPG calculating hours above 24, ensuring time values remain within valid 24-hour format
+- Auto import functionality to properly process old files that hadn't been imported yet, rather than ignoring them
+
+## [0.3.2] - 2025-04-16
+
+### Fixed
+
+- Issue with stream ordering for channels - resolved problem where stream objects were incorrectly processed when assigning order in channel configurations
+
+## [0.3.1] - 2025-04-16
+
+### Added
+
+- Key to navigation links in sidebar to resolve DOM errors when loading web UI
+- Channels that are set to 'dummy' epg to the TV Guide
+
+### Fixed
+
+- Issue preventing dummy EPG from being set
+- Channel numbers not saving properly
+- EPGs not refreshing when linking EPG to channel
+- Improved error messages in notifications
+
+## [0.3.0] - 2025-04-15
+
+### Added
+
+- URL validation for redirect profile:
+  - Validates stream URLs before redirecting clients
+  - Prevents clients from being redirected to unavailable streams
+  - Now tries alternate streams when primary stream validation fails
+- Dynamic tuner configuration for HDHomeRun devices:
+  - TunerCount is now dynamically created based on profile max connections
+  - Sets minimum of 2 tuners, up to 10 for unlimited profiles
+
+### Changed
+
+- More robust stream switching:
+  - Clients now wait properly if a stream is in the switching state
+  - Improved reliability during stream transitions
+- Performance enhancements:
+  - Increased workers and threads for uwsgi for better concurrency
+
+### Fixed
+
+- Issue with multiple dead streams in a row - System now properly handles cases where several sequential streams are unavailable
+- Broken links to compose files in documentation
+
+## [0.2.1] - 2025-04-13
+
+### Fixed
+
+- Stream preview (not channel)
+- Streaming wouldn't work when using default user-agent for an M3U
+- WebSockets and M3U profile form issues
+
+## [0.2.0] - 2025-04-12
+
+Initial beta public release.

@@ -1,0 +1,685 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState, } from 'react';
+import { copyToClipboard } from '../../utils';
+import { buildLiveStreamUrl } from '../../utils/components/FloatingVideoUtils.js';
+import { ChevronDown, ChevronRight, Eye, GripHorizontal, SquareMinus, } from 'lucide-react';
+import {
+  ActionIcon,
+  Badge,
+  Box,
+  Button,
+  Center,
+  Collapse,
+  Flex,
+  Group,
+  Text,
+  Tooltip,
+  useMantineTheme,
+} from '@mantine/core';
+import { flexRender, getCoreRowModel, useReactTable, } from '@tanstack/react-table';
+import './table.css';
+import useChannelsTableStore from '../../store/channelsTable';
+import usePlaylistsStore from '../../store/playlists';
+import useVideoStore from '../../store/useVideoStore';
+import useSettingsStore from '../../store/settings';
+import CatchupIndicator from '../CatchupIndicator';
+import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  MouseSensor,
+  TouchSensor,
+  useDraggable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
+import { arrayMove, SortableContext, useSortable, verticalListSortingStrategy, } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { shallow } from 'zustand/shallow';
+import useAuthStore from '../../store/auth';
+import { USER_LEVELS } from '../../constants';
+import {
+  categorizeStreamStats,
+  formatStatKey,
+  formatStatValue,
+  getChannelStreamStats,
+  reorderChannelStreams,
+} from '../../utils/tables/ChannelTableStreamsUtils.js';
+
+// ── Static values (created once, shared across all instances) ────────────────
+
+const coreRowModel = getCoreRowModel();
+
+const defaultColumnConfig = {
+  size: undefined,
+  minSize: 0,
+};
+
+// ── Sub-components ───────────────────────────────────────────────────────────
+
+const RowDragHandleCell = ({ rowId }) => {
+  const { attributes, listeners, setNodeRef } = useDraggable({
+    id: rowId,
+  });
+
+  return (
+    <Center>
+      <ActionIcon
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
+        variant="transparent"
+        size="xs"
+        style={{
+          cursor: 'grab', // this is enough
+        }}
+      >
+        <GripHorizontal color="white" />
+      </ActionIcon>
+    </Center>
+  );
+};
+
+// Row Component
+const DraggableRow = React.memo(
+  ({ row, index }) => {
+    const { transform, transition, setNodeRef, isDragging } = useSortable({
+      id: row.original.id,
+    });
+
+    const style = {
+      transform: CSS.Transform.toString(transform), //let dnd-kit do its thing
+      transition: transition,
+      opacity: isDragging ? 0.8 : 1,
+      zIndex: isDragging ? 1 : 0,
+      position: 'relative',
+    };
+    return (
+      <Box
+        ref={setNodeRef}
+        key={row.id}
+        className={`tr ${index % 2 == 0 ? 'tr-even' : 'tr-odd'}${row.original.is_stale ? ' stale-stream-row' : ''}`}
+        style={{
+          ...style,
+          display: 'flex',
+          width: '100%',
+          ...(row.getIsSelected() && {
+            backgroundColor: '#163632',
+          }),
+        }}
+      >
+        {row.getVisibleCells().map((cell) => (
+          <Box
+            className="td"
+            key={cell.id}
+            style={{
+              flex: cell.column.columnDef.size ? '0 0 auto' : '1 1 0',
+              width: cell.column.columnDef.size
+                ? cell.column.getSize()
+                : undefined,
+              minWidth: 0,
+            }}
+          >
+            <Flex align="center" style={{ height: '100%' }}>
+              <Text component="div" size="xs">
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </Text>
+            </Flex>
+          </Box>
+        ))}
+      </Box>
+    );
+  },
+  (prev, next) =>
+    prev.row.original === next.row.original && prev.index === next.index
+);
+
+// Stats category display component
+const StatsCategory = ({ categoryName, stats }) => {
+  if (!stats || Object.keys(stats).length === 0) return null;
+
+  return (
+    <Box key={categoryName} mb="xs">
+      <Text size="xs" fw={600} mb={4} tt="uppercase" c="dimmed">
+        {categoryName}
+      </Text>
+      <Group gap={4} mb="xs">
+        {Object.entries(stats).map(([key, value]) => (
+          <Tooltip key={key} label={`${key}: ${formatStatValue(key, value)}`}>
+            <Badge size="xs" variant="light" color="gray">
+              {formatStatKey(key)}:{' '}
+              {formatStatValue(key, value)}
+            </Badge>
+          </Tooltip>
+        ))}
+      </Group>
+    </Box>
+  );
+};
+
+// Extracted stream info cell — reads expandedAdvancedStats from a ref
+// so toggling advanced stats doesn't recreate the columns array.
+const StreamInfoCell = React.memo(
+  ({
+    stream,
+    accountName,
+    expandedAdvancedStatsRef,
+    toggleAdvancedStats,
+    handleWatchStream,
+  }) => {
+    const [, forceUpdate] = useState(0);
+    const isExpanded = expandedAdvancedStatsRef.current.has(stream.id);
+
+    const categorizedStats = useMemo(
+      () => categorizeStreamStats(stream.stream_stats),
+      [stream.stream_stats]
+    );
+    const hasAdvancedStats = useMemo(
+      () =>
+        Object.values(categorizedStats).some(
+          (category) => Object.keys(category).length > 0
+        ),
+      [categorizedStats]
+    );
+
+    const onToggle = useCallback(() => {
+      toggleAdvancedStats(stream.id);
+      forceUpdate((n) => n + 1);
+    }, [stream.id, toggleAdvancedStats]);
+
+    return (
+      <Box>
+        <Group gap="xs" align="center">
+          <Text fw={500} size="sm">
+            {stream.name}
+          </Text>
+          <Badge size="xs" variant="light" color="teal">
+            {accountName}
+          </Badge>
+          <CatchupIndicator
+            isCatchup={stream.is_catchup}
+            catchupDays={stream.catchup_days}
+            variant="badge"
+          />
+          {stream.quality && (
+            <Badge size="xs" variant="light" color="gray">
+              {stream.quality}
+            </Badge>
+          )}
+          {stream.url && (
+            <>
+              <Tooltip label={stream.url}>
+                <Badge
+                  size="xs"
+                  variant="light"
+                  color="indigo"
+                  style={{ cursor: 'pointer' }}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await copyToClipboard(stream.url, {
+                      successTitle: 'URL Copied',
+                      successMessage: 'Stream URL copied to clipboard',
+                    });
+                  }}
+                >
+                  URL
+                </Badge>
+              </Tooltip>
+              <Tooltip label="Preview Stream">
+                <ActionIcon
+                  size="xs"
+                  color="blue"
+                  variant="light"
+                  onClick={() =>
+                    handleWatchStream(
+                      stream.stream_hash || stream.id,
+                      stream.name,
+                      stream.id
+                    )
+                  }
+                  style={{ marginLeft: 2 }}
+                >
+                  <Eye size={16} />
+                </ActionIcon>
+              </Tooltip>
+            </>
+          )}
+        </Group>
+
+        {/* Basic Stream Stats (always shown) */}
+        {stream.stream_stats && (
+          <Group gap="xs" mt={4} align="center">
+            {(stream.stream_stats.video_codec ||
+              stream.stream_stats.resolution ||
+              stream.stream_stats.video_bitrate ||
+              stream.stream_stats.source_fps) && (
+              <>
+                <Text size="xs" c="dimmed" fw={500}>
+                  Video:
+                </Text>
+                {stream.stream_stats.resolution && (
+                  <Badge size="xs" variant="light" color="red">
+                    {stream.stream_stats.resolution}
+                  </Badge>
+                )}
+                {stream.stream_stats.video_bitrate && (
+                  <Badge
+                    size="xs"
+                    variant="light"
+                    color="orange"
+                    style={{ textTransform: 'none' }}
+                  >
+                    {stream.stream_stats.video_bitrate} kbps
+                  </Badge>
+                )}
+                {stream.stream_stats.source_fps && (
+                  <Badge size="xs" variant="light" color="orange">
+                    {stream.stream_stats.source_fps} FPS
+                  </Badge>
+                )}
+                {stream.stream_stats.video_codec && (
+                  <Badge size="xs" variant="light" color="blue">
+                    {stream.stream_stats.video_codec.toUpperCase()}
+                  </Badge>
+                )}
+              </>
+            )}
+
+            {(stream.stream_stats.audio_codec ||
+              stream.stream_stats.audio_channels) && (
+              <>
+                <Text size="xs" c="dimmed" fw={500}>
+                  Audio:
+                </Text>
+                {stream.stream_stats.audio_channels && (
+                  <Badge size="xs" variant="light" color="pink">
+                    {stream.stream_stats.audio_channels}
+                  </Badge>
+                )}
+                {stream.stream_stats.audio_codec && (
+                  <Badge size="xs" variant="light" color="pink">
+                    {stream.stream_stats.audio_codec.toUpperCase()}
+                  </Badge>
+                )}
+              </>
+            )}
+
+            {stream.stream_stats.ffmpeg_output_bitrate && (
+              <>
+                <Text size="xs" c="dimmed" fw={500}>
+                  Output Bitrate:
+                </Text>
+                <Badge
+                  size="xs"
+                  variant="light"
+                  color="orange"
+                  style={{ textTransform: 'none' }}
+                >
+                  {stream.stream_stats.ffmpeg_output_bitrate} kbps
+                </Badge>
+              </>
+            )}
+          </Group>
+        )}
+
+        {hasAdvancedStats && (
+          <Group gap="xs" mt={6}>
+            <Button
+              variant="subtle"
+              size="xs"
+              leftSection={
+                isExpanded ? (
+                  <ChevronDown size={12} />
+                ) : (
+                  <ChevronRight size={12} />
+                )
+              }
+              onClick={onToggle}
+              c="dimmed"
+            >
+              {isExpanded ? 'Hide' : 'Show'} Advanced Stats
+            </Button>
+          </Group>
+        )}
+
+        <Collapse in={isExpanded}>
+          <Box
+            mt="sm"
+            p="xs"
+            style={{
+              backgroundColor: 'rgba(0,0,0,0.1)',
+              borderRadius: '4px',
+            }}
+          >
+            <StatsCategory
+              categoryName="Video"
+              stats={categorizedStats.video}
+            />
+            <StatsCategory
+              categoryName="Audio"
+              stats={categorizedStats.audio}
+            />
+            <StatsCategory
+              categoryName="Technical"
+              stats={categorizedStats.technical}
+            />
+            <StatsCategory
+              categoryName="Other"
+              stats={categorizedStats.other}
+            />
+
+            {stream.stream_stats_updated_at && (
+              <Text size="xs" c="dimmed" mt="xs">
+                Last updated:{' '}
+                {new Date(stream.stream_stats_updated_at).toLocaleString()}
+              </Text>
+            )}
+          </Box>
+        </Collapse>
+      </Box>
+    );
+  }
+);
+
+// ── Main component ───────────────────────────────────────────────────────────
+
+const ChannelStreams = ({ channel }) => {
+  const theme = useMantineTheme();
+
+  const channelStreams = useChannelsTableStore(
+    (state) => state.getChannelStreams(channel.id),
+    shallow
+  );
+  const patchChannelStreamStats = useChannelsTableStore(
+    (s) => s.patchChannelStreamStats
+  );
+  const playlists = usePlaylistsStore((s) => s.playlists);
+  const authUser = useAuthStore((s) => s.user);
+  const showVideo = useVideoStore((s) => s.showVideo);
+  const isVideoVisible = useVideoStore((s) => s.isVisible);
+  const env_mode = useSettingsStore((s) => s.environment.env_mode);
+
+  const handleWatchStream = useCallback(
+    (streamHash, streamName, streamId) => {
+      let vidUrl = buildLiveStreamUrl(`/proxy/ts/stream/${streamHash}`);
+      if (env_mode === 'dev') {
+        vidUrl = `${window.location.protocol}//${window.location.hostname}:5656${vidUrl}`;
+      }
+      const meta = {};
+      if (streamName) meta.name = streamName;
+      if (streamId != null) meta.streamId = streamId;
+      showVideo(vidUrl, 'live', Object.keys(meta).length ? meta : null);
+    },
+    [env_mode, showVideo]
+  );
+
+  const [data, setData] = useState(channelStreams || []);
+
+  useEffect(() => {
+    setData(channelStreams);
+  }, [channelStreams]);
+
+  // Refs so stable callbacks always see the latest values without being in deps
+  const channelRef = useRef(channel);
+  channelRef.current = channel;
+  const dataRef = useRef(data);
+  dataRef.current = data;
+
+  const dataIds = useMemo(() => data?.map(({ id }) => id), [data]);
+
+  // Fire-and-forget refresh of stream stats. Cursor is the newest
+  // stream_stats_updated_at already in the store; server returns only
+  // entries strictly newer than that (empty array when nothing changed).
+  const refreshStats = useCallback(
+    (opts) => {
+      const channelId = channelRef.current?.id;
+      if (!channelId) return;
+      const streams = dataRef.current || [];
+      let since = null;
+      for (const s of streams) {
+        const t = s.stream_stats_updated_at;
+        if (t && (since === null || t > since)) since = t;
+      }
+      const ids = opts && opts.ids;
+      getChannelStreamStats(channelId, since, ids).then((updates) => {
+        if (!updates || updates.length === 0) return;
+        patchChannelStreamStats(channelId, updates);
+      });
+    },
+    [patchChannelStreamStats]
+  );
+
+  // Refresh once when the row is expanded.
+  useEffect(() => {
+    refreshStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Refresh just the previewed stream when the floating player closes.
+  // Metadata is captured while visible because hideVideo clears it.
+  const prevVisibleRef = useRef(isVideoVisible);
+  const lastPreviewMetaRef = useRef(null);
+  useEffect(() => {
+    if (isVideoVisible) {
+      lastPreviewMetaRef.current = useVideoStore.getState().metadata;
+    }
+    const wasVisible = prevVisibleRef.current;
+    prevVisibleRef.current = isVideoVisible;
+    if (wasVisible && !isVideoVisible) {
+      const meta = lastPreviewMetaRef.current;
+      lastPreviewMetaRef.current = null;
+      const channelId = channelRef.current?.id;
+      const previewedStreamId = meta && meta.streamId;
+      const previewedChannelId = meta && meta.channelId;
+      if (
+        previewedStreamId != null &&
+        (dataRef.current || []).some((s) => s.id === previewedStreamId)
+      ) {
+        refreshStats({ ids: [previewedStreamId] });
+      } else if (
+        previewedChannelId != null &&
+        previewedChannelId === channelId
+      ) {
+        refreshStats();
+      }
+    }
+  }, [isVideoVisible, refreshStats]);
+
+  const removeStream = useCallback(async (stream) => {
+    const newStreamList = dataRef.current.filter((s) => s.id !== stream.id);
+    setData(newStreamList);
+    await reorderChannelStreams(
+      channelRef.current.id,
+      newStreamList.map((s) => s.id)
+    );
+  }, []);
+
+  // M3U account map for quick lookup
+  const m3uAccountsMap = useMemo(() => {
+    const map = {};
+    if (playlists && Array.isArray(playlists)) {
+      playlists.forEach((account) => {
+        if (account.id) {
+          map[account.id] = account.name;
+        }
+      });
+    }
+    return map;
+  }, [playlists]);
+
+  // Track expanded advanced stats via ref so toggling doesn't recreate columns
+  const expandedAdvancedStatsRef = useRef(new Set());
+
+  const toggleAdvancedStats = useCallback((streamId) => {
+    const current = expandedAdvancedStatsRef.current;
+    if (current.has(streamId)) {
+      current.delete(streamId);
+    } else {
+      current.add(streamId);
+    }
+  }, []);
+
+  // Columns are now stable — they don't depend on data or expandedAdvancedStats.
+  // Cell renderers receive the row from TanStack at render time.
+  // StreamInfoCell reads the expanded stats ref directly.
+  const columns = useMemo(
+    () => [
+      {
+        id: 'drag-handle',
+        header: 'Move',
+        cell: ({ row }) => <RowDragHandleCell rowId={row.id} />,
+        size: 30,
+      },
+      {
+        id: 'name',
+        header: 'Stream Info',
+        accessorKey: 'name',
+        cell: ({ row }) => {
+          const stream = row.original;
+          const accountName = m3uAccountsMap[stream.m3u_account] || 'Unknown';
+
+          return (
+            <StreamInfoCell
+              stream={stream}
+              accountName={accountName}
+              expandedAdvancedStatsRef={expandedAdvancedStatsRef}
+              toggleAdvancedStats={toggleAdvancedStats}
+              handleWatchStream={handleWatchStream}
+            />
+          );
+        },
+      },
+      {
+        id: 'actions',
+        header: '',
+        size: 30,
+        cell: ({ row }) => (
+          <Center>
+            <ActionIcon variant="transparent" size="xs">
+              <SquareMinus
+                color={theme.tailwind.red[6]}
+                onClick={() => removeStream(row.original)}
+                disabled={authUser.user_level != USER_LEVELS.ADMIN}
+              />
+            </ActionIcon>
+          </Center>
+        ),
+      },
+    ],
+    [
+      m3uAccountsMap,
+      theme,
+      authUser.user_level,
+      toggleAdvancedStats,
+      handleWatchStream,
+    ]
+  );
+
+  const table = useReactTable({
+    columns,
+    data,
+    defaultColumn: defaultColumnConfig,
+    manualPagination: true,
+    manualSorting: true,
+    manualFiltering: true,
+    enableRowSelection: true,
+    getRowId: (row) => row.id,
+    getCoreRowModel: coreRowModel,
+  });
+
+  const handleDragEnd = useCallback(
+    (event) => {
+      if (authUser.user_level != USER_LEVELS.ADMIN) {
+        return;
+      }
+
+      const { active, over } = event;
+      if (active && over && active.id !== over.id) {
+        setData((prevData) => {
+          const currentIds = prevData.map(({ id }) => id);
+          const oldIndex = currentIds.indexOf(active.id);
+          const newIndex = currentIds.indexOf(over.id);
+          const retval = arrayMove(prevData, oldIndex, newIndex);
+
+          reorderChannelStreams(
+            channel.id,
+            retval.map((row) => row.id)
+          );
+
+          return retval;
+        });
+      }
+    },
+    [authUser.user_level, channel]
+  );
+
+  const sensors = useSensors(
+    useSensor(MouseSensor, {}),
+    useSensor(TouchSensor, {}),
+    useSensor(KeyboardSensor, {})
+  );
+
+  const rows = table.getRowModel().rows;
+
+  return (
+    <Box
+      className="channel-streams-container"
+      style={{ width: '100%', padding: 10, backgroundColor: '#163632' }}
+    >
+      <DndContext
+        collisionDetection={closestCenter}
+        modifiers={[restrictToVerticalAxis]}
+        onDragEnd={handleDragEnd}
+        sensors={sensors}
+      >
+        <Box
+          className="divTable table-striped"
+          style={{
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <Box className="tbody">
+            <SortableContext
+              items={dataIds}
+              strategy={verticalListSortingStrategy}
+            >
+              {rows.length === 0 && (
+                <Box
+                  className="tr"
+                  style={{
+                    display: 'flex',
+                    width: '100%',
+                  }}
+                >
+                  <Box
+                    className="td"
+                    style={{
+                      flex: '1 1 0',
+                      minWidth: 0,
+                    }}
+                  >
+                    <Flex
+                      align="center"
+                      justify="center"
+                      style={{ height: '100%' }}
+                    >
+                      <Text size="xs">No Data</Text>
+                    </Flex>
+                  </Box>
+                </Box>
+              )}
+              {rows.length > 0 &&
+                rows.map((row, index) => (
+                  <DraggableRow key={row.id} row={row} index={index} />
+                ))}
+            </SortableContext>
+          </Box>
+        </Box>
+      </DndContext>
+    </Box>
+  );
+};
+
+export default ChannelStreams;

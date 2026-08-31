@@ -1,0 +1,308 @@
+import { describe, it, expect } from 'vitest';
+import {
+  NAV_ITEMS,
+  DEFAULT_ADMIN_ORDER,
+  DEFAULT_USER_ORDER,
+  getOrderedNavItems,
+  isGroupBoundary,
+} from '../navigation';
+
+describe('navigation config', () => {
+  describe('NAV_ITEMS', () => {
+    it('has all expected nav items', () => {
+      expect(NAV_ITEMS.channels).toBeDefined();
+      expect(NAV_ITEMS.vods).toBeDefined();
+      expect(NAV_ITEMS.sources).toBeDefined();
+      expect(NAV_ITEMS.guide).toBeDefined();
+      expect(NAV_ITEMS.dvr).toBeDefined();
+      expect(NAV_ITEMS.stats).toBeDefined();
+      expect(NAV_ITEMS.plugins).toBeDefined();
+      expect(NAV_ITEMS.system).toBeDefined();
+      expect(NAV_ITEMS.settings).toBeDefined();
+    });
+
+    it('keeps the top-level settings entry and the nested System > Settings entry in sync', () => {
+      const nestedSettings = NAV_ITEMS.system.paths.find(
+        (p) => p.path === '/settings'
+      );
+      expect(nestedSettings).toBeDefined();
+      expect(nestedSettings.label).toBe(NAV_ITEMS.settings.label);
+      expect(nestedSettings.icon).toBe(NAV_ITEMS.settings.icon);
+      expect(nestedSettings.path).toBe(NAV_ITEMS.settings.path);
+    });
+
+    it('includes the renamed Connect entry under System', () => {
+      const connectEntry = NAV_ITEMS.system.paths.find(
+        (p) => p.path === '/connect'
+      );
+      expect(connectEntry).toBeDefined();
+      expect(connectEntry.label).toBe('Connect');
+    });
+
+    it('has correct adminOnly flags', () => {
+      expect(NAV_ITEMS.channels.adminOnly).toBe(false);
+      expect(NAV_ITEMS.guide.adminOnly).toBe(false);
+      expect(NAV_ITEMS.settings.adminOnly).toBe(false);
+
+      expect(NAV_ITEMS.vods.adminOnly).toBe(true);
+      expect(NAV_ITEMS.sources.adminOnly).toBe(true);
+      expect(NAV_ITEMS.dvr.adminOnly).toBe(true);
+      expect(NAV_ITEMS.stats.adminOnly).toBe(true);
+      expect(NAV_ITEMS.plugins.adminOnly).toBe(true);
+      expect(NAV_ITEMS.system.adminOnly).toBe(true);
+    });
+  });
+
+  describe('DEFAULT_ADMIN_ORDER', () => {
+    it('includes all nav items', () => {
+      // settings is only for non-admin users; admins access it via the System group
+      const adminItems = Object.keys(NAV_ITEMS).filter(
+        (id) => id !== 'settings'
+      );
+      expect(DEFAULT_ADMIN_ORDER).toHaveLength(adminItems.length);
+      adminItems.forEach((id) => {
+        expect(DEFAULT_ADMIN_ORDER).toContain(id);
+      });
+    });
+
+    it('never includes settings (admins reach it via the System group)', () => {
+      expect(DEFAULT_ADMIN_ORDER).not.toContain('settings');
+    });
+  });
+
+  describe('DEFAULT_USER_ORDER', () => {
+    it('only includes non-admin items', () => {
+      DEFAULT_USER_ORDER.forEach((id) => {
+        expect(NAV_ITEMS[id].adminOnly).toBe(false);
+      });
+    });
+
+    it('includes channels, guide, and settings', () => {
+      expect(DEFAULT_USER_ORDER).toContain('channels');
+      expect(DEFAULT_USER_ORDER).toContain('guide');
+      expect(DEFAULT_USER_ORDER).toContain('settings');
+    });
+  });
+
+  describe('getOrderedNavItems', () => {
+    it('returns default order when no saved order exists for admin', () => {
+      const result = getOrderedNavItems(null, true);
+
+      expect(result.map((item) => item.id)).toEqual(DEFAULT_ADMIN_ORDER);
+    });
+
+    it('returns default order when no saved order exists for non-admin', () => {
+      const result = getOrderedNavItems(null, false);
+
+      expect(result.map((item) => item.id)).toEqual(DEFAULT_USER_ORDER);
+    });
+
+    it('returns default order when saved order is empty array', () => {
+      const result = getOrderedNavItems([], true);
+
+      expect(result.map((item) => item.id)).toEqual(DEFAULT_ADMIN_ORDER);
+    });
+
+    it('uses custom order when provided', () => {
+      const customOrder = [
+        'system',
+        'channels',
+        'vods',
+        'sources',
+        'guide',
+        'dvr',
+        'stats',
+        'plugins',
+      ];
+      const result = getOrderedNavItems(customOrder, true);
+
+      expect(result.map((item) => item.id)).toEqual(customOrder);
+    });
+
+    it('appends missing items to end of saved order', () => {
+      // Simulate a saved order that is missing some newer items
+      const savedOrder = ['channels', 'vods', 'sources'];
+      const result = getOrderedNavItems(savedOrder, true);
+
+      // First items should be in saved order
+      expect(result[0].id).toBe('channels');
+      expect(result[1].id).toBe('vods');
+      expect(result[2].id).toBe('sources');
+
+      // All items should be present
+      expect(result).toHaveLength(DEFAULT_ADMIN_ORDER.length);
+
+      // Missing items should be appended at the end
+      const resultIds = result.map((item) => item.id);
+      expect(resultIds).toContain('guide');
+      expect(resultIds).toContain('system');
+    });
+
+    it('filters out admin-only items for non-admin users', () => {
+      const customOrder = [
+        'channels',
+        'vods',
+        'sources',
+        'guide',
+        'dvr',
+        'settings',
+      ];
+      const result = getOrderedNavItems(customOrder, false);
+
+      const resultIds = result.map((item) => item.id);
+
+      // Should only include non-admin items (vods/dvr need access flags)
+      expect(resultIds).toContain('channels');
+      expect(resultIds).toContain('guide');
+      expect(resultIds).toContain('settings');
+
+      // Should not include admin-only items when access flags are off
+      expect(resultIds).not.toContain('vods');
+      expect(resultIds).not.toContain('sources');
+      expect(resultIds).not.toContain('dvr');
+    });
+
+    it('includes dvr for non-admin users when canViewDvr is true', () => {
+      const result = getOrderedNavItems(null, false, [], { canViewDvr: true });
+      const resultIds = result.map((item) => item.id);
+
+      expect(resultIds).toContain('dvr');
+      expect(resultIds).toContain('channels');
+      expect(resultIds).toContain('guide');
+      expect(resultIds).toContain('settings');
+      expect(resultIds.indexOf('dvr')).toBeGreaterThan(
+        resultIds.indexOf('guide')
+      );
+    });
+
+    it('keeps dvr out for non-admin users when canViewDvr is false', () => {
+      const result = getOrderedNavItems(null, false, [], { canViewDvr: false });
+      expect(result.map((item) => item.id)).not.toContain('dvr');
+    });
+
+    it('includes vods for non-admin users when canViewVod is true', () => {
+      const result = getOrderedNavItems(null, false, [], { canViewVod: true });
+      const resultIds = result.map((item) => item.id);
+
+      expect(resultIds).toContain('vods');
+      expect(resultIds.indexOf('vods')).toBeGreaterThan(
+        resultIds.indexOf('channels')
+      );
+      expect(resultIds.indexOf('vods')).toBeLessThan(
+        resultIds.indexOf('guide')
+      );
+    });
+
+    it('keeps vods out for non-admin users when canViewVod is false', () => {
+      const result = getOrderedNavItems(null, false, [], { canViewVod: false });
+      expect(result.map((item) => item.id)).not.toContain('vods');
+    });
+
+    it('includes both vods and dvr when both access flags are true', () => {
+      const result = getOrderedNavItems(null, false, [], {
+        canViewDvr: true,
+        canViewVod: true,
+      });
+      expect(result.map((item) => item.id)).toEqual([
+        'channels',
+        'vods',
+        'guide',
+        'dvr',
+        'settings',
+      ]);
+    });
+
+    it('filters out unknown items from saved order', () => {
+      const savedOrder = [
+        'channels',
+        'unknown_item',
+        'vods',
+        'invalid',
+        'system',
+      ];
+      const result = getOrderedNavItems(savedOrder, true);
+
+      const resultIds = result.map((item) => item.id);
+
+      expect(resultIds).not.toContain('unknown_item');
+      expect(resultIds).not.toContain('invalid');
+      expect(resultIds).toContain('channels');
+      expect(resultIds).toContain('vods');
+      expect(resultIds).toContain('system');
+    });
+
+    it('adds channel badge with correct count', () => {
+      const channels = ['1', '2', '3'];
+      const result = getOrderedNavItems(null, true, channels);
+
+      const channelItem = result.find((item) => item.id === 'channels');
+      expect(channelItem.badge).toBe('(3)');
+    });
+
+    it('returns items with correct structure', () => {
+      const result = getOrderedNavItems(null, true);
+
+      result.forEach((item) => {
+        expect(item).toHaveProperty('id');
+        expect(item).toHaveProperty('label');
+        expect(item).toHaveProperty('icon');
+        // Flat items have path; group items have paths array
+        expect(item.path !== undefined || Array.isArray(item.paths)).toBe(true);
+      });
+    });
+
+    it('preserves order when user changes role from admin to non-admin', () => {
+      // Admin saved a custom order
+      const adminSavedOrder = [
+        'settings',
+        'vods',
+        'channels',
+        'sources',
+        'guide',
+        'dvr',
+        'stats',
+        'plugins',
+        'users',
+        'logos',
+      ];
+
+      // When user is demoted to non-admin, only allowed items should show
+      const result = getOrderedNavItems(adminSavedOrder, false);
+      const resultIds = result.map((item) => item.id);
+
+      // Order should be preserved for allowed items
+      expect(resultIds[0]).toBe('settings');
+      expect(resultIds[1]).toBe('channels');
+      expect(resultIds[2]).toBe('guide');
+
+      // Should only have non-admin items
+      expect(resultIds).toHaveLength(3);
+    });
+  });
+
+  describe('isGroupBoundary', () => {
+    const leaf = { id: 'leaf' };
+    const group = { id: 'group', paths: [{ path: '/x' }] };
+
+    it('is false for the first item regardless of type', () => {
+      expect(isGroupBoundary([leaf, leaf], 0)).toBe(false);
+      expect(isGroupBoundary([group, leaf], 0)).toBe(false);
+    });
+
+    it('is false between two consecutive leaves', () => {
+      expect(isGroupBoundary([leaf, leaf], 1)).toBe(false);
+    });
+
+    it('is true between two consecutive groups', () => {
+      expect(isGroupBoundary([group, group], 1)).toBe(true);
+    });
+
+    it('is true before a group that follows a leaf', () => {
+      expect(isGroupBoundary([leaf, group], 1)).toBe(true);
+    });
+
+    it('is true before a leaf that follows a group', () => {
+      expect(isGroupBoundary([group, leaf], 1)).toBe(true);
+    });
+  });
+});

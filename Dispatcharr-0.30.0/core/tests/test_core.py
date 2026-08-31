@@ -1,0 +1,837 @@
+from unittest.mock import patch, MagicMock
+import os
+
+from django.core.cache import cache
+from django.test import TestCase, SimpleTestCase
+
+from apps.epg.models import EPGSource, EPGSourceIndex
+import core.models as core_models
+from core.models import (
+    CoreSettings,
+    DVR_SETTINGS_KEY,
+    EPG_SETTINGS_KEY,
+    STREAM_SETTINGS_KEY,
+    SYSTEM_SETTINGS_KEY,
+    _CACHE_BACKEND_ERROR,
+)
+
+
+class CoreSettingsGroupCacheTests(TestCase):
+    """_get_group Redis cache: hit after first read, invalidate on save."""
+
+    def setUp(self):
+        cache.clear()
+        CoreSettings.objects.filter(key=SYSTEM_SETTINGS_KEY).delete()
+        # Allow fallback warnings to emit in each test.
+        core_models._last_group_cache_error_log_at = 0.0
+
+    def tearDown(self):
+        # DB rollback does not undo Redis entries written during the test.
+        cache.clear()
+
+    def test_second_read_does_not_query_database(self):
+        CoreSettings.objects.create(
+            key=SYSTEM_SETTINGS_KEY,
+            name="System Settings",
+            value={"catchup_enabled": False},
+        )
+        self.assertFalse(CoreSettings.get_catchup_enabled())
+
+        with self.assertNumQueries(0):
+            self.assertFalse(CoreSettings.get_catchup_enabled())
+
+    def test_save_invalidates_cache(self):
+        obj = CoreSettings.objects.create(
+            key=SYSTEM_SETTINGS_KEY,
+            name="System Settings",
+            value={"catchup_enabled": True},
+        )
+        self.assertTrue(CoreSettings.get_catchup_enabled())
+
+        obj.value = {"catchup_enabled": False}
+        obj.save()
+        self.assertFalse(CoreSettings.get_catchup_enabled())
+
+    def test_delete_invalidates_cache(self):
+        obj = CoreSettings.objects.create(
+            key=SYSTEM_SETTINGS_KEY,
+            name="System Settings",
+            value={"catchup_enabled": False},
+        )
+        self.assertFalse(CoreSettings.get_catchup_enabled())
+
+        obj.delete()
+        # Row gone: defaults apply (catchup enabled)
+        self.assertTrue(CoreSettings.get_catchup_enabled())
+
+    def test_stale_fill_does_not_repoison_after_invalidate(self):
+        """A miss that read DB before invalidate must not rewrite Redis."""
+        CoreSettings.objects.create(
+            key=SYSTEM_SETTINGS_KEY,
+            name="System Settings",
+            value={"catchup_enabled": True},
+        )
+        cache_key = CoreSettings.group_cache_key(SYSTEM_SETTINGS_KEY)
+        cache.delete(cache_key)
+
+        real_get = CoreSettings.objects.get
+        cached_sets = []
+
+        def racing_get(*args, **kwargs):
+            row = real_get(*args, **kwargs)
+            # Concurrent writer: bump version after this miss read the row.
+            CoreSettings.invalidate_group_cache(SYSTEM_SETTINGS_KEY)
+            return row
+
+        real_set = cache.set
+
+        def tracking_set(key, value, timeout=None, **kwargs):
+            cached_sets.append(key)
+            return real_set(key, value, timeout=timeout, **kwargs)
+
+        with patch.object(CoreSettings.objects, "get", side_effect=racing_get), \
+             patch.object(cache, "set", side_effect=tracking_set):
+            CoreSettings.get_system_settings()
+
+        self.assertNotIn(cache_key, cached_sets)
+        # Writer left DB at True; a later read may refill, but not with a
+        # skipped stale set over a newer disable. Flip DB and confirm.
+        obj = CoreSettings.objects.get(key=SYSTEM_SETTINGS_KEY)
+        obj.value = {"catchup_enabled": False}
+        obj.save()
+        self.assertFalse(CoreSettings.get_catchup_enabled())
+
+    def test_nested_mutation_does_not_poison_cache(self):
+        from core.models import DVR_SETTINGS_KEY
+
+        obj, _ = CoreSettings.objects.get_or_create(
+            key=DVR_SETTINGS_KEY,
+            defaults={"name": "DVR Settings", "value": {}},
+        )
+        obj.value = {**(obj.value if isinstance(obj.value, dict) else {}), "series_rules": [{"tvg_id": "a"}]}
+        obj.save()
+        CoreSettings.invalidate_group_cache(DVR_SETTINGS_KEY)
+
+        rules = CoreSettings.get_dvr_settings()["series_rules"]
+        rules.append({"tvg_id": "mutated"})
+
+        again = CoreSettings.get_dvr_settings()["series_rules"]
+        self.assertEqual(len(again), 1)
+        self.assertEqual(again[0]["tvg_id"], "a")
+
+    @patch("apps.proxy.config.BaseConfig.clear_proxy_settings_cache")
+    def test_invalidate_clears_proxy_process_cache(self, clear_mock):
+        from core.models import PROXY_SETTINGS_KEY
+
+        CoreSettings.invalidate_group_cache(PROXY_SETTINGS_KEY)
+        clear_mock.assert_called_once_with()
+
+    def test_network_access_allowed_uses_cached_settings(self):
+        from django.test import RequestFactory
+
+        from core.models import NETWORK_ACCESS_KEY
+        from dispatcharr.utils import network_access_allowed
+
+        CoreSettings.objects.update_or_create(
+            key=NETWORK_ACCESS_KEY,
+            defaults={
+                "name": "Network Access",
+                "value": {"STREAMS": "0.0.0.0/0,::/0"},
+            },
+        )
+        request = RequestFactory().get("/")
+        request.META["REMOTE_ADDR"] = "1.2.3.4"
+
+        self.assertTrue(network_access_allowed(request, "STREAMS"))
+        with self.assertNumQueries(0):
+            self.assertTrue(network_access_allowed(request, "STREAMS"))
+
+    def test_get_group_falls_back_to_db_when_redis_unavailable(self):
+        """AIO migrate runs before Redis; settings reads must use Postgres.
+
+        Fresh AIO installs run ``manage.py migrate`` before uWSGI starts
+        Redis. Data migrations such as m3u.0003 call
+        ``CoreSettings.get_default_user_agent_id()``, which must not raise
+        when the cache backend is unreachable.
+        """
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        CoreSettings.objects.update_or_create(
+            key=STREAM_SETTINGS_KEY,
+            defaults={
+                "name": "Stream Settings",
+                "value": {"default_user_agent": "ua-from-db"},
+            },
+        )
+        redis_down = RedisConnectionError(
+            "Error 111 connecting to localhost:6379"
+        )
+        with patch.object(cache, "get", side_effect=redis_down), \
+             patch.object(cache, "set", side_effect=redis_down):
+            with self.assertLogs("core.models", level="WARNING") as logs:
+                self.assertEqual(
+                    CoreSettings.get_default_user_agent_id(),
+                    "ua-from-db",
+                )
+        self.assertTrue(
+            any("falling back to Postgres" in line for line in logs.output)
+        )
+
+    def test_invalidate_tolerates_redis_unavailable(self):
+        """CoreSettings saves during migrate must not require Redis."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        redis_down = RedisConnectionError(
+            "Error 111 connecting to localhost:6379"
+        )
+        with patch.object(cache, "get", side_effect=redis_down), \
+             patch.object(cache, "set", side_effect=redis_down), \
+             patch.object(cache, "delete", side_effect=redis_down):
+            with self.assertLogs("core.models", level="WARNING") as logs:
+                CoreSettings.invalidate_group_cache(SYSTEM_SETTINGS_KEY)
+        self.assertTrue(
+            any("falling back to Postgres" in line for line in logs.output)
+        )
+
+    def test_cache_helpers_do_not_swallow_non_redis_errors(self):
+        """Programming errors and non-connectivity Redis errors still surface."""
+        from redis.exceptions import AuthenticationError, ResponseError
+
+        with patch.object(cache, "get", side_effect=TypeError("boom")):
+            with self.assertRaises(TypeError):
+                CoreSettings._cache_get("any-key")
+        with patch.object(cache, "set", side_effect=TypeError("boom")):
+            with self.assertRaises(TypeError):
+                CoreSettings._cache_set("any-key", {"a": 1})
+        with patch.object(cache, "delete", side_effect=ValueError("boom")):
+            with self.assertRaises(ValueError):
+                CoreSettings._cache_delete("any-key")
+        with patch.object(cache, "get", side_effect=ResponseError("WRONGTYPE")):
+            with self.assertRaises(ResponseError):
+                CoreSettings._cache_get("any-key")
+        with patch.object(
+            cache, "get", side_effect=AuthenticationError("NOAUTH")
+        ):
+            with self.assertRaises(AuthenticationError):
+                CoreSettings._cache_get("any-key")
+
+    def test_cache_backend_error_skips_fill(self):
+        """Failed ver/get must not collapse the version guard to None == None."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        CoreSettings.objects.create(
+            key=SYSTEM_SETTINGS_KEY,
+            name="System Settings",
+            value={"catchup_enabled": True},
+        )
+        cache_key = CoreSettings.group_cache_key(SYSTEM_SETTINGS_KEY)
+        cache.delete(cache_key)
+
+        def flaky_get(key, default=None, **kwargs):
+            if key == cache_key:
+                return None
+            raise RedisConnectionError("flapping redis")
+
+        cached_sets = []
+        real_set = cache.set
+
+        def tracking_set(key, value, timeout=None, **kwargs):
+            cached_sets.append(key)
+            return real_set(key, value, timeout=timeout, **kwargs)
+
+        with patch.object(cache, "get", side_effect=flaky_get), \
+             patch.object(cache, "set", side_effect=tracking_set):
+            self.assertTrue(CoreSettings.get_catchup_enabled())
+
+        self.assertNotIn(cache_key, cached_sets)
+
+        with patch.object(
+            cache,
+            "get",
+            side_effect=RedisConnectionError("down"),
+        ):
+            self.assertIs(
+                CoreSettings._cache_get("any-key"),
+                _CACHE_BACKEND_ERROR,
+            )
+
+
+class DispatcharrUserAgentTests(TestCase):
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_user_agent(self):
+        from core.utils import dispatcharr_user_agent
+        self.assertEqual(dispatcharr_user_agent(), 'Dispatcharr/1.2.3')
+
+    def test_dispatcharr_dvr_user_agent(self):
+        from core.utils import dispatcharr_dvr_user_agent
+        self.assertEqual(dispatcharr_dvr_user_agent(42), 'Dispatcharr-DVR/recording-42')
+
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_http_headers_with_token(self):
+        from core.utils import dispatcharr_http_headers
+        headers = dispatcharr_http_headers(token='tok123')
+        self.assertEqual(headers, {
+            'User-Agent': 'Dispatcharr/1.2.3',
+            'Content-Type': 'application/json',
+            'token': 'tok123',
+        })
+
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_http_headers_without_content_type(self):
+        from core.utils import dispatcharr_http_headers
+        self.assertEqual(
+            dispatcharr_http_headers(content_type=None),
+            {'User-Agent': 'Dispatcharr/1.2.3'},
+        )
+
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_http_headers_with_route_to(self):
+        from core.utils import dispatcharr_http_headers
+        headers = dispatcharr_http_headers(content_type=None, route_to='debug')
+        self.assertEqual(headers, {
+            'User-Agent': 'Dispatcharr/1.2.3',
+            'RouteTo': 'debug',
+        })
+
+
+class DefaultUserAgentCacheTests(TestCase):
+    """Resolved default User-Agent string is Redis-cached and invalidated."""
+
+    def setUp(self):
+        from core.models import UserAgent
+
+        cache.clear()
+        CoreSettings.objects.filter(key=STREAM_SETTINGS_KEY).delete()
+        self.UserAgent = UserAgent
+        self.ua = UserAgent.objects.create(
+            name="Cache Test UA",
+            user_agent="CacheTestAgent/1.0",
+        )
+        CoreSettings.objects.create(
+            key=STREAM_SETTINGS_KEY,
+            name="Stream Settings",
+            value={"default_user_agent": self.ua.id},
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_second_read_does_not_query_database(self):
+        self.assertEqual(CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0")
+        with self.assertNumQueries(0):
+            self.assertEqual(
+                CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0"
+            )
+
+    def test_stream_settings_save_invalidates_string_cache(self):
+        self.assertEqual(CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0")
+
+        other = self.UserAgent.objects.create(
+            name="Other UA",
+            user_agent="OtherAgent/2.0",
+        )
+        obj = CoreSettings.objects.get(key=STREAM_SETTINGS_KEY)
+        obj.value = {**obj.value, "default_user_agent": other.id}
+        obj.save()
+
+        self.assertEqual(CoreSettings.get_default_user_agent(), "OtherAgent/2.0")
+
+    def test_user_agent_save_invalidates_string_cache(self):
+        self.assertEqual(CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0")
+
+        self.ua.user_agent = "CacheTestAgent/1.1"
+        self.ua.save()
+
+        self.assertEqual(CoreSettings.get_default_user_agent(), "CacheTestAgent/1.1")
+
+    def test_user_agent_delete_falls_back_to_dispatcharr(self):
+        self.assertEqual(CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0")
+
+        ua_id = self.ua.id
+        self.ua.delete()
+
+        with patch("version.__version__", "9.9.9"), self.assertLogs(
+            "core.models", level="WARNING"
+        ) as logs:
+            # Stale id remains in stream settings; missing row uses fallback.
+            self.assertEqual(
+                CoreSettings.get_default_user_agent(), "Dispatcharr/9.9.9"
+            )
+        self.assertTrue(
+            any("not found" in message for message in logs.output),
+            logs.output,
+        )
+        # Id is still the deleted one (settings not rewritten).
+        self.assertEqual(
+            str(CoreSettings.get_default_user_agent_id()), str(ua_id)
+        )
+
+    @patch("version.__version__", "1.2.3")
+    def test_missing_default_falls_back_without_warning(self):
+        CoreSettings.objects.filter(key=STREAM_SETTINGS_KEY).delete()
+        cache.clear()
+
+        with self.assertNoLogs("core.models", level="WARNING"):
+            self.assertEqual(CoreSettings.get_default_user_agent(), "Dispatcharr/1.2.3")
+        with self.assertNumQueries(0):
+            self.assertEqual(
+                CoreSettings.get_default_user_agent(), "Dispatcharr/1.2.3"
+            )
+    def test_stale_fill_does_not_repoison_after_invalidate(self):
+        cache.delete(core_models._DEFAULT_USER_AGENT_CACHE_KEY)
+
+        real_get = self.UserAgent.objects.get
+        cached_sets = []
+
+        def racing_get(*args, **kwargs):
+            row = real_get(*args, **kwargs)
+            CoreSettings.invalidate_default_user_agent_cache()
+            return row
+
+        real_set = cache.set
+
+        def tracking_set(key, value, timeout=None, **kwargs):
+            cached_sets.append(key)
+            return real_set(key, value, timeout=timeout, **kwargs)
+
+        with patch.object(self.UserAgent.objects, "get", side_effect=racing_get), \
+             patch.object(cache, "set", side_effect=tracking_set):
+            CoreSettings.get_default_user_agent()
+
+        self.assertNotIn(core_models._DEFAULT_USER_AGENT_CACHE_KEY, cached_sets)
+
+    def test_redis_down_falls_back_to_postgres(self):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        cache.clear()
+        with patch.object(cache, "get", side_effect=RedisConnectionError("down")), \
+             patch.object(cache, "set", side_effect=RedisConnectionError("down")):
+            self.assertEqual(
+                CoreSettings.get_default_user_agent(), "CacheTestAgent/1.0"
+            )
+
+
+class DefaultStreamProfileRedirectCacheTests(TestCase):
+    """Default-is-Redirect check compares ids without a per-request StreamProfile get."""
+
+    def setUp(self):
+        from core.models import StreamProfile, REDIRECT_PROFILE_NAME, PROXY_PROFILE_NAME
+
+        cache.clear()
+        CoreSettings.objects.filter(key=STREAM_SETTINGS_KEY).delete()
+        self.StreamProfile = StreamProfile
+        self.redirect = StreamProfile.objects.filter(
+            name=REDIRECT_PROFILE_NAME, locked=True
+        ).first()
+        if self.redirect is None:
+            self.redirect = StreamProfile.objects.create(
+                name=REDIRECT_PROFILE_NAME,
+                command="",
+                parameters="",
+                is_active=True,
+                locked=True,
+            )
+        self.proxy = StreamProfile.objects.filter(
+            name=PROXY_PROFILE_NAME, locked=True
+        ).first()
+        if self.proxy is None:
+            self.proxy = StreamProfile.objects.create(
+                name=PROXY_PROFILE_NAME,
+                command="",
+                parameters="",
+                is_active=True,
+                locked=True,
+            )
+        CoreSettings.objects.create(
+            key=STREAM_SETTINGS_KEY,
+            name="Stream Settings",
+            value={"default_stream_profile": self.redirect.id},
+        )
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_second_read_does_not_query_stream_profile(self):
+        self.assertTrue(CoreSettings.is_default_stream_profile_redirect())
+        with self.assertNumQueries(0):
+            self.assertTrue(CoreSettings.is_default_stream_profile_redirect())
+
+    def test_false_when_default_is_proxy(self):
+        obj = CoreSettings.objects.get(key=STREAM_SETTINGS_KEY)
+        obj.value = {**obj.value, "default_stream_profile": self.proxy.id}
+        obj.save()
+        cache.clear()
+
+        self.assertFalse(CoreSettings.is_default_stream_profile_redirect())
+        with self.assertNumQueries(0):
+            self.assertFalse(CoreSettings.is_default_stream_profile_redirect())
+
+    def test_false_when_default_unset(self):
+        CoreSettings.objects.filter(key=STREAM_SETTINGS_KEY).delete()
+        cache.clear()
+        self.assertFalse(CoreSettings.is_default_stream_profile_redirect())
+
+
+class ProgrammeIndexRebuildTests(TestCase):
+    def test_startup_rebuild_does_not_lock_out_queued_build_task(self):
+        source = EPGSource.objects.create(
+            name="Missing Index",
+            source_type="xmltv",
+            is_active=True,
+        )
+
+        class FakeRedis:
+            def __init__(self):
+                self.keys = set()
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and key in self.keys:
+                    return False
+                self.keys.add(key)
+                return True
+
+            def delete(self, key):
+                self.keys.discard(key)
+
+        fake_redis = FakeRedis()
+
+        from apps.epg.tasks import build_programme_index_task
+        from core.tasks import _rebuild_programme_indices
+
+        def run_task_immediately(source_id):
+            build_programme_index_task(source_id)
+
+        with patch(
+            "core.tasks.RedisClient.get_client", return_value=fake_redis
+        ), patch(
+            "core.utils.RedisClient.get_client", return_value=fake_redis
+        ), patch(
+            "apps.epg.tasks.build_programme_index"
+        ) as mock_build, patch(
+            "apps.epg.tasks.build_programme_index_task.delay",
+            side_effect=run_task_immediately,
+        ):
+            _rebuild_programme_indices()
+
+        mock_build.assert_called_once_with(source.id)
+
+
+class GetDvrSeriesRulesTest(TestCase):
+    """Verify get_dvr_series_rules handles corrupted stored data."""
+
+    def _set_series_rules_raw(self, raw_value):
+        """Write a raw series_rules value into the DB, bypassing set_dvr_series_rules."""
+        obj, _ = CoreSettings.objects.get_or_create(
+            key=DVR_SETTINGS_KEY,
+            defaults={"name": "DVR Settings", "value": {}},
+        )
+        current = obj.value if isinstance(obj.value, dict) else {}
+        current["series_rules"] = raw_value
+        obj.value = current
+        obj.save()
+
+    def test_valid_rules_returned_as_is(self):
+        rules = [{"tvg_id": "abc", "mode": "all", "title": "Show"}]
+        self._set_series_rules_raw(rules)
+        result = CoreSettings.get_dvr_series_rules()
+        self.assertEqual(result, rules)
+
+    def test_non_dict_elements_filtered(self):
+        """Strings in the list cause 'str' has no attribute 'get'."""
+        self._set_series_rules_raw(["bad_string", {"tvg_id": "abc", "mode": "all", "title": ""}])
+        result = CoreSettings.get_dvr_series_rules()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["tvg_id"], "abc")
+
+    def test_non_list_value_returns_empty(self):
+        """If series_rules is a JSON string instead of a list, return empty."""
+        self._set_series_rules_raw("[]")
+        result = CoreSettings.get_dvr_series_rules()
+        self.assertEqual(result, [])
+
+    def test_none_value_returns_empty(self):
+        self._set_series_rules_raw(None)
+        result = CoreSettings.get_dvr_series_rules()
+        self.assertEqual(result, [])
+
+    def test_mixed_corrupt_elements(self):
+        self._set_series_rules_raw([42, None, True, {"tvg_id": "x", "mode": "new", "title": "T"}])
+        result = CoreSettings.get_dvr_series_rules()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["tvg_id"], "x")
+
+
+class SetDvrSeriesRulesTest(TestCase):
+    """Verify set_dvr_series_rules sanitizes input before persisting."""
+
+    def test_valid_rules_persisted(self):
+        rules = [{"tvg_id": "abc", "mode": "all", "title": "Show"}]
+        result = CoreSettings.set_dvr_series_rules(rules)
+        self.assertEqual(result, rules)
+        self.assertEqual(CoreSettings.get_dvr_series_rules(), rules)
+
+    def test_non_dict_elements_stripped_on_write(self):
+        dirty = ["bad", 42, {"tvg_id": "abc", "mode": "all", "title": ""}]
+        result = CoreSettings.set_dvr_series_rules(dirty)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["tvg_id"], "abc")
+        self.assertEqual(CoreSettings.get_dvr_series_rules(), result)
+
+    def test_non_list_input_stores_empty(self):
+        result = CoreSettings.set_dvr_series_rules("not a list")
+        self.assertEqual(result, [])
+        self.assertEqual(CoreSettings.get_dvr_series_rules(), [])
+
+
+class CoreSettingsSerializerDvrTest(TestCase):
+    """Verify the generic settings API sanitizes series_rules on save."""
+
+    def test_serializer_strips_corrupt_series_rules(self):
+        """Settings page round-trip must not persist corrupt series_rules."""
+        from core.serializers import CoreSettingsSerializer
+
+        obj, _ = CoreSettings.objects.get_or_create(
+            key=DVR_SETTINGS_KEY,
+            defaults={"name": "DVR Settings", "value": {"series_rules": []}},
+        )
+        dirty_value = {
+            **obj.value,
+            "series_rules": ["bad", {"tvg_id": "ok", "mode": "all", "title": ""}],
+        }
+        serializer = CoreSettingsSerializer(obj, data={"value": dirty_value}, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        obj.refresh_from_db()
+        rules = obj.value.get("series_rules", [])
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["tvg_id"], "ok")
+
+    def test_serializer_handles_non_list_series_rules(self):
+        from core.serializers import CoreSettingsSerializer
+
+        obj, _ = CoreSettings.objects.get_or_create(
+            key=DVR_SETTINGS_KEY,
+            defaults={"name": "DVR Settings", "value": {"series_rules": []}},
+        )
+        dirty_value = {**obj.value, "series_rules": "not a list"}
+        serializer = CoreSettingsSerializer(obj, data={"value": dirty_value}, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        obj.refresh_from_db()
+        self.assertEqual(obj.value.get("series_rules"), [])
+
+
+class EpgIgnoreListsTest(TestCase):
+    """Verify EPG ignore list getters handle corrupted stored data."""
+
+    def _set_epg_field_raw(self, field, raw_value):
+        obj, _ = CoreSettings.objects.get_or_create(
+            key=EPG_SETTINGS_KEY,
+            defaults={"name": "EPG Settings", "value": {}},
+        )
+        current = obj.value if isinstance(obj.value, dict) else {}
+        current[field] = raw_value
+        obj.value = current
+        obj.save()
+
+    def test_valid_string_lists_returned(self):
+        for field, getter in [
+            ("epg_match_ignore_prefixes", CoreSettings.get_epg_match_ignore_prefixes),
+            ("epg_match_ignore_suffixes", CoreSettings.get_epg_match_ignore_suffixes),
+            ("epg_match_ignore_custom", CoreSettings.get_epg_match_ignore_custom),
+        ]:
+            self._set_epg_field_raw(field, ["HD", "SD"])
+            self.assertEqual(getter(), ["HD", "SD"])
+
+    def test_non_string_elements_filtered(self):
+        for field, getter in [
+            ("epg_match_ignore_prefixes", CoreSettings.get_epg_match_ignore_prefixes),
+            ("epg_match_ignore_suffixes", CoreSettings.get_epg_match_ignore_suffixes),
+            ("epg_match_ignore_custom", CoreSettings.get_epg_match_ignore_custom),
+        ]:
+            self._set_epg_field_raw(field, [42, None, "HD", True, "SD"])
+            result = getter()
+            self.assertEqual(result, ["HD", "SD"])
+
+    def test_non_list_value_returns_empty(self):
+        for field, getter in [
+            ("epg_match_ignore_prefixes", CoreSettings.get_epg_match_ignore_prefixes),
+            ("epg_match_ignore_suffixes", CoreSettings.get_epg_match_ignore_suffixes),
+            ("epg_match_ignore_custom", CoreSettings.get_epg_match_ignore_custom),
+        ]:
+            self._set_epg_field_raw(field, "not a list")
+            self.assertEqual(getter(), [])
+
+
+class DropDBCommandTlsTest(TestCase):
+    """Verify dropdb management command passes TLS parameters to psycopg."""
+    databases = []
+
+    _DB_WITH_TLS = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'testdb',
+            'USER': 'testuser',
+            'PASSWORD': 'testpass',
+            'HOST': 'localhost',
+            'PORT': 5432,
+            'OPTIONS': {
+                'sslmode': 'verify-full',
+                'sslrootcert': '/certs/ca.crt',
+                'sslcert': '/certs/client.crt',
+                'sslkey': '/certs/client.key',
+            },
+        }
+    }
+
+    _DB_NO_TLS = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'testdb',
+            'USER': 'testuser',
+            'PASSWORD': 'testpass',
+            'HOST': 'localhost',
+            'PORT': 5432,
+        }
+    }
+
+    @patch('core.management.commands.dropdb.psycopg.connect')
+    @patch('core.management.commands.dropdb.connection')
+    @patch('builtins.input', return_value='yes')
+    def test_dropdb_passes_ssl_kwargs_when_tls_enabled(self, _inp, _conn, mock_connect):
+        mock_pg = MagicMock()
+        mock_connect.return_value = mock_pg
+        mock_pg.cursor.return_value = MagicMock()
+
+        with self.settings(DATABASES=self._DB_WITH_TLS):
+            from django.core.management import call_command
+            call_command('dropdb')
+
+        mock_connect.assert_called_once_with(
+            dbname='postgres', user='testuser', password='testpass',
+            host='localhost', port=5432,
+            autocommit=True,
+            sslmode='verify-full',
+            sslrootcert='/certs/ca.crt',
+            sslcert='/certs/client.crt',
+            sslkey='/certs/client.key',
+        )
+
+    @patch('core.management.commands.dropdb.psycopg.connect')
+    @patch('core.management.commands.dropdb.connection')
+    @patch('builtins.input', return_value='yes')
+    def test_dropdb_no_ssl_kwargs_when_tls_disabled(self, _inp, _conn, mock_connect):
+        mock_pg = MagicMock()
+        mock_connect.return_value = mock_pg
+        mock_pg.cursor.return_value = MagicMock()
+
+        with self.settings(DATABASES=self._DB_NO_TLS):
+            from django.core.management import call_command
+            call_command('dropdb')
+
+        mock_connect.assert_called_once_with(
+            dbname='postgres', user='testuser', password='testpass',
+            host='localhost', port=5432,
+            autocommit=True,
+        )
+
+
+class MallocTrimTests(SimpleTestCase):
+    def test_trim_is_noop_when_libc_has_no_malloc_trim(self):
+        from core.utils import trim_c_allocator_heap
+
+        fake_libc = MagicMock(spec=[])
+        with patch('ctypes.util.find_library', return_value='libc.so.6'), patch(
+            'ctypes.CDLL', return_value=fake_libc
+        ):
+            self.assertFalse(trim_c_allocator_heap())
+
+
+class GetClientIpTests(SimpleTestCase):
+    """Trusted-proxy behavior for dispatcharr.utils.get_client_ip (no nginx)."""
+
+    def setUp(self):
+        from django.test import RequestFactory
+
+        self.factory = RequestFactory()
+
+    def _request(self, remote_addr=None, **extra):
+        request = self.factory.get("/")
+        if remote_addr is not None:
+            request.META["REMOTE_ADDR"] = remote_addr
+        elif "REMOTE_ADDR" in request.META:
+            del request.META["REMOTE_ADDR"]
+        request.META.update(extra)
+        return request
+
+    def test_untrusted_peer_ignores_spoofed_x_real_ip(self):
+        """Public peers never get header trust, even with default local CIDRs."""
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ"):
+            os.environ.pop("DISPATCHARR_TRUSTED_PROXIES", None)
+            request = self._request(
+                "203.0.113.99",
+                HTTP_X_REAL_IP="127.0.0.1",
+            )
+            self.assertEqual(get_client_ip(request), "203.0.113.99")
+
+    def test_default_trusts_private_peer_headers(self):
+        """Unset env defaults to local CIDRs so Docker/Traefik peers work."""
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ"):
+            os.environ.pop("DISPATCHARR_TRUSTED_PROXIES", None)
+            request = self._request(
+                "172.18.0.1",
+                HTTP_X_REAL_IP="203.0.113.50",
+            )
+            self.assertEqual(get_client_ip(request), "203.0.113.50")
+
+    def test_explicit_none_disables_header_trust(self):
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ", {"DISPATCHARR_TRUSTED_PROXIES": "none"}):
+            request = self._request(
+                "172.18.0.1",
+                HTTP_X_REAL_IP="203.0.113.50",
+            )
+            self.assertEqual(get_client_ip(request), "172.18.0.1")
+
+    def test_trusted_peer_uses_x_real_ip(self):
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ", {"DISPATCHARR_TRUSTED_PROXIES": "127.0.0.1"}):
+            request = self._request(
+                "127.0.0.1",
+                HTTP_X_REAL_IP="203.0.113.50",
+            )
+            self.assertEqual(get_client_ip(request), "203.0.113.50")
+
+    def test_trusted_peer_xff_skips_trusted_hops(self):
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict(
+            "os.environ",
+            {"DISPATCHARR_TRUSTED_PROXIES": "10.0.0.1,10.0.0.2"},
+        ):
+            request = self._request(
+                "10.0.0.1",
+                HTTP_X_FORWARDED_FOR="203.0.113.50, 10.0.0.2",
+            )
+            self.assertEqual(get_client_ip(request), "203.0.113.50")
+
+    def test_missing_remote_addr_returns_empty(self):
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ", {"DISPATCHARR_TRUSTED_PROXIES": "none"}):
+            request = self._request(None, HTTP_X_REAL_IP="127.0.0.1")
+            self.assertIsNone(get_client_ip(request))
+
+    def test_ipv4_mapped_peer_returned_as_ipv4(self):
+        from dispatcharr.utils import get_client_ip
+
+        with patch.dict("os.environ"):
+            os.environ.pop("DISPATCHARR_TRUSTED_PROXIES", None)
+            request = self._request("::ffff:192.168.1.50")
+            self.assertEqual(get_client_ip(request), "192.168.1.50")

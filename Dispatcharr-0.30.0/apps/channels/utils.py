@@ -1,0 +1,352 @@
+import logging
+import threading
+
+from django.core.cache import cache
+
+from core.utils import ensure_custom_properties_dict
+
+logger = logging.getLogger(__name__)
+
+PROVIDER_ARCHIVE_CACHE_TTL_SECONDS = 300
+MAX_AUTO_PREV_DAYS = 30
+
+# Bound memory/DB work per chunk for large libraries (20k+ channels).
+EPG_LOGO_APPLY_BATCH_SIZE = 500
+EPG_LOGO_APPLY_MAX_ERRORS = 100
+
+lock = threading.Lock()
+# Dictionary to track usage: {account_id: current_usage}
+active_streams_map = {}
+
+
+def coerce_channel_profile_ids(custom_properties):
+    """Ensure channel_profile_ids is a list of ints (UI MultiSelect uses strings).
+
+    ``ensure_custom_properties_dict`` guards against legacy rows where
+    custom_properties was stored as a JSON-encoded string rather than an
+    object; without it a bad row would raise here instead of degrading
+    gracefully.
+    """
+    props = dict(ensure_custom_properties_dict(custom_properties))
+    if "channel_profile_ids" not in props:
+        return props
+    raw = props["channel_profile_ids"]
+    if not isinstance(raw, list):
+        raw = [raw] if raw not in (None, "") else []
+    ids = []
+    for item in raw:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    props["channel_profile_ids"] = ids
+    return props
+
+
+def format_channel_number(value, empty=""):
+    """Display formatting for an effective channel_number. Returns int for
+    whole-valued floats (so ``123.0`` renders as ``123``), the float as-is
+    for fractional values, or ``empty`` when the value is ``None``.
+    """
+    if value is None:
+        return empty
+    if value == int(value):
+        return int(value)
+    return value
+
+
+def compute_provider_archive_days_capped():
+    """Max ``catchup_days`` across active XC catch-up streams (capped, cached).
+
+    Cached briefly so XC XMLTV exports without an explicit ``prev_days`` do not
+    repeat the aggregate query on every request.
+    """
+    def _scan():
+        from django.db.models import Max
+
+        from apps.channels.models import Stream
+
+        result = Stream.objects.filter(
+            m3u_account__account_type="XC",
+            m3u_account__is_active=True,
+            is_catchup=True,
+        ).aggregate(max_days=Max("catchup_days"))
+        return min(result["max_days"] or 0, MAX_AUTO_PREV_DAYS)
+
+    return cache.get_or_set(
+        "channels:provider_archive_days_capped",
+        _scan,
+        PROVIDER_ARCHIVE_CACHE_TTL_SECONDS,
+    )
+
+
+def resolve_xc_epg_prev_days(request, user, *, auto_detect_fallback=True):
+    """Resolve ``prev_days`` for XC XMLTV and player_api EPG.
+
+    Args:
+        request: HTTP request (reads ``?prev_days=``).
+        user: Authenticated user (reads ``custom_properties.epg_prev_days``).
+        auto_detect_fallback: When True (XC XMLTV), fall back to the largest
+            provider archive depth. When False (per-channel EPG), return 0 so
+            ``xc_get_epg`` can expand to each channel's ``catchup_days``.
+
+    Resolution order:
+        1. URL ``?prev_days=`` (explicit; 0 means no past programmes)
+        2. ``user.custom_properties.epg_prev_days``
+        3. Auto-detect (only when *auto_detect_fallback* is True)
+    """
+    user_custom = (user.custom_properties or {}) if user else {}
+    url_prev = request.GET.get("prev_days")
+    user_prev = user_custom.get("epg_prev_days") if user_custom else None
+
+    if url_prev is not None:
+        try:
+            return max(0, min(int(url_prev), MAX_AUTO_PREV_DAYS))
+        except (ValueError, TypeError):
+            return 0
+    if user_prev not in (None, ""):
+        try:
+            return max(0, min(int(user_prev), MAX_AUTO_PREV_DAYS))
+        except (ValueError, TypeError):
+            return 0
+
+    if auto_detect_fallback:
+        return compute_provider_archive_days_capped()
+    return 0
+
+
+def is_catchup_enabled(*, user=None):
+    """Return whether catch-up / timeshift is allowed.
+
+    When a *user* is supplied, their ``custom_properties.catchup_enabled``
+    (default True) is checked first (no DB). System
+    ``system_settings.catchup_enabled`` (default True, Redis-cached) can
+    disable catch-up for everyone. Both flags are JSON booleans.
+    """
+    from core.models import CoreSettings
+
+    if user is not None:
+        props = getattr(user, "custom_properties", None) or {}
+        if props.get("catchup_enabled") is False:
+            return False
+
+    return CoreSettings.get_catchup_enabled()
+
+
+def get_channel_catchup_streams(channel):
+    """Active catch-up streams for a channel, in ``channelstream`` order.
+
+    Inactive M3U accounts are excluded, matching live dispatch.
+    """
+    if not getattr(channel, "is_catchup", False):
+        return []
+
+    return list(
+        channel.streams.filter(is_catchup=True, m3u_account__is_active=True)
+        .order_by("channelstream__order")
+        .select_related("m3u_account__user_agent")
+    )
+
+
+def increment_stream_count(account):
+    with lock:
+        current_usage = active_streams_map.get(account.id, 0)
+        current_usage += 1
+        active_streams_map[account.id] = current_usage
+        account.active_streams = current_usage
+        account.save(update_fields=['active_streams'])
+
+def decrement_stream_count(account):
+    with lock:
+        current_usage = active_streams_map.get(account.id, 0)
+        if current_usage > 0:
+            current_usage -= 1
+            if current_usage == 0:
+                del active_streams_map[account.id]
+            else:
+                active_streams_map[account.id] = current_usage
+            account.active_streams = current_usage
+            account.save(update_fields=['active_streams'])
+
+
+def auto_apply_epg_logos_enabled(custom_properties):
+    """Return whether channel logos should be auto-applied after EPG refresh."""
+    return bool((custom_properties or {}).get('auto_apply_epg_logos', False))
+
+
+def _empty_logo_apply_stats():
+    return {
+        'updated_count': 0,
+        'created_logos_count': 0,
+        'error_count': 0,
+        'errors': [],
+    }
+
+
+def _merge_logo_apply_stats(accumulated, batch_stats):
+    accumulated['updated_count'] += batch_stats['updated_count']
+    accumulated['created_logos_count'] += batch_stats['created_logos_count']
+    accumulated['error_count'] += batch_stats['error_count']
+    remaining = EPG_LOGO_APPLY_MAX_ERRORS - len(accumulated['errors'])
+    if remaining > 0:
+        accumulated['errors'].extend(batch_stats['errors'][:remaining])
+    return accumulated
+
+
+def apply_logos_from_epg_icon_url(channels):
+    """
+    Set channel.logo from epg_data.icon_url for the given channels.
+
+    Expects channels to be pre-filtered with select_related('epg_data', 'logo').
+    Uses bulk logo lookup/create and a single channel bulk_update for efficiency.
+    """
+    from .models import Channel, Logo
+
+    work = []
+    url_to_meta = {}
+
+    for channel in channels:
+        if not channel.epg_data:
+            continue
+        icon_url = (channel.epg_data.icon_url or '').strip()
+        if not icon_url:
+            continue
+        if channel.logo and channel.logo.url == icon_url:
+            continue
+        work.append((channel, icon_url))
+        if icon_url not in url_to_meta:
+            url_to_meta[icon_url] = (
+                channel.epg_data.name,
+                channel.epg_data.tvg_id,
+            )
+
+    if not work:
+        return _empty_logo_apply_stats()
+
+    unique_urls = list(url_to_meta.keys())
+    logo_by_url = {
+        logo.url: logo
+        for logo in Logo.objects.filter(url__in=unique_urls)
+    }
+
+    missing_urls = [url for url in unique_urls if url not in logo_by_url]
+    created_logos_count = 0
+    if missing_urls:
+        logos_to_create = [
+            Logo(
+                name=(url_to_meta[url][0] or f"Logo for {url_to_meta[url][1]}"),
+                url=url,
+            )
+            for url in missing_urls
+        ]
+        created_logos_count = len(logos_to_create)
+        Logo.objects.bulk_create(logos_to_create, ignore_conflicts=True)
+        for logo in Logo.objects.filter(url__in=unique_urls):
+            logo_by_url[logo.url] = logo
+
+    channels_to_update = []
+    errors = []
+    for channel, icon_url in work:
+        logo = logo_by_url.get(icon_url)
+        if not logo:
+            errors.append(f"Channel {channel.id}: Logo not found for {icon_url}")
+            continue
+        if channel.logo_id != logo.id:
+            channel.logo = logo
+            channels_to_update.append(channel)
+
+    if channels_to_update:
+        Channel.objects.bulk_update(channels_to_update, ['logo'], batch_size=500)
+
+    return {
+        'updated_count': len(channels_to_update),
+        'created_logos_count': created_logos_count,
+        'error_count': len(errors),
+        'errors': errors,
+    }
+
+
+def channels_with_epg_icon_queryset(*, epg_source=None, epg_source_id=None):
+    """Channels mapped to a source that have a non-empty EPG icon URL."""
+    from .models import Channel
+
+    qs = Channel.objects.filter(epg_data__isnull=False)
+    if epg_source is not None:
+        qs = qs.filter(epg_data__epg_source=epg_source)
+    elif epg_source_id is not None:
+        qs = qs.filter(epg_data__epg_source_id=epg_source_id)
+    else:
+        raise ValueError("epg_source or epg_source_id is required")
+
+    return qs.exclude(
+        epg_data__icon_url__isnull=True,
+    ).exclude(
+        epg_data__icon_url='',
+    )
+
+
+def apply_logos_from_epg_queryset(channels_qs, *, batch_size=EPG_LOGO_APPLY_BATCH_SIZE):
+    """
+    Apply logos for a potentially large queryset without loading every row at once.
+    Streams channel IDs from the database and processes fixed-size chunks.
+    """
+    from .models import Channel
+
+    stats = _empty_logo_apply_stats()
+    batch_ids = []
+
+    id_stream = channels_qs.order_by('id').values_list('id', flat=True).iterator(
+        chunk_size=batch_size,
+    )
+    for channel_id in id_stream:
+        batch_ids.append(channel_id)
+        if len(batch_ids) >= batch_size:
+            batch = Channel.objects.filter(
+                id__in=batch_ids,
+            ).select_related('epg_data', 'logo')
+            _merge_logo_apply_stats(stats, apply_logos_from_epg_icon_url(batch))
+            batch_ids = []
+
+    if batch_ids:
+        batch = Channel.objects.filter(
+            id__in=batch_ids,
+        ).select_related('epg_data', 'logo')
+        _merge_logo_apply_stats(stats, apply_logos_from_epg_icon_url(batch))
+
+    return stats
+
+
+def apply_logos_from_epg_for_source(epg_source, *, batch_size=EPG_LOGO_APPLY_BATCH_SIZE):
+    """Apply EPG icon URLs to all channels mapped to the given EPG source."""
+    channels_qs = channels_with_epg_icon_queryset(epg_source=epg_source)
+    return apply_logos_from_epg_queryset(channels_qs, batch_size=batch_size)
+
+
+def maybe_auto_apply_epg_logos(epg_source):
+    """Auto-apply logos after refresh when enabled on the source. Non-fatal on error."""
+    if not auto_apply_epg_logos_enabled(epg_source.custom_properties):
+        return None
+    try:
+        stats = apply_logos_from_epg_for_source(epg_source)
+        if stats['updated_count'] or stats['created_logos_count']:
+            logger.info(
+                "Auto-applied EPG logos for source %s: updated %s channels, "
+                "created %s logos.",
+                epg_source.name,
+                stats['updated_count'],
+                stats['created_logos_count'],
+            )
+        else:
+            logger.info(
+                "Auto-apply EPG logos for source %s: all matched channels already current.",
+                epg_source.name,
+            )
+        return stats
+    except Exception as logo_error:
+        logger.warning(
+            "EPG logo auto-apply failed for source %s (non-fatal): %s",
+            epg_source.name,
+            logo_error,
+            exc_info=True,
+        )
+        return None

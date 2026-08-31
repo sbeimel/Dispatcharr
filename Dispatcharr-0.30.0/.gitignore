@@ -1,0 +1,25 @@
+.DS_Store
+**/__pycache__/
+**/.vscode/
+**/venv
+*.pyc
+node_modules/
+.history/
+staticfiles/
+docker/DockerfileAIO
+docker/Dockerfile DEV
+static/
+data/
+.next
+next-env.d.ts
+media/
+celerybeat-schedule*
+dump.rdb
+debugpy*
+uwsgi.sock
+.uwsgi-reload
+package-lock.json
+models
+.idea
+.vite/
+uv.lock
