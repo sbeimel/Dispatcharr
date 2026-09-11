@@ -163,3 +163,23 @@ class ConfigHelper:
         settings = Config.get_proxy_settings()
         minutes = settings.get("stream_cooldown_minutes", 10)
         return int(minutes) * 60
+
+    @staticmethod
+    def stream_cooldown_on_buffering():
+        """Get whether to apply cooldown on buffering timeout from database or default"""
+        settings = Config.get_proxy_settings()
+        return settings.get("stream_cooldown_on_buffering", True)
+
+    @staticmethod
+    def stream_cooldown_on_disconnect():
+        """Get whether to apply cooldown on stream disconnect from database or default"""
+        settings = Config.get_proxy_settings()
+        return settings.get("stream_cooldown_on_disconnect", True)
+
+    @staticmethod
+    def stream_disconnect_stability_threshold():
+        """Get minimum stream duration (in seconds) to be considered stable.
+        Streams disconnecting before this threshold will get cooldown applied.
+        Set to 0 to apply cooldown on ANY provider-initiated disconnect."""
+        settings = Config.get_proxy_settings()
+        return settings.get("stream_disconnect_stability_threshold", 30)

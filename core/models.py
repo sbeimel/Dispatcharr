@@ -725,6 +725,9 @@ class CoreSettings(models.Model):
             "new_client_behind_seconds": 5,
             "stream_cooldown_enabled": False,
             "stream_cooldown_minutes": 10,
+            "stream_cooldown_on_buffering": True,
+            "stream_cooldown_on_disconnect": True,
+            "stream_disconnect_stability_threshold": 30,
             # Extended Timeouts (database-backed, user-configurable)
             "connection_timeout": 10,
             "client_wait_timeout": 30,

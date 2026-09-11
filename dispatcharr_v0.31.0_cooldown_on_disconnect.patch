@@ -1,0 +1,182 @@
+diff --git a/core/models.py b/core/models.py
+index 1111111..2222222 100644
+--- a/core/models.py
++++ b/core/models.py
+@@ -723,6 +723,9 @@ class Config(models.Model):
+             "new_client_behind_seconds": 5,
+             "stream_cooldown_enabled": False,
+             "stream_cooldown_minutes": 10,
++            "stream_cooldown_on_buffering": True,
++            "stream_cooldown_on_disconnect": True,
++            "stream_disconnect_stability_threshold": 30,
+             # Extended Timeouts (database-backed, user-configurable)
+             "connection_timeout": 10,
+             "client_wait_timeout": 30,
+
+diff --git a/apps/proxy/live_proxy/config_helper.py b/apps/proxy/live_proxy/config_helper.py
+index 3333333..4444444 100644
+--- a/apps/proxy/live_proxy/config_helper.py
++++ b/apps/proxy/live_proxy/config_helper.py
+@@ -179,6 +179,27 @@ class ConfigHelper:
+         minutes = settings.get("stream_cooldown_minutes", 10)
+         return int(minutes) * 60
+ 
++    @staticmethod
++    def stream_cooldown_on_buffering():
++        """Get whether to apply cooldown on buffering timeout from database or default"""
++        settings = Config.get_proxy_settings()
++        return settings.get("stream_cooldown_on_buffering", True)
++
++    @staticmethod
++    def stream_cooldown_on_disconnect():
++        """Get whether to apply cooldown on stream disconnect from database or default"""
++        settings = Config.get_proxy_settings()
++        return settings.get("stream_cooldown_on_disconnect", True)
++
++    @staticmethod
++    def stream_disconnect_stability_threshold():
++        """Get minimum stream duration (in seconds) to be considered stable.
++        Streams disconnecting before this threshold will get cooldown applied.
++        Set to 0 to apply cooldown on ANY provider-initiated disconnect."""
++        settings = Config.get_proxy_settings()
++        return settings.get("stream_disconnect_stability_threshold", 30)
++
++
+ class ConfigCache:
+     """Cache configuration values with TTL to reduce DB queries"""
+     _cache = {}
+
+diff --git a/apps/proxy/live_proxy/input/manager.py b/apps/proxy/live_proxy/input/manager.py
+index 5555555..6666666 100644
+--- a/apps/proxy/live_proxy/input/manager.py
++++ b/apps/proxy/live_proxy/input/manager.py
+@@ -1269,9 +1269,11 @@ class StreamManager:
+                         if buffering_duration > self.buffering_timeout:
+                             # Buffering timeout reached, log error and try next stream
+                             logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
+-                            # Set cooldown for this stream+profile combination
++                            
++                            # Set cooldown for this stream+profile combination (if enabled)
+                             # This prevents immediate retry of streams that connect but don't deliver data
+-                            self._set_stream_cooldown()
++                            if ConfigHelper.stream_cooldown_on_buffering():
++                                self._set_stream_cooldown()
+                             
+                             # Send next stream request
+                             if self._try_next_stream():
+@@ -2012,13 +2014,26 @@ class StreamManager:
+             if not chunk:
+                 # Connection closed by server
+                 logger.warning(f"Server closed connection for channel {self.channel_id}")
+                 
+-                # Set cooldown if connection was closed too early (unstable stream)
+-                # Only apply cooldown if stream was running less than stable_connection_threshold
+-                connection_start = getattr(self, 'connection_start_time', None)
+-                if connection_start:
+-                    connection_duration = time.time() - connection_start
+-                    stable_threshold = ConfigHelper.stable_connection_threshold()
+-                    
+-                    if connection_duration < stable_threshold:
+-                        logger.info(
+-                            f"Stream disconnected after {connection_duration:.1f}s (< {stable_threshold}s threshold) "
+-                            f"for channel {self.channel_id} - setting cooldown"
+-                        )
+-                        self._set_stream_cooldown()
++                # Set cooldown if enabled and connection was closed by provider
++                # This prevents immediate retry of unstable streams
++                if ConfigHelper.stream_cooldown_on_disconnect():
++                    connection_start = getattr(self, 'connection_start_time', None)
++                    if connection_start:
++                        connection_duration = time.time() - connection_start
++                        stability_threshold = ConfigHelper.stream_disconnect_stability_threshold()
++                        
++                        # If threshold is 0, apply cooldown on ANY disconnect
++                        # Otherwise, only apply cooldown if stream was unstable (duration < threshold)
++                        should_cooldown = (stability_threshold == 0) or (connection_duration < stability_threshold)
++                        
++                        if should_cooldown:
++                            threshold_msg = "any disconnect" if stability_threshold == 0 else f"< {stability_threshold}s threshold"
++                            logger.info(
++                                f"Stream disconnected after {connection_duration:.1f}s ({threshold_msg}) "
++                                f"for channel {self.channel_id} - setting cooldown"
++                            )
++                            self._set_stream_cooldown()
+                 
+                 self._close_socket()
+
+diff --git a/frontend/src/constants.js b/frontend/src/constants.js
+index 7777777..8888888 100644
+--- a/frontend/src/constants.js
++++ b/frontend/src/constants.js
+@@ -65,6 +65,21 @@ export const PROXY_SETTINGS_OPTIONS = {
+     description:
+       'How long to wait before retrying a failed stream/profile combination (prevents endless loops)',
+   },
++  stream_cooldown_on_buffering: {
++    label: 'Cooldown on Buffering Timeout',
++    description:
++      'Apply cooldown when stream connects but buffers too long without delivering data',
++  },
++  stream_cooldown_on_disconnect: {
++    label: 'Cooldown on Disconnect',
++    description:
++      'Apply cooldown when provider closes connection (unstable streams)',
++  },
++  stream_disconnect_stability_threshold: {
++    label: 'Disconnect Stability Threshold (seconds)',
++    description:
++      'Minimum stream duration to be considered stable. Set to 0 to apply cooldown on ANY provider disconnect, or higher (e.g., 30-60s) to only cooldown early disconnects',
++  },
+   connection_timeout: {
+     label: 'Connection Timeout',
+     description:
+
+diff --git a/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js b/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
+index 9999999..aaaaaaa 100644
+--- a/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
++++ b/frontend/src/utils/forms/settings/ProxySettingsFormUtils.js
+@@ -16,6 +16,9 @@ export const getProxySettingsInitialValues = () => {
+     new_client_behind_seconds: 5,
+     stream_cooldown_enabled: false,
+     stream_cooldown_minutes: 10,
++    stream_cooldown_on_buffering: true,
++    stream_cooldown_on_disconnect: true,
++    stream_disconnect_stability_threshold: 30,
+     connection_timeout: 10,
+     max_retries: 3,
+     url_switch_timeout: 10,
+
+diff --git a/frontend/src/components/forms/settings/ProxySettingsForm.jsx b/frontend/src/components/forms/settings/ProxySettingsForm.jsx
+index bbbbbbb..ccccccc 100644
+--- a/frontend/src/components/forms/settings/ProxySettingsForm.jsx
++++ b/frontend/src/components/forms/settings/ProxySettingsForm.jsx
+@@ -20,7 +20,12 @@ import { PROXY_SETTINGS_OPTIONS } from '../../../constants';
+ 
+ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
+   const isBooleanField = (key) => {
+-    return ['stream_cooldown_enabled'].includes(key);
++    return [
++      'stream_cooldown_enabled',
++      'stream_cooldown_on_buffering',
++      'stream_cooldown_on_disconnect',
++    ].includes(key);
+   };
+   const isNumericField = (key) => {
+     // Determine if this field should be a NumberInput
+@@ -31,6 +36,7 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
+       'channel_init_grace_period',
+       'new_client_behind_seconds',
+       'stream_cooldown_minutes',
++      'stream_disconnect_stability_threshold',
+       'connection_timeout',
+       'max_retries',
+       'url_switch_timeout',
+@@ -58,6 +64,8 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
+           ? 120
+           : key === 'stream_cooldown_minutes'
+             ? 1440
++            : key === 'stream_disconnect_stability_threshold'
++              ? 600
+             : key === 'connection_timeout'
+               ? 300
+               : key === 'max_retries'

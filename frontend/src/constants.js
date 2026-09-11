@@ -70,6 +70,21 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'How long to wait before retrying a failed stream/profile combination (prevents endless loops)',
   },
+  stream_cooldown_on_buffering: {
+    label: 'Cooldown on Buffering Timeout',
+    description:
+      'Apply cooldown when stream connects but buffers too long without delivering data',
+  },
+  stream_cooldown_on_disconnect: {
+    label: 'Cooldown on Disconnect',
+    description:
+      'Apply cooldown when provider closes connection (unstable streams)',
+  },
+  stream_disconnect_stability_threshold: {
+    label: 'Disconnect Stability Threshold (seconds)',
+    description:
+      'Minimum stream duration to be considered stable. Set to 0 to apply cooldown on ANY provider disconnect, or higher (e.g., 30-60s) to only cooldown early disconnects',
+  },
   connection_timeout: {
     label: 'Connection Timeout',
     description:

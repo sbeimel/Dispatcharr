@@ -19,7 +19,7 @@ import {
 
 const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
   const isBooleanField = (key) => {
-    return ['stream_cooldown_enabled'].includes(key);
+    return ['stream_cooldown_enabled', 'stream_cooldown_on_buffering', 'stream_cooldown_on_disconnect'].includes(key);
   };
   const isNumericField = (key) => {
     // Determine if this field should be a NumberInput
@@ -30,6 +30,7 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
       'channel_init_grace_period',
       'new_client_behind_seconds',
       'stream_cooldown_minutes',
+      'stream_disconnect_stability_threshold',
       'connection_timeout',
       'max_retries',
       'url_switch_timeout',
@@ -58,7 +59,9 @@ const ProxySettingsOptions = React.memo(({ proxySettingsForm }) => {
             ? 120
             : key === 'stream_cooldown_minutes'
               ? 1440
-              : key === 'connection_timeout'
+              : key === 'stream_disconnect_stability_threshold'
+                ? 600
+                : key === 'connection_timeout'
                 ? 300
                 : key === 'max_retries'
                   ? 20

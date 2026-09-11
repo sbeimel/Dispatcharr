@@ -1271,6 +1271,12 @@ class StreamManager:
                         if buffering_duration > self.buffering_timeout:
                             # Buffering timeout reached, log error and try next stream
                             logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
+                            
+                            # Set cooldown for this stream+profile combination (if enabled)
+                            # This prevents immediate retry of streams that connect but don't deliver data
+                            if ConfigHelper.stream_cooldown_on_buffering():
+                                self._set_stream_cooldown()
+                            
                             # Send next stream request
                             if self._try_next_stream():
                                 logger.info(f"Switched to next stream for channel {self.channel_id} after buffering timeout")
@@ -2013,6 +2019,27 @@ class StreamManager:
             if not chunk:
                 # Connection closed by server
                 logger.warning(f"Server closed connection for channel {self.channel_id}")
+                
+                # Set cooldown if enabled and connection was closed by provider
+                # This prevents immediate retry of unstable streams
+                if ConfigHelper.stream_cooldown_on_disconnect():
+                    connection_start = getattr(self, 'connection_start_time', None)
+                    if connection_start:
+                        connection_duration = time.time() - connection_start
+                        stability_threshold = ConfigHelper.stream_disconnect_stability_threshold()
+                        
+                        # If threshold is 0, apply cooldown on ANY disconnect
+                        # Otherwise, only apply cooldown if stream was unstable (duration < threshold)
+                        should_cooldown = (stability_threshold == 0) or (connection_duration < stability_threshold)
+                        
+                        if should_cooldown:
+                            threshold_msg = "any disconnect" if stability_threshold == 0 else f"< {stability_threshold}s threshold"
+                            logger.info(
+                                f"Stream disconnected after {connection_duration:.1f}s ({threshold_msg}) "
+                                f"for channel {self.channel_id} - setting cooldown"
+                            )
+                            self._set_stream_cooldown()
+                
                 self._close_socket()
                 self.connected = False
                 return False
