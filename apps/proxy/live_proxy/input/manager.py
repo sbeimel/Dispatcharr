@@ -228,17 +228,22 @@ class StreamManager:
         if not redis_client:
             return
         
-        # Get profile_id from Redis metadata if not provided
+        # Get profile_id from self.current_profile_id or Redis metadata if not provided
         if profile_id is None:
-            metadata_key = RedisKeys.channel_metadata(self.channel_id)
-            profile_id_str = redis_client.hget(metadata_key, ChannelMetadataField.M3U_PROFILE)
-            if not profile_id_str:
-                logger.warning(
-                    f"Cannot set cooldown for stream {stream_id}: no profile_id available "
-                    f"for channel {self.channel_id}"
-                )
-                return
-            profile_id = int(profile_id_str)
+            # Try self.current_profile_id first (more reliable, especially during shutdown)
+            profile_id = self.current_profile_id
+            
+            # Fall back to Redis metadata if current_profile_id not set
+            if profile_id is None:
+                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                profile_id_str = redis_client.hget(metadata_key, ChannelMetadataField.M3U_PROFILE)
+                if not profile_id_str:
+                    logger.warning(
+                        f"Cannot set cooldown for stream {stream_id}: no profile_id available "
+                        f"for channel {self.channel_id}"
+                    )
+                    return
+                profile_id = int(profile_id_str)
         
         cooldown_seconds = ConfigHelper.stream_cooldown_seconds()
         cooldown_key = RedisKeys.stream_cooldown(self.channel_id, stream_id, profile_id)
@@ -2059,7 +2064,8 @@ class StreamManager:
                 
                 # Set cooldown if enabled and connection was closed by provider
                 # This prevents immediate retry of unstable streams
-                if ConfigHelper.stream_cooldown_on_disconnect():
+                # BUT: Do NOT set cooldown if we're stopping due to client disconnect (self.running == False)
+                if ConfigHelper.stream_cooldown_on_disconnect() and self.running:
                     connection_start = getattr(self, 'connection_start_time', None)
                     if connection_start:
                         connection_duration = time.time() - connection_start
@@ -2076,6 +2082,15 @@ class StreamManager:
                                 f"for channel {self.channel_id} - setting cooldown"
                             )
                             self._set_stream_cooldown()
+                        else:
+                            logger.info(
+                                f"Stream was stable ({connection_duration:.1f}s >= {stability_threshold}s) "
+                                f"- not setting cooldown for channel {self.channel_id}"
+                            )
+                    else:
+                        logger.debug(f"No connection start time available, skipping cooldown for channel {self.channel_id}")
+                elif not self.running:
+                    logger.debug(f"Skipping cooldown - channel {self.channel_id} is stopping due to client disconnect")
                 
                 self._close_socket()
                 self.connected = False
