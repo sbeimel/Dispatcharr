@@ -646,8 +646,13 @@ class StreamManager:
                         if failures >= self.max_retries:
                             url_failed = True
                             
-                            # Set cooldown for this stream+profile combination
-                            self._set_stream_cooldown()
+                            # Don't set cooldown for manual stream switches
+                            if not getattr(self, '_manual_switch', False):
+                                self._set_stream_cooldown()
+                                logger.info(f"Set cooldown for stream {self.current_stream_id} with profile {self.current_profile_id} on channel {self.channel_id}")
+                            else:
+                                logger.info(f"Skipping cooldown for manual stream switch on channel {self.channel_id}")
+                                self._manual_switch = False  # Reset flag
                             
                             logger.warning(
                                 f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} "
@@ -684,8 +689,13 @@ class StreamManager:
                         if failures >= self.max_retries:
                             url_failed = True
                             
-                            # Set cooldown for this stream+profile combination
-                            self._set_stream_cooldown()
+                            # Don't set cooldown for manual stream switches
+                            if not getattr(self, '_manual_switch', False):
+                                self._set_stream_cooldown()
+                                logger.info(f"Set cooldown for stream {self.current_stream_id} with profile {self.current_profile_id} on channel {self.channel_id}")
+                            else:
+                                logger.info(f"Skipping cooldown for manual stream switch on channel {self.channel_id}")
+                                self._manual_switch = False  # Reset flag
 
                             # Log connection error event with exception details
                             try:
@@ -1626,6 +1636,9 @@ class StreamManager:
         # CRITICAL: Set a flag to prevent immediate reconnection with old URL
         self.url_switching = True
         self.url_switch_start_time = time.time()
+        
+        # Set flag to prevent cooldown on manual stream switch
+        self._manual_switch = True
 
         try:
             # Check which type of connection we're using and close it properly
@@ -1656,6 +1669,9 @@ class StreamManager:
 
             # Reset retry counter to allow immediate reconnect
             self._clear_connection_failure_history()
+            
+            # Clear manual switch flag on successful switch
+            self._manual_switch = False
 
             # Also reset buffer position to prevent stale data after URL change
             if hasattr(self.buffer, 'reset_buffer_position'):

@@ -453,12 +453,24 @@ def order_alternates_from_current(
 ) -> List[dict]:
     """
     Reorder failover candidates to start after the current stream in channel order,
-    wrapping around.
+    wrapping around. Preserves ALL profiles for each stream.
+    
+    BUGFIX v0.31.0: Changed from dict (1 profile per stream) to list (ALL profiles per stream)
+    to support multi-profile failover within the same provider.
     """
     if not alternate_streams or not ordered_stream_ids or current_stream_id is None:
         return alternate_streams
 
-    alt_by_id = {entry['stream_id']: entry for entry in alternate_streams}
+    # BUGFIX: Group by stream_id (keep ALL profiles per stream!)
+    # OLD: alt_by_id = {entry['stream_id']: entry for entry in alternate_streams}
+    #      ☝️ Dictionary only kept LAST profile per stream!
+    # NEW: Use list to preserve ALL profiles per stream
+    alt_by_id = {}
+    for entry in alternate_streams:
+        sid = entry['stream_id']
+        if sid not in alt_by_id:
+            alt_by_id[sid] = []
+        alt_by_id[sid].append(entry)
 
     try:
         current_index = ordered_stream_ids.index(current_stream_id)
@@ -468,9 +480,8 @@ def order_alternates_from_current(
     rotated = []
     for offset in range(1, len(ordered_stream_ids)):
         stream_id = ordered_stream_ids[(current_index + offset) % len(ordered_stream_ids)]
-        entry = alt_by_id.get(stream_id)
-        if entry is not None:
-            rotated.append(entry)
+        entries = alt_by_id.get(stream_id, [])  # Get ALL profiles for this stream
+        rotated.extend(entries)  # Add ALL profiles (not just first one)
     return rotated
 
 def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None, current_profile_id: Optional[int] = None) -> List[dict]:
@@ -616,7 +627,8 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                 # Check profiles in order with connection availability
                 profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
 
-                selected_profile = None
+                # Collect ALL available profiles for this stream (not just the first one)
+                available_profiles = []
                 for profile in profiles:
                     if redis_client:
                         channel_using_profile = False
@@ -639,26 +651,29 @@ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = No
                             current_connections = get_profile_connection_count(
                                 profile, redis_client
                             )
-                            selected_profile = profile
+                            available_profiles.append(profile)
                             logger.debug(
                                 f"Found available profile {profile.id} for stream {stream.id}: "
                                 f"{current_connections}/{profile.max_streams} "
                                 f"(already using: {channel_using_profile})"
                             )
-                            break
-                        logger.debug(
-                            f"Profile {profile.id} unavailable for alternate stream {stream.id}"
-                        )
+                        else:
+                            logger.debug(
+                                f"Profile {profile.id} unavailable for alternate stream {stream.id}"
+                            )
                     else:
-                        selected_profile = profile
-                        break
+                        # No Redis client - add all profiles
+                        available_profiles.append(profile)
 
-                if selected_profile:
-                    alternate_streams.append({
-                        'stream_id': stream.id,
-                        'profile_id': selected_profile.id,
-                        'name': stream.name
-                    })
+                # Add all available profiles as separate entries
+                if available_profiles:
+                    for profile in available_profiles:
+                        alternate_streams.append({
+                            'stream_id': stream.id,
+                            'profile_id': profile.id,
+                            'name': stream.name
+                        })
+                    logger.debug(f"Added {len(available_profiles)} profile(s) for stream ID {stream.id}")
                 else:
                     logger.debug(f"No available profiles for stream ID {stream.id}")
 

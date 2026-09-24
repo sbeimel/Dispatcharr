@@ -1,0 +1,71 @@
+diff --git a/apps/proxy/live_proxy/url_utils.py b/apps/proxy/live_proxy/url_utils.py
+index existing..new 100644
+--- a/apps/proxy/live_proxy/url_utils.py
++++ b/apps/proxy/live_proxy/url_utils.py
+@@ -616,38 +616,43 @@
+                 # Check profiles in order with connection availability
+                 profiles = [default_profile] + [obj for obj in m3u_profiles if not obj.is_default]
+ 
+-                selected_profile = None
++                # Collect ALL available profiles for this stream (not just the first one)
++                available_profiles = []
+                 for profile in profiles:
+                     if redis_client:
+                         channel_using_profile = False
+                         existing_stream_id = redis_client.get(f"channel_stream:{channel.id}")
+                         if existing_stream_id:
+                             existing_profile_id = redis_client.get(
+                                 f"stream_profile:{existing_stream_id}"
+                             )
+                             if existing_profile_id and int(existing_profile_id) == profile.id:
+                                 channel_using_profile = True
+                                 logger.debug(
+                                     f"Channel {channel.id} already using profile {profile.id}"
+                                 )
+ 
+                         if profile_available_for_channel_switch(
+                             profile,
+                             redis_client,
+                             channel_already_on_profile=channel_using_profile,
+                         ):
+                             current_connections = get_profile_connection_count(
+                                 profile, redis_client
+                             )
+-                            selected_profile = profile
++                            available_profiles.append(profile)
+                             logger.debug(
+                                 f"Found available profile {profile.id} for stream {stream.id}: "
+                                 f"{current_connections}/{profile.max_streams} "
+                                 f"(already using: {channel_using_profile})"
+                             )
+-                            break
+-                        logger.debug(
+-                            f"Profile {profile.id} unavailable for alternate stream {stream.id}"
+-                        )
++                        else:
++                            logger.debug(
++                                f"Profile {profile.id} unavailable for alternate stream {stream.id}"
++                            )
+                     else:
+-                        selected_profile = profile
+-                        break
++                        # No Redis client - add all profiles
++                        available_profiles.append(profile)
+ 
+-                if selected_profile:
+-                    alternate_streams.append({
+-                        'stream_id': stream.id,
+-                        'profile_id': selected_profile.id,
+-                        'name': stream.name
+-                    })
++                # Add all available profiles as separate entries
++                if available_profiles:
++                    for profile in available_profiles:
++                        alternate_streams.append({
++                            'stream_id': stream.id,
++                            'profile_id': profile.id,
++                            'name': stream.name
++                        })
++                    logger.debug(f"Added {len(available_profiles)} profile(s) for stream ID {stream.id}")
+                 else:
+                     logger.debug(f"No available profiles for stream ID {stream.id}")

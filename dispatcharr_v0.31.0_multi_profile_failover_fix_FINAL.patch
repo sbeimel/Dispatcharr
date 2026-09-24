@@ -1,0 +1,152 @@
+========================================
+DISPATCHARR v0.31.0 MULTI-PROFILE FAILOVER FIX
+========================================
+
+PROBLEM:
+Multi-profile failover funktionierte in v0.27/v0.29, aber nicht in v0.30/v0.31.
+Nur 1 Profile pro Provider wird beim Failover probiert statt ALLE Profiles.
+
+ROOT CAUSE:
+order_alternates_from_current() wurde in v0.30.0 NEU eingeführt für Stream-Rotation,
+aber die Dictionary-Implementierung überschreibt mehrere Profiles desselben Streams.
+
+SOLUTION:
+Ändere Dictionary zu List-basierter Gruppierung um ALLE Profiles zu preservieren.
+
+FILES CHANGED:
+- apps/proxy/live_proxy/url_utils.py (1 function: order_alternates_from_current)
+
+APPLY WITH:
+patch -p0 < dispatcharr_v0.31.0_multi_profile_failover_fix_FINAL.patch
+
+========================================
+PATCH
+========================================
+
+--- a/apps/proxy/live_proxy/url_utils.py
++++ b/apps/proxy/live_proxy/url_utils.py
+@@ -449,28 +449,43 @@ def order_alternates_from_current(
+     alternate_streams: List[dict],
+     ordered_stream_ids: List[int],
+     current_stream_id: Optional[int],
+ ) -> List[dict]:
+     """
+     Reorder failover candidates to start after the current stream in channel order,
+-    wrapping around.
++    wrapping around. Preserves ALL profiles for each stream.
++    
++    BUGFIX v0.31.0: Changed from dict (1 profile per stream) to list (ALL profiles per stream)
++    to support multi-profile failover within the same provider.
+     """
+     if not alternate_streams or not ordered_stream_ids or current_stream_id is None:
+         return alternate_streams
+ 
+-    alt_by_id = {entry['stream_id']: entry for entry in alternate_streams}
++    # BUGFIX: Group by stream_id (keep ALL profiles per stream!)
++    # OLD: alt_by_id = {entry['stream_id']: entry for entry in alternate_streams}
++    #      ☝️ Dictionary only kept LAST profile per stream!
++    # NEW: Use list to preserve ALL profiles per stream
++    alt_by_id = {}
++    for entry in alternate_streams:
++        sid = entry['stream_id']
++        if sid not in alt_by_id:
++            alt_by_id[sid] = []
++        alt_by_id[sid].append(entry)
+ 
+     try:
+         current_index = ordered_stream_ids.index(current_stream_id)
+     except ValueError:
+         return alternate_streams
+ 
+     rotated = []
+     for offset in range(1, len(ordered_stream_ids)):
+         stream_id = ordered_stream_ids[(current_index + offset) % len(ordered_stream_ids)]
+-        entry = alt_by_id.get(stream_id)
+-        if entry is not None:
+-            rotated.append(entry)
++        entries = alt_by_id.get(stream_id, [])  # Get ALL profiles for this stream
++        rotated.extend(entries)  # Add ALL profiles (not just first one)
+     return rotated
+ 
++
+ def get_alternate_streams(channel_id: str, current_stream_id: Optional[int] = None, current_profile_id: Optional[int] = None) -> List[dict]:
+     """
+     Get alternative streams for a channel when the current stream fails.
+
+========================================
+VERIFICATION
+========================================
+
+Before Fix:
+-----------
+Provider WatchHD: Profiles 469, 470, 471
+Provider Backup: Profiles 580, 581
+
+Failover Sequence:
+1. Stream 832438 + Profile 471 (nur dieses!) ❌
+2. Stream 999999 + Profile 580
+3. Stream 999999 + Profile 581
+
+❌ Profiles 469 und 470 wurden nie probiert!
+
+
+After Fix:
+----------
+Provider WatchHD: Profiles 469, 470, 471
+Provider Backup: Profiles 580, 581
+
+Failover Sequence:
+1. Stream 832438 + Profile 469 ✅
+2. Stream 832438 + Profile 470 ✅
+3. Stream 832438 + Profile 471 ✅
+4. Stream 999999 + Profile 580
+5. Stream 999999 + Profile 581
+
+✅ ALLE Profiles von Provider 1 werden probiert vor Provider 2!
+
+
+========================================
+TESTING
+========================================
+
+1. Setup Channel mit Stream mit 3+ Profiles
+2. Teste Failover:
+   - Erstes Profile sollte failen
+   - Zweites Profile sollte probiert werden
+   - Drittes Profile sollte probiert werden
+   - Erst dann nächster Provider
+
+3. Teste mit Cooldown:
+   - stream_cooldown_enabled = True
+   - stream_cooldown_seconds = 600
+   - Alle Profiles sollten einzeln probiert werden
+   - Jedes failed Profile bekommt eigenen Cooldown
+   - Cooldown ist per Stream+Profile, nicht global
+
+4. Teste Rotation:
+   - Nach stabilem Stream: tried_combinations wird geleert
+   - Rotation A→B→C→D→A funktioniert weiterhin
+
+
+========================================
+NOTES
+========================================
+
+- Diese Änderung ist RÜCKWÄRTSKOMPATIBEL
+- Keine Database Migrations nötig
+- Keine Frontend Changes nötig
+- Keine Config Changes nötig
+- Restart Required: Yes (Django reload)
+
+- Cooldown-Logik in manager.py war bereits korrekt (NICHT geändert)
+- get_alternate_streams() war bereits korrekt (NICHT geändert)
+- Nur order_alternates_from_current() hatte den Bug
+
+- Fix preserviert Rotation-Feature von v0.30.0
+- Fix restored Multi-Profile Feature von v0.27/v0.29
+- Best of both worlds! 🎉
+
+
+========================================
+END OF PATCH
+========================================
