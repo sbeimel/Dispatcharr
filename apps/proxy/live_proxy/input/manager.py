@@ -591,6 +591,11 @@ class StreamManager:
                             # Store connection start time to measure success duration
                             connection_start_time = time.time()
                             self._had_successful_connection = True
+                            
+                            # Clear manual switch flag after successful connection
+                            if getattr(self, '_manual_switch', False):
+                                self._manual_switch = False
+                                logger.debug(f"Cleared manual switch flag after successful connection for channel {self.channel_id}")
 
                             # Log reconnection event if this is a retry (not first attempt)
                             if self.retry_count > 0:
@@ -652,7 +657,7 @@ class StreamManager:
                                 logger.info(f"Set cooldown for stream {self.current_stream_id} with profile {self.current_profile_id} on channel {self.channel_id}")
                             else:
                                 logger.info(f"Skipping cooldown for manual stream switch on channel {self.channel_id}")
-                                self._manual_switch = False  # Reset flag
+                                self._manual_switch = False  # Reset flag after max retries
                             
                             logger.warning(
                                 f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} "
@@ -695,7 +700,7 @@ class StreamManager:
                                 logger.info(f"Set cooldown for stream {self.current_stream_id} with profile {self.current_profile_id} on channel {self.channel_id}")
                             else:
                                 logger.info(f"Skipping cooldown for manual stream switch on channel {self.channel_id}")
-                                self._manual_switch = False  # Reset flag
+                                self._manual_switch = False  # Reset flag after max retries
 
                             # Log connection error event with exception details
                             try:
@@ -1653,10 +1658,10 @@ class StreamManager:
                 logger.debug(f"Closing HTTP connection before URL change for channel {self.channel_id}")
                 self._close_connection()
             
-            # IMPORTANT: Clear manual switch flag AFTER closing connection
-            # but BEFORE any potential failures that might set cooldown
-            self._manual_switch = False
-            logger.debug(f"Cleared manual switch flag after closing connection for channel {self.channel_id}")
+            # IMPORTANT: Do NOT clear manual switch flag here!
+            # The flag must remain active until the new stream connects successfully
+            # or fails with max_retries, otherwise cooldowns will be set incorrectly
+            logger.debug(f"Keeping manual switch flag active for channel {self.channel_id}")
 
             # Update URL and reset connection state
             old_url = self.url
@@ -2241,9 +2246,9 @@ class StreamManager:
                 # Check if this is a retry after manual switch - if so, skip cooldown checks
                 skip_cooldown = getattr(self, '_manual_switch_retry', False)
                 if skip_cooldown:
-                    logger.info(f"Skipping cooldown checks for first retry after manual switch on channel {self.channel_id}")
+                    logger.info(f"Skipping cooldown checks for retry after manual switch on channel {self.channel_id}")
                     available_streams = untried_streams
-                    self._manual_switch_retry = False  # Clear flag after first retry
+                    # DON'T clear flag here - wait until we actually use a stream
                 else:
                     for stream in untried_streams:
                         stream_id = stream['stream_id']
@@ -2415,10 +2420,21 @@ class StreamManager:
 
                 # Check if the new URL is the same as current URL
                 # This can happen when current_stream_id is None and we accidentally select the same stream
-                if new_url == self.url:
+                # HOWEVER: If this is a manual switch retry, allow it even if URL is identical
+                # because the user explicitly chose this stream
+                skip_identical_url_check = getattr(self, '_manual_switch_retry', False)
+                if new_url == self.url and not skip_identical_url_check:
                     logger.warning(f"Stream ID {stream_id} generates the same URL as current stream ({new_url}). "
                                  f"Skipping this stream and trying next alternative.")
                     continue  # Try next stream instead of giving up
+                elif new_url == self.url and skip_identical_url_check:
+                    logger.info(f"Stream ID {stream_id} has same URL but allowing retry due to manual switch")
+                
+                # Clear manual switch retry flag now that we're actually using a stream
+                # (not skipping it due to cooldown or identical URL)
+                if getattr(self, '_manual_switch_retry', False):
+                    self._manual_switch_retry = False
+                    logger.debug(f"Cleared manual switch retry flag after selecting stream for channel {self.channel_id}")
 
                 logger.info(f"Switching from URL {self.url} to {new_url} for channel {self.channel_id} (stream={stream_id}, profile={profile_id})")
 
