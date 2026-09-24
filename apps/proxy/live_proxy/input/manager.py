@@ -1639,6 +1639,10 @@ class StreamManager:
         
         # Set flag to prevent cooldown on manual stream switch
         self._manual_switch = True
+        
+        # Set flag to skip cooldown check on first retry after manual switch
+        # This ensures the user's chosen stream gets a fair chance even if on cooldown
+        self._manual_switch_retry = True
 
         try:
             # Check which type of connection we're using and close it properly
@@ -1648,6 +1652,11 @@ class StreamManager:
             else:
                 logger.debug(f"Closing HTTP connection before URL change for channel {self.channel_id}")
                 self._close_connection()
+            
+            # IMPORTANT: Clear manual switch flag AFTER closing connection
+            # but BEFORE any potential failures that might set cooldown
+            self._manual_switch = False
+            logger.debug(f"Cleared manual switch flag after closing connection for channel {self.channel_id}")
 
             # Update URL and reset connection state
             old_url = self.url
@@ -1666,12 +1675,15 @@ class StreamManager:
                 # Add stream ID to tried streams for proper tracking
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
+            
+            # Update profile ID if provided (CRITICAL for cooldown tracking!)
+            if m3u_profile_id:
+                old_profile_id = self.current_profile_id
+                self.current_profile_id = m3u_profile_id
+                logger.info(f"Updated profile ID from {old_profile_id} to {m3u_profile_id} for channel {self.channel_id}")
 
             # Reset retry counter to allow immediate reconnect
             self._clear_connection_failure_history()
-            
-            # Clear manual switch flag on successful switch
-            self._manual_switch = False
 
             # Also reset buffer position to prevent stale data after URL change
             if hasattr(self.buffer, 'reset_buffer_position'):
@@ -1696,10 +1708,14 @@ class StreamManager:
             return True
         except Exception as e:
             logger.error(f"Error during URL update for channel {self.channel_id}: {e}", exc_info=True)
+            # Clear manual switch flag on error too
+            self._manual_switch = False
             return False
         finally:
             # Always reset the URL switching flag when done, whether successful or not
             self.url_switching = False
+            # Ensure manual switch flag is always cleared
+            self._manual_switch = False
             logger.info(f"Stream switch completed for channel {self.channel_id}")
 
     def should_retry(self) -> bool:
@@ -2222,22 +2238,29 @@ class StreamManager:
                 available_streams = []
                 redis_client = getattr(self.buffer, 'redis_client', None)
                 
-                for stream in untried_streams:
-                    stream_id = stream['stream_id']
-                    profile_id = stream['profile_id']
-                    
-                    # Check if this stream+profile combination is on cooldown
-                    cooldown_key = RedisKeys.stream_cooldown(self.channel_id, stream_id, profile_id)
-                    
-                    if redis_client and redis_client.exists(cooldown_key):
-                        ttl = redis_client.ttl(cooldown_key)
-                        logger.info(
-                            f"Stream {stream_id} with profile {profile_id} is on cooldown "
-                            f"for channel {self.channel_id} ({ttl}s remaining)"
-                        )
-                        continue
-                    
-                    available_streams.append(stream)
+                # Check if this is a retry after manual switch - if so, skip cooldown checks
+                skip_cooldown = getattr(self, '_manual_switch_retry', False)
+                if skip_cooldown:
+                    logger.info(f"Skipping cooldown checks for first retry after manual switch on channel {self.channel_id}")
+                    available_streams = untried_streams
+                    self._manual_switch_retry = False  # Clear flag after first retry
+                else:
+                    for stream in untried_streams:
+                        stream_id = stream['stream_id']
+                        profile_id = stream['profile_id']
+                        
+                        # Check if this stream+profile combination is on cooldown
+                        cooldown_key = RedisKeys.stream_cooldown(self.channel_id, stream_id, profile_id)
+                        
+                        if redis_client and redis_client.exists(cooldown_key):
+                            ttl = redis_client.ttl(cooldown_key)
+                            logger.info(
+                                f"Stream {stream_id} with profile {profile_id} is on cooldown "
+                                f"for channel {self.channel_id} ({ttl}s remaining)"
+                            )
+                            continue
+                        
+                        available_streams.append(stream)
                 
                 untried_streams = available_streams
                 
